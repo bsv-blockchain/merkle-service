@@ -1,0 +1,285 @@
+# Merkle Service Configuration
+#
+# This file configures all components of the merkle-service. Every value shown
+# below is the built-in default. Override any setting here or via the
+# corresponding environment variable (listed in comments).
+#
+# Priority order: environment variables > this file > built-in defaults.
+#
+# To use a custom file path, set CONFIG_FILE=/path/to/config.yaml
+
+# ---------------------------------------------------------------------------
+# General
+# ---------------------------------------------------------------------------
+
+# Operating mode. "all-in-one" runs every service in a single process.
+# "microservice" is for running individual components via cmd/<service-name>.
+# Env: MODE
+mode: all-in-one
+
+# Log level. Controls minimum severity for all service loggers.
+# Valid values: debug, info, warn, error
+# Env: LOG_LEVEL
+logLevel: info
+
+# ---------------------------------------------------------------------------
+# API Server
+# ---------------------------------------------------------------------------
+api:
+  # HTTP listen port for the /watch and /health endpoints.
+  # Env: API_PORT
+  port: 8080
+
+# ---------------------------------------------------------------------------
+# Store — selects the persistence backend for every non-blob store
+# ---------------------------------------------------------------------------
+# backend: which store implementation to use.
+#   aerospike (default): use the aerospike: block below. Production-recommended.
+#   sql: use the store.sql: block. PostgreSQL and SQLite are supported.
+# Env: STORE_BACKEND
+store:
+  backend: aerospike
+
+  # SQL backend — only read when store.backend == sql.
+  sql:
+    # driver: postgres | sqlite
+    # Env: STORE_SQL_DRIVER
+    driver: postgres
+
+    # DSN (driver-specific connection string).
+    # postgres example: postgres://user:pass@host:5432/merkle?sslmode=disable
+    # sqlite  example: file:/var/lib/merkle.db
+    # Env: STORE_SQL_DSN
+    dsn: ""
+
+    # Optional schema name (postgres only). Empty means default search_path.
+    # Env: STORE_SQL_SCHEMA
+    schema: ""
+
+    # Interval between TTL sweeper passes (Go duration; e.g. 30s, 1m).
+    # Env: STORE_SQL_SWEEPER_INTERVAL
+    sweeperInterval: 60s
+
+    # Connection pool sizing.
+    # Env: STORE_SQL_MAX_OPEN_CONNS, STORE_SQL_MAX_IDLE_CONNS
+    maxOpenConns: 25
+    maxIdleConns: 5
+
+# ---------------------------------------------------------------------------
+# Aerospike — registration store and seen-counter persistence
+# (read only when store.backend == aerospike)
+# ---------------------------------------------------------------------------
+aerospike:
+  # Aerospike cluster seed node.
+  # Env: AEROSPIKE_HOST
+  host: localhost
+
+  # Aerospike client port.
+  # Env: AEROSPIKE_PORT
+  port: 3000
+
+  # Aerospike namespace for all merkle-service data.
+  # Env: AEROSPIKE_NAMESPACE
+  namespace: merkle
+
+  # Aerospike set used to store txid -> callback URL registrations.
+  # Env: AEROSPIKE_SET
+  setName: registrations
+
+  # Aerospike set used for per-txid seen counters (SEEN_MULTIPLE_NODES tracking).
+  # Env: AEROSPIKE_SEEN_SET
+  seenSet: seen_counters
+
+  # Aerospike set used for callback delivery deduplication records.
+  # Env: AEROSPIKE_CALLBACK_DEDUP_SET
+  callbackDedupSet: callback_dedup
+
+  # Aerospike set used for subtree completion counters (BLOCK_PROCESSED coordination).
+  # Env: AEROSPIKE_SUBTREE_COUNTER_SET
+  subtreeCounterSet: subtree_counters
+
+  # TTL in seconds for subtree counter records. Should exceed maximum block processing time.
+  # Env: AEROSPIKE_SUBTREE_COUNTER_TTL_SEC
+  subtreeCounterTTLSec: 600
+
+  # Aerospike set used for cross-subtree callback accumulation (batching MINED messages).
+  # Env: AEROSPIKE_CALLBACK_ACCUMULATOR_SET
+  callbackAccumulatorSet: callback_accum
+
+  # TTL in seconds for callback accumulation records. Should match subtree counter TTL.
+  # Env: AEROSPIKE_CALLBACK_ACCUMULATOR_TTL_SEC
+  callbackAccumulatorTTLSec: 600
+
+  # Maximum number of retries for transient Aerospike errors.
+  # Env: AEROSPIKE_MAX_RETRIES
+  maxRetries: 3
+
+  # Base delay in milliseconds between Aerospike retries (used with backoff).
+  # Env: AEROSPIKE_RETRY_BASE_MS
+  retryBaseMs: 100
+
+# ---------------------------------------------------------------------------
+# Kafka — async messaging between services
+# ---------------------------------------------------------------------------
+kafka:
+  # Comma-separated list of Kafka broker addresses.
+  # Env: KAFKA_BROKERS (comma-separated)
+  brokers:
+    - localhost:9092
+
+  # Topic for subtree messages published by the P2P client.
+  # Env: KAFKA_SUBTREE_TOPIC
+  subtreeTopic: subtree
+
+  # Topic for block messages published by the P2P client.
+  # Env: KAFKA_BLOCK_TOPIC
+  blockTopic: block
+
+  # Topic for callback messages (SEEN_ON_NETWORK, STUMP, BLOCK_PROCESSED, etc.).
+  # Env: KAFKA_CALLBACK_TOPIC
+  callbackTopic: callback
+
+  # Dead-letter queue topic for permanently failed callback deliveries.
+  # Env: KAFKA_CALLBACK_DLQ_TOPIC
+  callbackDlqTopic: callback-dlq
+
+  # Topic for subtree work items dispatched by the block processor for parallel processing.
+  # Env: KAFKA_SUBTREE_WORK_TOPIC
+  subtreeWorkTopic: subtree-work
+
+  # Kafka consumer group ID shared across service instances.
+  # Env: KAFKA_CONSUMER_GROUP
+  consumerGroup: merkle-service
+
+# ---------------------------------------------------------------------------
+# P2P — Teranode network connectivity via go-teranode-p2p-client
+# ---------------------------------------------------------------------------
+p2p:
+  # BSV network to connect to. The go-teranode-p2p-client library automatically
+  # configures topics, bootstrap peers, and protocol version based on this value.
+  # Valid values: main, test, stn, teratestnet
+  # Env: P2P_NETWORK
+  network: teratestnet
+
+  # Directory for persisting the P2P identity key and peer cache.
+  # The library manages key generation and peer persistence automatically.
+  # Env: P2P_STORAGE_PATH
+  storagePath: ~/.merkle-service/p2p
+
+# ---------------------------------------------------------------------------
+# Subtree Processor
+# ---------------------------------------------------------------------------
+subtree:
+  # When to store subtree data in the blob store.
+  #   "realtime" — store immediately when subtree is received from P2P
+  #   "deferred" — store during block processing instead
+  # Env: SUBTREE_STORAGE_MODE
+  storageMode: realtime
+
+  # Delete-at-height offset for subtree blob expiry.
+  # A value of 1 means subtrees are pruned after the next block.
+  # Env: SUBTREE_DAH_OFFSET
+  dahOffset: 1
+
+  # Delete-at-height offset for STUMP blob expiry. STUMP payloads are stored in
+  # the blob store (claim-check pattern) and referenced by Kafka callback
+  # messages. Must outlive the callback retry window
+  # (callback.maxRetries * callback.backoffBaseSec) plus a margin for brief
+  # blob-store outages. Default of 6 blocks (~1 hour) covers the defaults with
+  # generous headroom.
+  # Env: SUBTREE_STUMP_DAH_OFFSET
+  stumpDahOffset: 6
+
+  # Maximum memory (MB) for the registration deduplication cache (txmetacache).
+  # Reduces Aerospike load by caching recently-checked txid registration results.
+  # Env: SUBTREE_CACHE_MAX_MB
+  cacheMaxMB: 64
+
+  # Maximum number of processed subtree hashes to track for message deduplication.
+  # Prevents reprocessing of subtrees already successfully handled.
+  # Env: SUBTREE_DEDUP_CACHE_SIZE
+  dedupCacheSize: 100000
+
+# ---------------------------------------------------------------------------
+# Block Processor
+# ---------------------------------------------------------------------------
+block:
+  # Number of parallel workers for processing subtrees within a block.
+  # Each worker retrieves a subtree, checks registrations, and builds STUMPs.
+  # Env: BLOCK_WORKER_POOL_SIZE
+  workerPoolSize: 16
+
+  # TTL in seconds applied to registration records after their block is processed.
+  # Allows time for fork/orphan handling before Aerospike evicts the record.
+  # Default: 1800 (30 minutes).
+  # Env: BLOCK_POST_MINE_TTL_SEC
+  postMineTTLSec: 1800
+
+  # Maximum number of processed block hashes to track for message deduplication.
+  # Prevents reprocessing of blocks already successfully handled.
+  # Env: BLOCK_DEDUP_CACHE_SIZE
+  dedupCacheSize: 10000
+
+# ---------------------------------------------------------------------------
+# Callback Delivery
+# ---------------------------------------------------------------------------
+callback:
+  # Maximum number of delivery attempts per callback before sending to the DLQ.
+  # Env: CALLBACK_MAX_RETRIES
+  maxRetries: 5
+
+  # Base delay in seconds for linear retry backoff.
+  # Actual delay = backoffBaseSec * retryCount (e.g., 30s, 60s, 90s, ...).
+  # Env: CALLBACK_BACKOFF_BASE_SEC
+  backoffBaseSec: 30
+
+  # HTTP request timeout in seconds for each callback delivery attempt.
+  # Env: CALLBACK_TIMEOUT_SEC
+  timeoutSec: 10
+
+  # Number of unique subtrees a txid must appear in before emitting
+  # a SEEN_MULTIPLE_NODES callback. Tracks network propagation confidence.
+  # Env: CALLBACK_SEEN_THRESHOLD
+  seenThreshold: 3
+
+  # TTL in seconds for callback delivery deduplication records in Aerospike.
+  # After expiry, a very late duplicate could be redelivered. Default: 86400 (24 hours).
+  # Env: CALLBACK_DEDUP_TTL_SEC
+  dedupTTLSec: 86400
+
+  # Number of concurrent worker goroutines for HTTP callback delivery.
+  # Higher values improve throughput for I/O-bound delivery to many endpoints.
+  # Env: CALLBACK_DELIVERY_WORKERS
+  deliveryWorkers: 64
+
+  # Maximum concurrent HTTP connections per callback endpoint.
+  # Env: CALLBACK_MAX_CONNS_PER_HOST
+  maxConnsPerHost: 32
+
+  # Maximum idle HTTP connections kept alive per callback endpoint.
+  # Env: CALLBACK_MAX_IDLE_CONNS_PER_HOST
+  maxIdleConnsPerHost: 16
+
+# ---------------------------------------------------------------------------
+# Blob Store — subtree data storage
+# ---------------------------------------------------------------------------
+blobStore:
+  # Backend URL for subtree blob storage.
+  # Supports file:// (local filesystem) and http:// (remote blob server).
+  # Examples:
+  #   file:///var/lib/merkle-subtrees
+  #   http://blob-server:8080/subtrees
+  # Env: BLOB_STORE_URL
+  url: file:///mnt/nvme/merkle-subtreestore
+
+# ---------------------------------------------------------------------------
+# DataHub — HTTP client for fetching subtree/block data from Teranode
+# ---------------------------------------------------------------------------
+datahub:
+  # HTTP request timeout in seconds for DataHub requests.
+  # Env: DATAHUB_TIMEOUT_SEC
+  timeoutSec: 30
+
+  # Maximum number of retries for failed DataHub requests.
+  # Env: DATAHUB_MAX_RETRIES
+  maxRetries: 3

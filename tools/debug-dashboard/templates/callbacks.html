@@ -1,0 +1,35 @@
+{{define "content"}}
+<div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <div>
+            <h2>Received Callbacks</h2>
+            <p style="font-size:13px; color:#8b949e;">All callbacks received at <code>{{.CallbackURL}}</code></p>
+        </div>
+        {{if .Callbacks}}
+        <form method="POST" action="/callbacks/clear">
+            <button type="submit" class="btn-danger" style="font-size:12px; padding:4px 12px;">Clear All</button>
+        </form>
+        {{end}}
+    </div>
+
+    {{if .Callbacks}}
+    {{range .Callbacks}}
+    <div class="callback-entry {{if eq (index .Body "status") "SEEN_ON_NETWORK"}}seen{{else if eq (index .Body "status") "MINED"}}mined{{else}}multi{{end}}">
+        <div class="callback-meta">
+            {{.Timestamp.Format "2006-01-02 15:04:05.000"}} &mdash;
+            {{if index .Body "status"}}
+                <span class="badge {{if eq (index .Body "status") "SEEN_ON_NETWORK"}}badge-seen{{else if eq (index .Body "status") "MINED"}}badge-mined{{else}}badge-multi{{end}}">{{index .Body "status"}}</span>
+            {{end}}
+            {{if index .Body "txid"}} &mdash; txid: <code>{{index .Body "txid"}}</code>{{end}}
+        </div>
+        <div class="callback-json">{{.RawJSON}}</div>
+    </div>
+    {{end}}
+    {{else}}
+    <div class="empty">
+        <p>No callbacks received yet.</p>
+        <p style="margin-top:8px;">Register a txid and wait for the merkle-service to deliver callbacks.</p>
+    </div>
+    {{end}}
+</div>
+{{end}}

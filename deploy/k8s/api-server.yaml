@@ -1,0 +1,81 @@
+# API Server Deployment + Service
+#
+# Scaling: Stateless HTTP server. Scale replicas based on request volume.
+# Each replica handles /watch (registration) and /health endpoints.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+  namespace: merkle-service
+  labels:
+    app.kubernetes.io/name: api-server
+    app.kubernetes.io/part-of: merkle-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api-server
+        app.kubernetes.io/part-of: merkle-service
+    spec:
+      containers:
+        - name: api-server
+          image: merkle-service:latest
+          command: ["api-server"]
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: merkle-service-env
+                optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: merkle-service-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-server
+  namespace: merkle-service
+  labels:
+    app.kubernetes.io/name: api-server
+    app.kubernetes.io/part-of: merkle-service
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: api-server
+  ports:
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http

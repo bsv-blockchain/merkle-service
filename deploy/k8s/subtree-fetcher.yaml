@@ -1,0 +1,65 @@
+# Subtree Fetcher Deployment
+#
+# Role: Consumes P2P subtree announcements from the `subtree` Kafka topic,
+# fetches binary subtree data from the announcing peer's DataHub endpoint,
+# stores it in the blob store (cache for subtree workers), checks registrations,
+# and emits SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES callbacks.
+#
+# Scaling: Each replica consumes partitions from the `subtree` Kafka topic.
+# Maximum useful replicas = partition count of the subtree topic.
+# Blob store writes are idempotent — two replicas writing the same subtree
+# hash is safe. Subtree workers fall back to DataHub if the blob store entry
+# is absent, so correctness is maintained regardless of replica count.
+#
+# To scale:
+#   kafka-topics.sh --alter --topic subtree --partitions 16 --bootstrap-server kafka:9092
+#   kubectl scale deployment subtree-fetcher -n merkle-service --replicas=16
+#
+# Blob store: The default `file:///data/subtrees` path is local to each pod and
+# NOT shared. For shared pre-caching across pods, configure `blobStore.url` in
+# the configmap with an object store URL (e.g., `s3://bucket/subtrees` or
+# `gs://bucket/subtrees`). Without shared storage the system still works
+# correctly via the DataHub fallback in subtree workers.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: subtree-fetcher
+  namespace: merkle-service
+  labels:
+    app.kubernetes.io/name: subtree-fetcher
+    app.kubernetes.io/part-of: merkle-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: subtree-fetcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: subtree-fetcher
+        app.kubernetes.io/part-of: merkle-service
+    spec:
+      containers:
+        - name: subtree-fetcher
+          image: merkle-service:latest
+          command: ["subtree-fetcher"]
+          envFrom:
+            - configMapRef:
+                name: merkle-service-env
+                optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: merkle-service-config

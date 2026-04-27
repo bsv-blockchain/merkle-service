@@ -1,0 +1,74 @@
+# P2P Client Deployment
+#
+# Scaling: Must run as a singleton (1 replica). The P2P client maintains a
+# persistent connection to the BSV network and publishes subtree/block
+# messages to Kafka. Running multiple replicas would cause duplicate messages.
+# Use a second replica only for failover (with leader election or standby).
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: p2p-data
+  namespace: merkle-service
+  labels:
+    app.kubernetes.io/name: p2p-client
+    app.kubernetes.io/part-of: merkle-service
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p2p-client
+  namespace: merkle-service
+  labels:
+    app.kubernetes.io/name: p2p-client
+    app.kubernetes.io/part-of: merkle-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: p2p-client
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: p2p-client
+        app.kubernetes.io/part-of: merkle-service
+    spec:
+      containers:
+        - name: p2p-client
+          image: merkle-service:latest
+          command: ["p2p-client"]
+          ports:
+            - name: p2p
+              containerPort: 9905
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: merkle-service-env
+                optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: p2p-data
+              mountPath: /data/p2p
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: merkle-service-config
+        - name: p2p-data
+          persistentVolumeClaim:
+            claimName: p2p-data

@@ -1,0 +1,65 @@
+# Callback Delivery Deployment
+#
+# Scaling: Each replica consumes partitions from the stumps Kafka topic.
+# Maximum useful replicas = partition count of the stumps topic. Scale based
+# on callback delivery throughput needs — more replicas = more concurrent
+# HTTP callbacks. The local LRU cache reduces Aerospike reads when multiple
+# workers resolve the same StumpRef.
+#
+# IMPORTANT: Ensure the stumps topic has at least as many partitions as
+# desired replicas. With N partitions, only N replicas will be active.
+# Extra replicas sit idle as standby.
+#
+# Messages are hash-partitioned by callback URL, so each delivery pod
+# handles a consistent subset of callback endpoints, enabling efficient
+# HTTP connection reuse.
+#
+# The delivery service supports batched StumpsMessages with multiple
+# StumpRefs (from cross-subtree accumulation). It resolves all referenced
+# STUMPs from the Aerospike cache before HTTP delivery.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: callback-delivery
+  namespace: merkle-service
+  labels:
+    app.kubernetes.io/name: callback-delivery
+    app.kubernetes.io/part-of: merkle-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: callback-delivery
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: callback-delivery
+        app.kubernetes.io/part-of: merkle-service
+    spec:
+      containers:
+        - name: callback-delivery
+          image: merkle-service:latest
+          command: ["callback-delivery"]
+          envFrom:
+            - configMapRef:
+                name: merkle-service-env
+                optional: true
+          env:
+            - name: CALLBACK_STUMP_CACHE_MODE
+              value: "aerospike"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: merkle-service-config

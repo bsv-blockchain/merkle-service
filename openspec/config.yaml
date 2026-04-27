@@ -1,0 +1,21 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Go (matching Teranode patterns), Aerospike (key-value + CDT operations), Kafka (async messaging), libp2p (P2P networking)
+  Domain: BSV blockchain infrastructure — Merkle Service bridges Teranode (block-producing node) and Arcade (transaction broadcast client) to deliver merkle proofs (STUMPs) for mined transactions
+  Follows Teranode daemon/service pattern: Init/Start/Stop/Health lifecycle, microservice-first but all-in-one capable
+  Scale target: blocks with millions of transactions, subtrees with thousands of transactions
+  Key protocols: BRC-0074 (BUMP/STUMP format), libp2p pub/sub for subtree/block topics
+
+rules:
+  specs:
+    - Each capability spec must trace requirements back to requirements.md
+    - Use WHEN/THEN scenario format for behavioral requirements
+    - Specs define behavior, not deployment boundaries
+  design:
+    - Reference Teranode patterns for daemon lifecycle, batched Aerospike, libp2p
+    - Include rationale and trade-offs for each architectural decision
+  tasks:
+    - Target ~50 tasks in 10 groups covering full system build
+    - Order tasks by dependency (scaffolding first, e2e tests last)
+    - Each task should be completable in a single session

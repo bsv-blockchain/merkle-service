@@ -1,0 +1,76 @@
+{{define "content"}}
+<div class="stats">
+    <div class="stat">
+        <div class="stat-value">{{.TxidCount}}</div>
+        <div class="stat-label">Tracked Txids</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{.CallbackCount}}</div>
+        <div class="stat-label">Received Callbacks</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Register Transaction</h2>
+    <p style="font-size:13px; color:#8b949e; margin-bottom:12px;">Register a txid with the merkle-service. Callbacks will be sent to this dashboard.</p>
+    <form method="POST" action="/register">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Transaction ID (64 hex characters)</label>
+                <input type="text" name="txid" placeholder="e.g. a1b2c3d4e5f6..." maxlength="64" pattern="[a-fA-F0-9]{64}" required>
+            </div>
+            <button type="submit">Register</button>
+        </div>
+        <div class="form-group" style="margin-top:8px;">
+            <label>Callback URL</label>
+            <input type="text" name="callbackUrl" value="{{.CallbackURL}}" placeholder="http://localhost:9900/callbacks/receive">
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Lookup Transaction</h2>
+    <p style="font-size:13px; color:#8b949e; margin-bottom:12px;">Look up a txid in Aerospike to see its registered callback URLs.</p>
+    <form method="POST" action="/lookup">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Transaction ID</label>
+                <input type="text" name="txid" placeholder="Enter txid to look up..." value="{{if .LookupTxid}}{{.LookupTxid}}{{end}}">
+            </div>
+            <button type="submit" class="btn-secondary">Lookup</button>
+        </div>
+    </form>
+    {{if .LookupTxid}}
+    <div style="margin-top:12px; padding:12px; background:#0d1117; border-radius:6px;">
+        <h3>Results for {{.LookupTxid}}</h3>
+        {{if .LookupErr}}
+            <p style="color:#f85149; font-size:13px;">{{.LookupErr}}</p>
+        {{else}}
+            <ul style="list-style:none; margin-top:8px;">
+            {{range .LookupURLs}}
+                <li style="font-family:monospace; font-size:13px; padding:4px 0;">{{.}}</li>
+            {{end}}
+            </ul>
+        {{end}}
+    </div>
+    {{end}}
+</div>
+
+{{if .RecentCallbacks}}
+<div class="card">
+    <h2>Recent Callbacks</h2>
+    {{range .RecentCallbacks}}
+    <div class="callback-entry {{if eq (index .Body "status") "SEEN_ON_NETWORK"}}seen{{else if eq (index .Body "status") "MINED"}}mined{{else}}multi{{end}}">
+        <div class="callback-meta">
+            {{.Timestamp.Format "15:04:05"}} &mdash;
+            {{if index .Body "status"}}
+                <span class="badge {{if eq (index .Body "status") "SEEN_ON_NETWORK"}}badge-seen{{else if eq (index .Body "status") "MINED"}}badge-mined{{else}}badge-multi{{end}}">{{index .Body "status"}}</span>
+            {{end}}
+            {{if index .Body "txid"}} txid: {{index .Body "txid"}}{{end}}
+        </div>
+    </div>
+    {{end}}
+    <a href="/callbacks" style="font-size:13px;">View all callbacks &rarr;</a>
+</div>
+{{end}}
+{{end}}

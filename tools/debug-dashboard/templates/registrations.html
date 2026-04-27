@@ -1,0 +1,36 @@
+{{define "content"}}
+<div class="card">
+    <h2>Tracked Registrations</h2>
+    <p style="font-size:13px; color:#8b949e; margin-bottom:16px;">Txids registered through this dashboard or looked up manually. Callback URLs are refreshed from Aerospike on page load.</p>
+    {{if .Txids}}
+    <table>
+        <thead>
+            <tr>
+                <th>Transaction ID</th>
+                <th>Callback URLs</th>
+                <th>Registered</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Txids}}
+            <tr>
+                <td>{{.Txid}}</td>
+                <td>
+                    {{range .CallbackURLs}}
+                        <div>{{.}}</div>
+                    {{end}}
+                    {{if not .CallbackURLs}}<span style="color:#8b949e;">none</span>{{end}}
+                </td>
+                <td style="white-space:nowrap; color:#8b949e;">{{.RegisteredAt.Format "2006-01-02 15:04:05"}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <div class="empty">
+        <p>No tracked registrations yet.</p>
+        <p style="margin-top:8px;"><a href="/">Register a txid</a> to get started.</p>
+    </div>
+    {{end}}
+</div>
+{{end}}

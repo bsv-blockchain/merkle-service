@@ -1,0 +1,51 @@
+# Block Processor Deployment
+#
+# Scaling: Limited by Kafka block topic partitions. Typically 1 replica is
+# sufficient since blocks arrive sequentially (~1 per 10 minutes). Scale to
+# 2-3 replicas for redundancy; additional replicas idle until rebalance.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: block-processor
+  namespace: merkle-service
+  labels:
+    app.kubernetes.io/name: block-processor
+    app.kubernetes.io/part-of: merkle-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: block-processor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: block-processor
+        app.kubernetes.io/part-of: merkle-service
+    spec:
+      containers:
+        - name: block-processor
+          image: merkle-service:latest
+          command: ["block-processor"]
+          envFrom:
+            - configMapRef:
+                name: merkle-service-env
+                optional: true
+          env:
+            - name: CALLBACK_STUMP_CACHE_MODE
+              value: "aerospike"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: merkle-service-config

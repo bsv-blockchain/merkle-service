@@ -1,0 +1,735 @@
+{{define "content"}}
+<div class="card">
+    <h2>STUMP / BUMP Visualizer</h2>
+    <div class="form-group">
+        <label for="stump-input">STUMP or BUMP data (base64 or hex encoded, BRC-0074 format)</label>
+        <textarea id="stump-input" rows="4" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:8px 12px;border-radius:6px;font-size:13px;font-family:monospace;width:100%;resize:vertical;" placeholder="Paste base64 or hex-encoded STUMP/BUMP data here..."></textarea>
+    </div>
+    <div class="form-group" style="margin-top:8px;">
+        <label for="merkle-root-input">Merkle root (optional, hex — for verification)</label>
+        <input type="text" id="merkle-root-input" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:8px 12px;border-radius:6px;font-size:13px;font-family:monospace;width:100%;" placeholder="Paste expected merkle root hash to verify validity...">
+    </div>
+    <button id="decode-btn" onclick="decodeAndRender()">Decode &amp; Visualize</button>
+    <button class="btn-secondary" onclick="loadExample()" style="margin-left:8px;">Load Example</button>
+</div>
+
+<div id="error-box" class="flash flash-error" style="display:none;"></div>
+
+<div id="verify-result" style="display:none;padding:12px 16px;border-radius:6px;margin-bottom:16px;font-size:13px;font-family:monospace;"></div>
+
+<div id="metadata-panel" class="card" style="display:none;">
+    <h2>Metadata</h2>
+    <div class="stats" id="meta-stats"></div>
+    <div id="meta-levels"></div>
+</div>
+
+<div id="legend" class="card" style="display:none;">
+    <div style="display:flex;gap:20px;align-items:center;font-size:13px;">
+        <span><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#3fb950;margin-right:4px;vertical-align:middle;"></span> Registered TxID (0x02)</span>
+        <span><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#58a6ff;margin-right:4px;vertical-align:middle;"></span> Sibling Hash (0x00)</span>
+        <span><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#484f58;margin-right:4px;vertical-align:middle;"></span> Duplicate (0x01)</span>
+        <span><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#30363d;border:1px solid #484f58;margin-right:4px;vertical-align:middle;"></span> Implied (not in STUMP)</span>
+    </div>
+</div>
+
+<div id="tree-container" style="overflow-x:auto;margin-bottom:16px;"></div>
+
+<div id="detail-panel" class="card" style="display:none;">
+    <h2>Node Details</h2>
+    <table>
+        <tr><th style="width:100px;">Level</th><td id="detail-level"></td></tr>
+        <tr><th>Offset</th><td id="detail-offset"></td></tr>
+        <tr><th>Type</th><td id="detail-type"></td></tr>
+        <tr><th>Hash</th><td id="detail-hash" style="word-break:break-all;"></td></tr>
+    </table>
+</div>
+
+<div id="tooltip" style="display:none;position:fixed;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:8px 12px;font-size:12px;font-family:monospace;color:#c9d1d9;pointer-events:none;z-index:1000;max-width:500px;word-break:break-all;"></div>
+
+<script>
+// ============================================================
+// BRC-0074 BUMP Decoder (client-side)
+// ============================================================
+
+function decodeInput(str) {
+    str = str.trim();
+    if (!str) throw new Error('Input is empty');
+    // Auto-detect: if it looks like pure hex (only 0-9a-fA-F, even length), decode as hex
+    if (/^[0-9a-fA-F]+$/.test(str) && str.length % 2 === 0) {
+        var arr = new Uint8Array(str.length / 2);
+        for (var i = 0; i < str.length; i += 2) {
+            arr[i / 2] = parseInt(str.substring(i, i + 2), 16);
+        }
+        return arr;
+    }
+    // Otherwise treat as base64
+    try {
+        var bin = atob(str);
+        var arr = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        return arr;
+    } catch (e) {
+        throw new Error('Invalid input: not valid hex or base64 (' + e.message + ')');
+    }
+}
+
+function readCompactSize(data, offset) {
+    if (offset >= data.length) throw new Error('Unexpected end of data at byte ' + offset);
+    var first = data[offset];
+    if (first < 253) return { value: first, bytesRead: 1 };
+    if (first === 0xFD) {
+        if (offset + 3 > data.length) throw new Error('Unexpected end of data at byte ' + offset + ' (expected 2 more bytes for 0xFD CompactSize)');
+        return { value: data[offset+1] | (data[offset+2] << 8), bytesRead: 3 };
+    }
+    if (first === 0xFE) {
+        if (offset + 5 > data.length) throw new Error('Unexpected end of data at byte ' + offset + ' (expected 4 more bytes for 0xFE CompactSize)');
+        return { value: (data[offset+1] | (data[offset+2] << 8) | (data[offset+3] << 16) | (data[offset+4] << 24)) >>> 0, bytesRead: 5 };
+    }
+    // 0xFF — 8-byte LE (JS safe up to 2^53)
+    if (offset + 9 > data.length) throw new Error('Unexpected end of data at byte ' + offset + ' (expected 8 more bytes for 0xFF CompactSize)');
+    var lo = (data[offset+1] | (data[offset+2] << 8) | (data[offset+3] << 16) | (data[offset+4] << 24)) >>> 0;
+    var hi = (data[offset+5] | (data[offset+6] << 8) | (data[offset+7] << 16) | (data[offset+8] << 24)) >>> 0;
+    return { value: hi * 0x100000000 + lo, bytesRead: 9 };
+}
+
+function readHash(data, offset) {
+    if (offset + 32 > data.length) throw new Error('Unexpected end of data at byte ' + offset + ' (expected 32 bytes for hash)');
+    var hex = '';
+    for (var i = 0; i < 32; i++) {
+        var b = data[offset + i];
+        hex += (b < 16 ? '0' : '') + b.toString(16);
+    }
+    return { hash: hex, bytesRead: 32 };
+}
+
+function decodeBUMP(uint8Array) {
+    var pos = 0;
+
+    // Block height
+    var r = readCompactSize(uint8Array, pos);
+    var blockHeight = r.value; pos += r.bytesRead;
+
+    // Tree height
+    if (pos >= uint8Array.length) throw new Error('Unexpected end of data at byte ' + pos + ' (expected tree height)');
+    var treeHeight = uint8Array[pos]; pos++;
+
+    var levels = [];
+    for (var lvl = 0; lvl < treeHeight; lvl++) {
+        r = readCompactSize(uint8Array, pos);
+        var nLeaves = r.value; pos += r.bytesRead;
+
+        var leaves = [];
+        for (var j = 0; j < nLeaves; j++) {
+            r = readCompactSize(uint8Array, pos);
+            var offset = r.value; pos += r.bytesRead;
+
+            if (pos >= uint8Array.length) throw new Error('Unexpected end of data at byte ' + pos + ' (expected flag at level ' + lvl + ')');
+            var flag = uint8Array[pos]; pos++;
+
+            if (flag !== 0x00 && flag !== 0x01 && flag !== 0x02) {
+                throw new Error('Invalid flag 0x' + flag.toString(16) + ' at byte ' + (pos-1) + ' (level ' + lvl + ', leaf ' + j + ')');
+            }
+
+            var hash = null;
+            if (flag !== 0x01) {
+                var hr = readHash(uint8Array, pos);
+                hash = hr.hash; pos += hr.bytesRead;
+            }
+
+            leaves.push({ offset: offset, flag: flag, hash: hash });
+        }
+        levels.push({ levelIndex: lvl, leaves: leaves });
+    }
+
+    return { blockHeight: blockHeight, treeHeight: treeHeight, levels: levels };
+}
+
+// ============================================================
+// Tree Layout & Rendering
+// ============================================================
+
+var currentBUMP = null;
+var selectedTxidOffset = null;
+var nodeElements = {};  // key: "level-offset" → SVG element
+var lineElements = {};  // key: "level-offset" → SVG line to parent
+
+function flagName(flag) {
+    if (flag === 0x02) return 'txid';
+    if (flag === 0x01) return 'duplicate';
+    return 'hash';
+}
+
+function flagColor(flag) {
+    if (flag === 0x02) return '#3fb950';
+    if (flag === 0x01) return '#484f58';
+    return '#58a6ff';
+}
+
+function computeTreeLayout(bump) {
+    var nodeSpacingX = 80;
+    var nodeSpacingY = 90;
+    var nodeRadius = 16;
+    var padLeft = 60;  // space for level labels
+    var padTop = 40;
+    var padBottom = 40;
+
+    // Find max offset at any level to size the SVG
+    var maxOffset = 0;
+    for (var i = 0; i < bump.levels.length; i++) {
+        for (var j = 0; j < bump.levels[i].leaves.length; j++) {
+            if (bump.levels[i].leaves[j].offset > maxOffset) {
+                maxOffset = bump.levels[i].leaves[j].offset;
+            }
+        }
+    }
+
+    // At level 0 the maximum possible offset could be up to 2^treeHeight - 1
+    var maxPossibleLeaves = Math.pow(2, bump.treeHeight);
+    if (maxOffset < maxPossibleLeaves - 1) {
+        maxOffset = maxPossibleLeaves - 1;
+    }
+
+    var width = padLeft + (maxOffset + 1) * nodeSpacingX + 40;
+    var height = padTop + bump.treeHeight * nodeSpacingY + padBottom;
+
+    var nodes = [];
+    var nodeMap = {}; // "level-offset" → node
+
+    for (var i = 0; i < bump.levels.length; i++) {
+        var lvl = bump.levels[i];
+        for (var j = 0; j < lvl.leaves.length; j++) {
+            var leaf = lvl.leaves[j];
+            var x = padLeft + leaf.offset * nodeSpacingX + nodeSpacingX / 2;
+            var y = padTop + (bump.treeHeight - 1 - lvl.levelIndex) * nodeSpacingY + nodeSpacingY / 2;
+            var node = {
+                x: x, y: y,
+                level: lvl.levelIndex,
+                offset: leaf.offset,
+                flag: leaf.flag,
+                hash: leaf.hash,
+                radius: nodeRadius
+            };
+            nodes.push(node);
+            nodeMap[lvl.levelIndex + '-' + leaf.offset] = node;
+        }
+    }
+
+    // Compute lines from each node to its parent
+    var lines = [];
+    for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (n.level >= bump.treeHeight - 1) continue;
+        var parentOffset = Math.floor(n.offset / 2);
+        var parentKey = (n.level + 1) + '-' + parentOffset;
+        var parent = nodeMap[parentKey];
+        if (parent) {
+            lines.push({
+                x1: n.x, y1: n.y,
+                x2: parent.x, y2: parent.y,
+                childLevel: n.level, childOffset: n.offset
+            });
+        }
+    }
+
+    return { nodes: nodes, lines: lines, width: width, height: height, nodeMap: nodeMap,
+             padLeft: padLeft, padTop: padTop, nodeSpacingY: nodeSpacingY, treeHeight: bump.treeHeight };
+}
+
+function renderTree(bump, layout) {
+    var container = document.getElementById('tree-container');
+    container.innerHTML = '';
+    nodeElements = {};
+    lineElements = {};
+
+    var svgNS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('width', layout.width);
+    svg.setAttribute('height', layout.height);
+    svg.style.background = '#0d1117';
+    svg.style.borderRadius = '6px';
+    svg.style.border = '1px solid #30363d';
+
+    // Glow filter for proof path highlighting
+    var defs = document.createElementNS(svgNS, 'defs');
+    var filter = document.createElementNS(svgNS, 'filter');
+    filter.setAttribute('id', 'glow');
+    filter.setAttribute('x', '-50%'); filter.setAttribute('y', '-50%');
+    filter.setAttribute('width', '200%'); filter.setAttribute('height', '200%');
+    var feGauss = document.createElementNS(svgNS, 'feGaussianBlur');
+    feGauss.setAttribute('stdDeviation', '3');
+    feGauss.setAttribute('result', 'glow');
+    filter.appendChild(feGauss);
+    var feMerge = document.createElementNS(svgNS, 'feMerge');
+    var mn1 = document.createElementNS(svgNS, 'feMergeNode');
+    mn1.setAttribute('in', 'glow');
+    feMerge.appendChild(mn1);
+    var mn2 = document.createElementNS(svgNS, 'feMergeNode');
+    mn2.setAttribute('in', 'SourceGraphic');
+    feMerge.appendChild(mn2);
+    filter.appendChild(feMerge);
+    defs.appendChild(filter);
+    svg.appendChild(defs);
+
+    // Level labels
+    for (var lvl = 0; lvl < layout.treeHeight; lvl++) {
+        var label = document.createElementNS(svgNS, 'text');
+        var ly = layout.padTop + (layout.treeHeight - 1 - lvl) * layout.nodeSpacingY + layout.nodeSpacingY / 2;
+        label.setAttribute('x', 12);
+        label.setAttribute('y', ly + 4);
+        label.setAttribute('fill', '#8b949e');
+        label.setAttribute('font-size', '11');
+        label.setAttribute('font-family', 'monospace');
+        label.textContent = 'L' + lvl;
+        svg.appendChild(label);
+    }
+
+    // Lines (drawn first so nodes appear on top)
+    for (var i = 0; i < layout.lines.length; i++) {
+        var l = layout.lines[i];
+        var line = document.createElementNS(svgNS, 'line');
+        line.setAttribute('x1', l.x1); line.setAttribute('y1', l.y1);
+        line.setAttribute('x2', l.x2); line.setAttribute('y2', l.y2);
+        line.setAttribute('stroke', '#30363d');
+        line.setAttribute('stroke-width', '1.5');
+        line.setAttribute('data-child-level', l.childLevel);
+        line.setAttribute('data-child-offset', l.childOffset);
+        svg.appendChild(line);
+        lineElements[l.childLevel + '-' + l.childOffset] = line;
+    }
+
+    // Nodes
+    for (var i = 0; i < layout.nodes.length; i++) {
+        var n = layout.nodes[i];
+        var g = document.createElementNS(svgNS, 'g');
+        g.style.cursor = 'pointer';
+        g.setAttribute('data-level', n.level);
+        g.setAttribute('data-offset', n.offset);
+        g.setAttribute('data-flag', n.flag);
+        g.setAttribute('data-hash', n.hash || '');
+
+        var circle = document.createElementNS(svgNS, 'circle');
+        circle.setAttribute('cx', n.x);
+        circle.setAttribute('cy', n.y);
+        circle.setAttribute('r', n.radius);
+        circle.setAttribute('fill', flagColor(n.flag));
+        circle.setAttribute('stroke', 'none');
+        circle.setAttribute('stroke-width', '2');
+        g.appendChild(circle);
+
+        // Hash label (first 8 chars)
+        var text = document.createElementNS(svgNS, 'text');
+        text.setAttribute('x', n.x);
+        text.setAttribute('y', n.y + n.radius + 14);
+        text.setAttribute('text-anchor', 'middle');
+        text.setAttribute('fill', '#8b949e');
+        text.setAttribute('font-size', '10');
+        text.setAttribute('font-family', 'monospace');
+        text.textContent = n.hash ? n.hash.substring(0, 8) : 'dup';
+        g.appendChild(text);
+
+        // Event handlers
+        (function(node, group) {
+            group.addEventListener('mouseover', function(e) { showTooltip(e, node); });
+            group.addEventListener('mousemove', function(e) { moveTooltip(e); });
+            group.addEventListener('mouseout', function() { hideTooltip(); });
+            group.addEventListener('click', function() { onNodeClick(node); });
+        })(n, g);
+
+        svg.appendChild(g);
+        nodeElements[n.level + '-' + n.offset] = g;
+    }
+
+    container.appendChild(svg);
+}
+
+// ============================================================
+// Tooltip
+// ============================================================
+
+function showTooltip(e, node) {
+    var tip = document.getElementById('tooltip');
+    tip.innerHTML = '<strong>Level:</strong> ' + node.level +
+        ' &nbsp; <strong>Offset:</strong> ' + node.offset +
+        ' &nbsp; <strong>Type:</strong> ' + flagName(node.flag) +
+        '<br><strong>Hash:</strong> ' + (node.hash || '(duplicate of working hash)');
+    tip.style.display = 'block';
+    moveTooltip(e);
+}
+
+function moveTooltip(e) {
+    var tip = document.getElementById('tooltip');
+    tip.style.left = (e.clientX + 12) + 'px';
+    tip.style.top = (e.clientY + 12) + 'px';
+}
+
+function hideTooltip() {
+    document.getElementById('tooltip').style.display = 'none';
+}
+
+// ============================================================
+// Node Click / Detail Panel / Proof Path
+// ============================================================
+
+function onNodeClick(node) {
+    // Show detail panel
+    document.getElementById('detail-panel').style.display = '';
+    document.getElementById('detail-level').textContent = node.level;
+    document.getElementById('detail-offset').textContent = node.offset;
+    document.getElementById('detail-type').textContent = flagName(node.flag) + (node.flag === 0x02 ? ' (registered transaction)' : '');
+    document.getElementById('detail-hash').textContent = node.hash || '(duplicate — uses working hash)';
+
+    // Proof path logic
+    if (node.flag === 0x02 && node.level === 0) {
+        if (selectedTxidOffset === node.offset) {
+            // Deselect
+            clearProofHighlight();
+            selectedTxidOffset = null;
+            return;
+        }
+        clearProofHighlight();
+        selectedTxidOffset = node.offset;
+        highlightProofPath(node.offset);
+    } else {
+        clearProofHighlight();
+        selectedTxidOffset = null;
+    }
+}
+
+function highlightProofPath(leafOffset) {
+    if (!currentBUMP) return;
+    var offset = leafOffset;
+
+    for (var lvl = 0; lvl < currentBUMP.treeHeight; lvl++) {
+        var siblingOffset = offset ^ 1;
+
+        // Highlight the node itself (at level 0 it's the txid)
+        highlightNode(lvl, offset);
+        // Highlight sibling
+        highlightNode(lvl, siblingOffset);
+        // Highlight line from this node to parent
+        highlightLine(lvl, offset);
+        highlightLine(lvl, siblingOffset);
+
+        offset = Math.floor(offset / 2);
+    }
+}
+
+function highlightNode(level, offset) {
+    var key = level + '-' + offset;
+    var g = nodeElements[key];
+    if (!g) return;
+    var circle = g.querySelector('circle');
+    if (circle) {
+        circle.setAttribute('stroke', '#f0f6fc');
+        circle.setAttribute('stroke-width', '3');
+        circle.setAttribute('filter', 'url(#glow)');
+    }
+}
+
+function highlightLine(level, offset) {
+    var key = level + '-' + offset;
+    var line = lineElements[key];
+    if (line) {
+        line.setAttribute('stroke', '#f0f6fc');
+        line.setAttribute('stroke-width', '2.5');
+    }
+}
+
+function clearProofHighlight() {
+    for (var key in nodeElements) {
+        var circle = nodeElements[key].querySelector('circle');
+        if (circle) {
+            circle.setAttribute('stroke', 'none');
+            circle.setAttribute('stroke-width', '2');
+            circle.removeAttribute('filter');
+        }
+    }
+    for (var key in lineElements) {
+        lineElements[key].setAttribute('stroke', '#30363d');
+        lineElements[key].setAttribute('stroke-width', '1.5');
+    }
+}
+
+// ============================================================
+// Metadata Display
+// ============================================================
+
+function showMetadata(bump) {
+    var panel = document.getElementById('metadata-panel');
+    panel.style.display = '';
+
+    var totalNodes = 0;
+    for (var i = 0; i < bump.levels.length; i++) totalNodes += bump.levels[i].leaves.length;
+
+    var formatName = hasTxids(bump) ? 'STUMP' : 'BUMP';
+    var statsHTML = '<div class="stat"><div class="stat-value">' + formatName + '</div><div class="stat-label">Format</div></div>' +
+        '<div class="stat"><div class="stat-value">' + bump.blockHeight + '</div><div class="stat-label">Block Height</div></div>' +
+        '<div class="stat"><div class="stat-value">' + bump.treeHeight + '</div><div class="stat-label">Tree Height</div></div>' +
+        '<div class="stat"><div class="stat-value">' + totalNodes + '</div><div class="stat-label">Total Nodes</div></div>';
+    document.getElementById('meta-stats').innerHTML = statsHTML;
+
+    var levelsHTML = '<table><tr><th>Level</th><th>Nodes</th><th>TxIDs</th><th>Hashes</th><th>Duplicates</th></tr>';
+    for (var i = 0; i < bump.levels.length; i++) {
+        var lvl = bump.levels[i];
+        var txids = 0, hashes = 0, dups = 0;
+        for (var j = 0; j < lvl.leaves.length; j++) {
+            if (lvl.leaves[j].flag === 0x02) txids++;
+            else if (lvl.leaves[j].flag === 0x01) dups++;
+            else hashes++;
+        }
+        levelsHTML += '<tr><td>Level ' + lvl.levelIndex + '</td><td>' + lvl.leaves.length + '</td>' +
+            '<td><span class="badge" style="background:#0d2818;color:#3fb950;border:1px solid #238636;">' + txids + '</span></td>' +
+            '<td><span class="badge" style="background:#0d1f3c;color:#58a6ff;border:1px solid #1f6feb;">' + hashes + '</span></td>' +
+            '<td><span class="badge" style="background:#21262d;color:#8b949e;border:1px solid #30363d;">' + dups + '</span></td></tr>';
+    }
+    levelsHTML += '</table>';
+    document.getElementById('meta-levels').innerHTML = levelsHTML;
+}
+
+// ============================================================
+// Merkle Root Verification
+// ============================================================
+
+function hexToBytes(hex) {
+    var bytes = new Uint8Array(hex.length / 2);
+    for (var i = 0; i < hex.length; i += 2) {
+        bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+    }
+    return bytes;
+}
+
+function bytesToHex(bytes) {
+    var hex = '';
+    for (var i = 0; i < bytes.length; i++) {
+        hex += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+    }
+    return hex;
+}
+
+function reverseHex(hex) {
+    var bytes = hexToBytes(hex);
+    var reversed = new Uint8Array(bytes.length);
+    for (var i = 0; i < bytes.length; i++) reversed[i] = bytes[bytes.length - 1 - i];
+    return bytesToHex(reversed);
+}
+
+async function sha256d(data) {
+    var first = await crypto.subtle.digest('SHA-256', data);
+    var second = await crypto.subtle.digest('SHA-256', first);
+    return new Uint8Array(second);
+}
+
+// Detect if a BUMP has any embedded txids (0x02 flags).
+function hasTxids(bump) {
+    for (var i = 0; i < bump.levels.length; i++) {
+        for (var j = 0; j < bump.levels[i].leaves.length; j++) {
+            if (bump.levels[i].leaves[j].flag === 0x02) return true;
+        }
+    }
+    return false;
+}
+
+async function computeMerkleRoot(bump) {
+    // Build hash map per level from STUMP data.
+    var hashByLevel = {};
+    for (var i = 0; i < bump.levels.length; i++) {
+        var lvl = bump.levels[i];
+        if (!hashByLevel[lvl.levelIndex]) hashByLevel[lvl.levelIndex] = {};
+        for (var j = 0; j < lvl.leaves.length; j++) {
+            var leaf = lvl.leaves[j];
+            hashByLevel[lvl.levelIndex][leaf.offset] = { flag: leaf.flag, hash: leaf.hash };
+        }
+    }
+
+    // Computed hashes from lower levels (overridden by provided hashes).
+    var computed = {}; // level -> offset -> hex hash
+
+    for (var lvl = 0; lvl < bump.treeHeight; lvl++) {
+        var levelData = hashByLevel[lvl] || {};
+        if (!computed[lvl]) computed[lvl] = {};
+
+        // Merge provided hashes into computed (provided takes precedence for non-dup).
+        for (var off in levelData) {
+            var entry = levelData[off];
+            if (entry.flag === 0x01) {
+                // Duplicate: use sibling's hash.
+                var sibOff = parseInt(off) ^ 1;
+                var sibHash = (levelData[sibOff] && levelData[sibOff].hash) || computed[lvl][sibOff];
+                if (sibHash) computed[lvl][off] = sibHash;
+            } else if (entry.hash) {
+                computed[lvl][off] = entry.hash;
+            }
+        }
+
+        // Compute parent hashes for the next level.
+        if (!computed[lvl + 1]) computed[lvl + 1] = {};
+        var processedPairs = {};
+        // Gather all offsets at this level.
+        var allOffsets = {};
+        for (var k in levelData) allOffsets[k] = true;
+        for (var k in computed[lvl]) allOffsets[k] = true;
+
+        for (var k in allOffsets) {
+            var o = parseInt(k);
+            var pairBase = o - (o % 2);
+            if (processedPairs[pairBase]) continue;
+            processedPairs[pairBase] = true;
+
+            var leftOff = pairBase;
+            var rightOff = pairBase + 1;
+            var leftHash = computed[lvl][leftOff];
+            var rightHash = computed[lvl][rightOff];
+
+            if (!leftHash || !rightHash) continue;
+
+            var parentOff = Math.floor(pairBase / 2);
+            // Only compute if not already provided at the parent level.
+            if (hashByLevel[lvl + 1] && hashByLevel[lvl + 1][parentOff] && hashByLevel[lvl + 1][parentOff].hash) continue;
+
+            var concat = new Uint8Array(64);
+            concat.set(hexToBytes(leftHash), 0);
+            concat.set(hexToBytes(rightHash), 32);
+            var parentHash = await sha256d(concat);
+            computed[lvl + 1][parentOff] = bytesToHex(parentHash);
+        }
+    }
+
+    // Root is computed one level above the highest provided data.
+    // Walk upward to find the single hash at offset 0.
+    for (var lvl = bump.treeHeight; lvl >= 0; lvl--) {
+        if (computed[lvl] && computed[lvl][0]) return computed[lvl][0];
+    }
+    return null;
+}
+
+async function verifyMerkleRoot(bump) {
+    var resultBox = document.getElementById('verify-result');
+    var rootInput = document.getElementById('merkle-root-input').value.trim();
+    resultBox.style.display = 'none';
+
+    if (!rootInput) return;
+
+    var formatName = hasTxids(bump) ? 'STUMP' : 'BUMP';
+
+    if (!hasTxids(bump)) {
+        resultBox.style.display = '';
+        resultBox.style.background = '#1c0e0e';
+        resultBox.style.border = '1px solid #da3633';
+        resultBox.style.color = '#f85149';
+        resultBox.innerHTML = '<strong>Verification failed:</strong> No embedded txids (0x02 flags) found in ' + formatName + ' data. ' +
+            'A valid BRC-0074 BUMP must include at least one txid entry at level 0.';
+        return;
+    }
+
+    try {
+        var computedRoot = await computeMerkleRoot(bump);
+
+        if (!computedRoot) {
+            resultBox.style.display = '';
+            resultBox.style.background = '#1c0e0e';
+            resultBox.style.border = '1px solid #da3633';
+            resultBox.style.color = '#f85149';
+            resultBox.innerHTML = '<strong>Verification failed:</strong> Could not compute merkle root from ' + formatName + ' data.';
+            return;
+        }
+
+        // Compare in both byte orders (internal and display/reversed).
+        var inputLower = rootInput.toLowerCase();
+        var reversedRoot = reverseHex(computedRoot);
+        var match = (inputLower === computedRoot || inputLower === reversedRoot);
+
+        resultBox.style.display = '';
+        if (match) {
+            resultBox.style.background = '#0d2818';
+            resultBox.style.border = '1px solid #238636';
+            resultBox.style.color = '#3fb950';
+            resultBox.innerHTML = '<strong>&#10003; Valid ' + formatName + '</strong> &mdash; Computed merkle root matches the provided root.' +
+                '<br>Computed root: ' + computedRoot +
+                (inputLower === reversedRoot && inputLower !== computedRoot ? ' (matched in display byte order)' : '');
+        } else {
+            resultBox.style.background = '#1c0e0e';
+            resultBox.style.border = '1px solid #da3633';
+            resultBox.style.color = '#f85149';
+            resultBox.innerHTML = '<strong>&#10007; Invalid ' + formatName + '</strong> &mdash; Computed merkle root does not match.' +
+                '<br>Expected: ' + rootInput +
+                '<br>Computed: ' + computedRoot +
+                '<br>Computed (display order): ' + reversedRoot;
+        }
+    } catch (e) {
+        resultBox.style.display = '';
+        resultBox.style.background = '#1c0e0e';
+        resultBox.style.border = '1px solid #da3633';
+        resultBox.style.color = '#f85149';
+        resultBox.innerHTML = '<strong>Verification error:</strong> ' + e.message;
+    }
+}
+
+// ============================================================
+// Decode & Render Entry Point
+// ============================================================
+
+function decodeAndRender() {
+    var input = document.getElementById('stump-input').value;
+    var errorBox = document.getElementById('error-box');
+    errorBox.style.display = 'none';
+    document.getElementById('verify-result').style.display = 'none';
+    document.getElementById('metadata-panel').style.display = 'none';
+    document.getElementById('legend').style.display = 'none';
+    document.getElementById('detail-panel').style.display = 'none';
+    document.getElementById('tree-container').innerHTML = '';
+    currentBUMP = null;
+    selectedTxidOffset = null;
+
+    if (!input.trim()) {
+        errorBox.textContent = 'Please paste STUMP/BUMP data (base64 or hex) above.';
+        errorBox.style.display = '';
+        return;
+    }
+
+    try {
+        var data = decodeInput(input);
+        var bump = decodeBUMP(data);
+        currentBUMP = bump;
+
+        showMetadata(bump);
+        document.getElementById('legend').style.display = '';
+
+        var layout = computeTreeLayout(bump);
+        renderTree(bump, layout);
+
+        // Run merkle root verification if a root was provided.
+        verifyMerkleRoot(bump);
+    } catch (e) {
+        errorBox.textContent = 'Decode error: ' + e.message;
+        errorBox.style.display = '';
+    }
+}
+
+function loadExample() {
+    // Test vector: 4 leaves, 2 registered txids (offsets 0 and 2), blockHeight=500, treeHeight=2
+    // Generated from internal/stump/builder_test.go TestEndToEnd_PowerOfTwo_4Transactions equivalent
+    document.getElementById('stump-input').value = '/fQBAgQAApailtIk8oXGe+6Tww+KMJFX8NqjXcW4fkELeGMKCc/HAQBH3FQMlM63BKI4dcESc+FrsLioeu2E3pEfITNWgRXyVAICmb5e+4jKIBO9jk6wNf1C1SRUaP6a+nDYupwcQZpIxOgDAJtPsk7dbR2IMOJyOYJjzb8Ca5c5LMNTh7mR3AJIpij5AgAA6ltlDw+3PC3JFIbkNMD0qRXGEhJ1puWMoC9TXIUW4sEBACyjCeYVrSt/X+zKSCWxqSNIBLKpN5C42BxvBRPgwM7g';
+    document.getElementById('merkle-root-input').value = 'bd5740a64b2e0737c3a78790fa3f1622af554ee537400f47fb4a64dc357fad9d';
+    decodeAndRender();
+}
+
+// ============================================================
+// Test Vector (for manual verification)
+// ============================================================
+//
+// Base64: /fQBAgQAApailtIk8oXGe+6Tww+KMJFX8NqjXcW4fkELeGMKCc/HAQBH3FQMlM63BKI4dcESc+FrsLioeu2E3pEfITNWgRXyVAICmb5e+4jKIBO9jk6wNf1C1SRUaP6a+nDYupwcQZpIxOgDAJtPsk7dbR2IMOJyOYJjzb8Ca5c5LMNTh7mR3AJIpij5AgAA6ltlDw+3PC3JFIbkNMD0qRXGEhJ1puWMoC9TXIUW4sEBACyjCeYVrSt/X+zKSCWxqSNIBLKpN5C42BxvBRPgwM7g
+// Decoded:
+//   blockHeight: 500
+//   treeHeight: 2
+//   Level 0 (4 leaves):
+//     offset=0 flag=0x02(txid) hash=96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7
+//     offset=1 flag=0x00(hash) hash=47dc540c94ceb704a23875c11273e16bb0b8a87aed84de911f2133568115f254
+//     offset=2 flag=0x02(txid) hash=99be5efb88ca2013bd8e4eb035fd42d5245468fe9afa70d8ba9c1c419a48c4e8
+//     offset=3 flag=0x00(hash) hash=9b4fb24edd6d1d8830e272398263cdbf026b97392cc35387b991dc0248a628f9
+//   Level 1 (2 leaves):
+//     offset=0 flag=0x00(hash) hash=ea5b650f0fb73c2dc91486e434c0f4a915c6121275a6e58ca02f535c8516e2c1
+//     offset=1 flag=0x00(hash) hash=2ca309e615ad2b7f5fecca4825b1a9234804b2a93790b8d81c6f0513e0c0cee0
+//   Root: bd5740a64b2e0737c3a78790fa3f1622af554ee537400f47fb4a64dc357fad9d
+//
+</script>
+{{end}}

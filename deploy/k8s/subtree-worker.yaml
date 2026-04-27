@@ -1,0 +1,66 @@
+# Subtree Worker Deployment
+#
+# Scaling: Each replica consumes partitions from the subtree-work Kafka topic
+# via consumer group rebalancing. Maximum useful replicas = partition count of
+# the subtree-work topic (default 256). Beyond that, extra replicas sit idle.
+#
+# Resource tuning: Each worker holds one STUMP in memory at a time (~271 KB)
+# plus the local LRU cache (1024 entries x 271 KB = ~270 MB max). Adjust
+# CALLBACK_STUMP_CACHE_LRU_SIZE and memory limits together.
+#
+# To scale: increase replicas (up to partition count) and ensure the
+# subtree-work topic has enough partitions:
+#   kafka-topics.sh --alter --topic subtree-work --partitions 256
+#
+# Callback accumulation: When multiple subtree workers process the same block,
+# each worker accumulates its callback data in the Aerospike
+# "callback_accum" set (configurable via AEROSPIKE_CALLBACK_ACCUMULATOR_SET).
+# The last worker to finish (subtree counter reaches zero) flushes all
+# accumulated callbacks as batched StumpsMessages to the stumps topic. This
+# reduces Kafka message count from (subtrees × callbacks) to (callbacks).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: subtree-worker
+  namespace: merkle-service
+  labels:
+    app.kubernetes.io/name: subtree-worker
+    app.kubernetes.io/part-of: merkle-service
+spec:
+  replicas: 16
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: subtree-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: subtree-worker
+        app.kubernetes.io/part-of: merkle-service
+    spec:
+      containers:
+        - name: subtree-worker
+          image: merkle-service:latest
+          command: ["subtree-worker"]
+          envFrom:
+            - configMapRef:
+                name: merkle-service-env
+                optional: true
+          env:
+            - name: CALLBACK_STUMP_CACHE_MODE
+              value: "aerospike"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: merkle-service-config

@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: merkle-service-config
+  namespace: merkle-service
+  labels:
+    app.kubernetes.io/part-of: merkle-service
+data:
+  config.yaml: |
+    mode: microservice
+
+    api:
+      port: 8080
+
+    aerospike:
+      host: aerospike.merkle-service.svc.cluster.local
+      port: 3000
+      namespace: merkle
+      setName: registrations
+      seenSet: seen_counters
+      callbackDedupSet: callback_dedup
+      subtreeCounterSet: subtree_counters
+      callbackAccumulatorSet: callback_accum
+      subtreeCounterTTLSec: 600
+      callbackAccumulatorTTLSec: 600
+      maxRetries: 3
+      retryBaseMs: 100
+
+    kafka:
+      brokers:
+        - kafka-0.kafka.merkle-service.svc.cluster.local:9092
+      subtreeTopic: subtree
+      blockTopic: block
+      callbackTopic: callback
+      callbackDlqTopic: callback-dlq
+      subtreeWorkTopic: subtree-work
+      consumerGroup: merkle-service
+
+    p2p:
+      network: main
+      storagePath: /data/p2p
+      msgbus:
+        # dhtMode: "off" is recommended for EKS/cloud pods with private IPs.
+        # The pod connects to bootstrap servers and joins the gossip mesh via relay
+        # circuits, without DHT crawling. Use "server" only for public bootstrap nodes.
+        dhtMode: off
+        # port: fixed listen port for the libp2p host. Matches Teranode bootstrap servers.
+        port: 9905
+        # announceAddrs: optional list of multiaddr strings to advertise to peers.
+        # Leave empty when dhtMode is "off" (relay handles NAT traversal).
+        # Set when the pod has a reachable external address, e.g.:
+        #   announceAddrs:
+        #     - /ip4/203.0.113.10/tcp/9905
+        announceAddrs: []
+
+    subtree:
+      storageMode: realtime
+      dahOffset: 1
+      cacheMaxMB: 64
+      dedupCacheSize: 100000
+
+    block:
+      workerPoolSize: 16
+      postMineTTLSec: 1800
+      dedupCacheSize: 10000
+
+    callback:
+      maxRetries: 5
+      backoffBaseSec: 30
+      timeoutSec: 10
+      seenThreshold: 3
+      dedupTTLSec: 86400
+      deliveryWorkers: 64
+      maxConnsPerHost: 32
+      maxIdleConnsPerHost: 16
+
+    # blobStore.url: Use file:// for single-node / all-in-one only.
+    # For multi-replica subtree-fetcher deployments, use a shared object store:
+    #   s3://bucket/subtrees   (AWS S3 or S3-compatible)
+    #   gs://bucket/subtrees   (Google Cloud Storage)
+    # Without shared storage, subtree workers fall back to DataHub (correct but slower).
+    blobStore:
+      url: file:///data/subtrees
+
+    datahub:
+      timeoutSec: 30
+      maxRetries: 3
