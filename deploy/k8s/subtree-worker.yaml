@@ -14,7 +14,7 @@
 #
 # Callback accumulation: When multiple subtree workers process the same block,
 # each worker accumulates its callback data in the Aerospike
-# "callback_accum" set (configurable via AEROSPIKE_CALLBACK_ACCUMULATOR_SET).
+# "merkle_callback_accum" set (configurable via AEROSPIKE_CALLBACK_ACCUMULATOR_SET).
 # The last worker to finish (subtree counter reaches zero) flushes all
 # accumulated callbacks as batched StumpsMessages to the stumps topic. This
 # reduces Kafka message count from (subtrees × callbacks) to (callbacks).

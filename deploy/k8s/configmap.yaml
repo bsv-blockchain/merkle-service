@@ -16,11 +16,11 @@ data:
       host: aerospike.merkle-service.svc.cluster.local
       port: 3000
       namespace: merkle
-      setName: registrations
-      seenSet: seen_counters
-      callbackDedupSet: callback_dedup
-      subtreeCounterSet: subtree_counters
-      callbackAccumulatorSet: callback_accum
+      setName: merkle_registrations
+      seenSet: merkle_seen_counters
+      callbackDedupSet: merkle_callback_dedup
+      subtreeCounterSet: merkle_subtree_counters
+      callbackAccumulatorSet: merkle_callback_accum
       subtreeCounterTTLSec: 600
       callbackAccumulatorTTLSec: 600
       maxRetries: 3

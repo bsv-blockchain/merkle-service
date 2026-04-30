@@ -62,11 +62,11 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Aerospike.Namespace != "merkle" {
 		t.Errorf("Aerospike.Namespace: expected %q, got %q", "merkle", cfg.Aerospike.Namespace)
 	}
-	if cfg.Aerospike.SetName != "registrations" {
-		t.Errorf("Aerospike.SetName: expected %q, got %q", "registrations", cfg.Aerospike.SetName)
+	if cfg.Aerospike.SetName != "merkle_registrations" {
+		t.Errorf("Aerospike.SetName: expected %q, got %q", "merkle_registrations", cfg.Aerospike.SetName)
 	}
-	if cfg.Aerospike.SeenSet != "seen_counters" {
-		t.Errorf("Aerospike.SeenSet: expected %q, got %q", "seen_counters", cfg.Aerospike.SeenSet)
+	if cfg.Aerospike.SeenSet != "merkle_seen_counters" {
+		t.Errorf("Aerospike.SeenSet: expected %q, got %q", "merkle_seen_counters", cfg.Aerospike.SeenSet)
 	}
 	if cfg.Aerospike.MaxRetries != 3 {
 		t.Errorf("Aerospike.MaxRetries: expected 3, got %d", cfg.Aerospike.MaxRetries)

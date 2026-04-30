@@ -40,7 +40,7 @@ P2P Client (1 pod) ──→ subtree topic ──→ Subtree Fetchers (4+ pods)
                                                                           ↓
                                                           Subtree Workers (16-256 pods)
                                                                ↓              ↓
-                                                     blob store (read)   Aerospike callback_accum
+                                                     blob store (read)   Aerospike merkle_callback_accum
                                                      DataHub (fallback)        ↓
                                                                ↓    stumps topic (batched)
                                                           STUMP cache          ↓
@@ -63,7 +63,7 @@ P2P Client (1 pod) ──→ subtree topic ──→ Subtree Fetchers (4+ pods)
 ## Callback Batching and Horizontal Scaling
 
 Subtree workers accumulate callback data across subtrees in Aerospike
-(`callback_accum` set). When all subtrees for a block are processed, the last
+(`merkle_callback_accum` set). When all subtrees for a block are processed, the last
 worker flushes one batched `StumpsMessage` per callback URL to the `stumps`
 topic. This reduces Kafka message volume from `subtrees × callbacks` down to
 just `callbacks`.
@@ -134,7 +134,7 @@ Override any config value via environment variables. Key settings for K8s:
 | `AEROSPIKE_PORT` | `3000` | Aerospike client port |
 | `AEROSPIKE_NAMESPACE` | `merkle` | Aerospike namespace |
 | `AEROSPIKE_STUMP_CACHE_SET` | `stump_cache` | Aerospike set for distributed STUMP cache |
-| `AEROSPIKE_CALLBACK_ACCUMULATOR_SET` | `callback_accum` | Aerospike set for cross-subtree callback batching |
+| `AEROSPIKE_CALLBACK_ACCUMULATOR_SET` | `merkle_callback_accum` | Aerospike set for cross-subtree callback batching |
 | `AEROSPIKE_CALLBACK_ACCUMULATOR_TTL_SEC` | `600` | TTL for accumulator records (match subtree counter TTL) |
 | `KAFKA_BROKERS` | `localhost:9092` | Comma-separated Kafka broker list |
 | `KAFKA_SUBTREE_WORK_TOPIC` | `subtree-work` | Topic for subtree work fan-out |

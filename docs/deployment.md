@@ -104,8 +104,8 @@ Set via `MODE` env var or the `mode` YAML key.
 | `AEROSPIKE_HOST`          | `localhost`      | Aerospike server hostname.         |
 | `AEROSPIKE_PORT`          | `3000`           | Aerospike server port.             |
 | `AEROSPIKE_NAMESPACE`     | `merkle`         | Aerospike namespace.               |
-| `AEROSPIKE_SET`           | `registrations`  | Aerospike set for registrations.   |
-| `AEROSPIKE_SEEN_SET`      | `seen_counters`  | Aerospike set for seen counters.   |
+| `AEROSPIKE_SET`           | `merkle_registrations`  | Aerospike set for registrations.   |
+| `AEROSPIKE_SEEN_SET`      | `merkle_seen_counters`  | Aerospike set for seen counters.   |
 | `AEROSPIKE_MAX_RETRIES`   | `3`              | Max retries for Aerospike ops.     |
 | `AEROSPIKE_RETRY_BASE_MS` | `100`            | Base delay (ms) between retries.   |
 

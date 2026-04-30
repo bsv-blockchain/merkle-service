@@ -84,19 +84,19 @@ aerospike:
 
   # Aerospike set used to store txid -> callback URL registrations.
   # Env: AEROSPIKE_SET
-  setName: registrations
+  setName: merkle_registrations
 
   # Aerospike set used for per-txid seen counters (SEEN_MULTIPLE_NODES tracking).
   # Env: AEROSPIKE_SEEN_SET
-  seenSet: seen_counters
+  seenSet: merkle_seen_counters
 
   # Aerospike set used for callback delivery deduplication records.
   # Env: AEROSPIKE_CALLBACK_DEDUP_SET
-  callbackDedupSet: callback_dedup
+  callbackDedupSet: merkle_callback_dedup
 
   # Aerospike set used for subtree completion counters (BLOCK_PROCESSED coordination).
   # Env: AEROSPIKE_SUBTREE_COUNTER_SET
-  subtreeCounterSet: subtree_counters
+  subtreeCounterSet: merkle_subtree_counters
 
   # TTL in seconds for subtree counter records. Should exceed maximum block processing time.
   # Env: AEROSPIKE_SUBTREE_COUNTER_TTL_SEC
@@ -104,7 +104,7 @@ aerospike:
 
   # Aerospike set used for cross-subtree callback accumulation (batching MINED messages).
   # Env: AEROSPIKE_CALLBACK_ACCUMULATOR_SET
-  callbackAccumulatorSet: callback_accum
+  callbackAccumulatorSet: merkle_callback_accum
 
   # TTL in seconds for callback accumulation records. Should match subtree counter TTL.
   # Env: AEROSPIKE_CALLBACK_ACCUMULATOR_TTL_SEC
