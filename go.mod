@@ -7,7 +7,7 @@ require (
 	github.com/aerospike/aerospike-client-go/v7 v7.8.0
 	github.com/bsv-blockchain/go-bt/v2 v2.6.2
 	github.com/bsv-blockchain/go-subtree v1.3.0
-	github.com/bsv-blockchain/go-teranode-p2p-client v0.2.3
+	github.com/bsv-blockchain/go-teranode-p2p-client v0.2.4
 	github.com/bsv-blockchain/teranode v0.14.3
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/go-chi/chi/v5 v5.2.1
