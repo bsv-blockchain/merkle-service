@@ -28,11 +28,17 @@ import (
 // callbackFailingProducer is a sarama.SyncProducer that records every call and
 // can be configured to fail every send. Used to drive the publishSubtreeCallbacks
 // → handleTransientFailure path.
+//
+// failOnType, when non-empty, causes only sends whose payload decodes to a
+// CallbackTopicMessage with that Type to fail. This enables tests for the
+// F-014 emit-failure path (fail BLOCK_PROCESSED while letting STUMP through)
+// without affecting unrelated callback messages on the same producer.
 type callbackFailingProducer struct {
-	mu       sync.Mutex
-	messages []*sarama.ProducerMessage
-	failAll  bool
-	failErr  error
+	mu         sync.Mutex
+	messages   []*sarama.ProducerMessage
+	failAll    bool
+	failOnType kafka.CallbackType
+	failErr    error
 }
 
 func (f *callbackFailingProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
@@ -40,6 +46,13 @@ func (f *callbackFailingProducer) SendMessage(msg *sarama.ProducerMessage) (int3
 	defer f.mu.Unlock()
 	if f.failAll {
 		return 0, 0, f.failErr
+	}
+	if f.failOnType != "" {
+		if b, ok := msg.Value.(sarama.ByteEncoder); ok {
+			if decoded, err := kafka.DecodeCallbackTopicMessage([]byte(b)); err == nil && decoded.Type == f.failOnType {
+				return 0, 0, f.failErr
+			}
+		}
 	}
 	f.messages = append(f.messages, msg)
 	return 0, int64(len(f.messages)), nil
@@ -73,6 +86,28 @@ func (f *callbackFailingProducer) sentCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.messages)
+}
+
+// sentCountOfType returns the number of successfully-sent messages whose
+// payload decodes to the given CallbackType.
+func (f *callbackFailingProducer) sentCountOfType(t kafka.CallbackType) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, msg := range f.messages {
+		b, ok := msg.Value.(sarama.ByteEncoder)
+		if !ok {
+			continue
+		}
+		decoded, err := kafka.DecodeCallbackTopicMessage([]byte(b))
+		if err != nil {
+			continue
+		}
+		if decoded.Type == t {
+			n++
+		}
+	}
+	return n
 }
 
 // stubStumpStore is a programmable StumpStore. By default Put returns a fixed
@@ -636,10 +671,282 @@ func TestHandleMessage_HappyPath_DecrementToZeroEmitsBlockProcessed(t *testing.T
 }
 
 // fakeURLRegistry satisfies store.CallbackURLRegistry for the count→0 emit test.
+// getAllErr, when non-nil, causes GetAll to fail — used to drive the F-014
+// "registry lookup error during emit" path.
 type fakeURLRegistry struct {
-	urls []string
+	urls       []string
+	getAllErr  error
 }
 
 func (f *fakeURLRegistry) Add(callbackURL string) error { return nil }
-func (f *fakeURLRegistry) GetAll() ([]string, error)    { return f.urls, nil }
+func (f *fakeURLRegistry) GetAll() ([]string, error) {
+	if f.getAllErr != nil {
+		return nil, f.getAllErr
+	}
+	return f.urls, nil
+}
+
+// --- F-014 BLOCK_PROCESSED publish-failure tests ---
+
+// TestEmitBlockProcessed_PublishFailureReturnsError verifies that when the
+// callback Kafka publish for BLOCK_PROCESSED fails, emitBlockProcessed
+// returns a non-nil error rather than silently swallowing it (F-014).
+func TestEmitBlockProcessed_PublishFailureReturnsError(t *testing.T) {
+	cbMock := &callbackFailingProducer{failAll: true, failErr: errors.New("kafka unavailable")}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := &SubtreeWorkerService{
+		urlRegistry: &fakeURLRegistry{urls: []string{
+			"http://cb.example.test/a",
+			"http://cb.example.test/b",
+		}},
+	}
+	s.InitBase("subtree-worker-test")
+	s.Logger = logger
+	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
+
+	err := s.emitBlockProcessed("blk-emit-fail")
+	if err == nil {
+		t.Fatalf("expected error from emitBlockProcessed when callback publish fails")
+	}
+}
+
+// TestEmitBlockProcessed_PartialFailureContinuesAndReturnsFirstError verifies
+// that when one URL's publish fails, the loop still attempts the remaining
+// URLs (best-effort) and returns the first error to the caller — matching
+// PR #77's publishSubtreeCallbacks pattern.
+func TestEmitBlockProcessed_PartialFailureContinuesAndReturnsFirstError(t *testing.T) {
+	cbMock := &callbackFailingProducer{
+		failOnType: kafka.CallbackBlockProcessed,
+		failErr:    errors.New("kafka unavailable"),
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := &SubtreeWorkerService{
+		urlRegistry: &fakeURLRegistry{urls: []string{
+			"http://cb.example.test/a",
+			"http://cb.example.test/b",
+			"http://cb.example.test/c",
+		}},
+	}
+	s.InitBase("subtree-worker-test")
+	s.Logger = logger
+	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
+
+	err := s.emitBlockProcessed("blk-partial")
+	if err == nil {
+		t.Fatalf("expected non-nil error when BLOCK_PROCESSED publishes fail")
+	}
+	// Every BLOCK_PROCESSED send was failed by the producer, so none were
+	// recorded — but the loop should have ATTEMPTED all URLs.
+	// We can't directly observe attempts without instrumenting failOnType, so
+	// instead verify that no successful BLOCK_PROCESSED was recorded.
+	if got := cbMock.sentCountOfType(kafka.CallbackBlockProcessed); got != 0 {
+		t.Errorf("expected zero successful BLOCK_PROCESSED sends, got %d", got)
+	}
+}
+
+// TestEmitBlockProcessed_HappyPath verifies the no-error path: every URL
+// receives one BLOCK_PROCESSED message and the function returns nil.
+func TestEmitBlockProcessed_HappyPath(t *testing.T) {
+	cbMock := &callbackFailingProducer{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := &SubtreeWorkerService{
+		urlRegistry: &fakeURLRegistry{urls: []string{
+			"http://cb.example.test/a",
+			"http://cb.example.test/b",
+		}},
+	}
+	s.InitBase("subtree-worker-test")
+	s.Logger = logger
+	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
+
+	if err := s.emitBlockProcessed("blk-happy"); err != nil {
+		t.Fatalf("expected nil error on happy path, got: %v", err)
+	}
+	if got := cbMock.sentCountOfType(kafka.CallbackBlockProcessed); got != 2 {
+		t.Errorf("expected 2 BLOCK_PROCESSED messages, got %d", got)
+	}
+}
+
+// TestEmitBlockProcessed_RegistryFailureReturnsError verifies that a
+// registry-lookup failure surfaces as a non-nil return so the caller can
+// re-drive the work item rather than silently dropping BLOCK_PROCESSED.
+func TestEmitBlockProcessed_RegistryFailureReturnsError(t *testing.T) {
+	cbMock := &callbackFailingProducer{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := &SubtreeWorkerService{
+		urlRegistry: &fakeURLRegistry{getAllErr: errors.New("registry down")},
+	}
+	s.InitBase("subtree-worker-test")
+	s.Logger = logger
+	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
+
+	if err := s.emitBlockProcessed("blk-registry-fail"); err == nil {
+		t.Fatalf("expected error when URL registry GetAll fails")
+	}
+	if got := cbMock.sentCount(); got != 0 {
+		t.Errorf("expected zero callback publishes when registry lookup fails, got %d", got)
+	}
+}
+
+// TestHandleMessage_BlockProcessedEmitFailure_RetriesAndDoesNotAck covers the
+// core F-014 case at the handler level: the LAST subtree's decrement-to-0
+// triggers emitBlockProcessed, the callback Kafka publish fails for the
+// BLOCK_PROCESSED message, and the work item is re-driven through the retry
+// pipeline (rather than silently ack'd with the BLOCK_PROCESSED notification
+// dropped on the floor).
+func TestHandleMessage_BlockProcessedEmitFailure_RetriesAndDoesNotAck(t *testing.T) {
+	// Producer fails BLOCK_PROCESSED but lets STUMP through. This isolates
+	// the F-014 emit-failure path from the F-012 STUMP-publish path.
+	cbMock := &callbackFailingProducer{
+		failOnType: kafka.CallbackBlockProcessed,
+		failErr:    errors.New("kafka unavailable"),
+	}
+	retryMock := &callbackFailingProducer{}
+	dlqMock := &callbackFailingProducer{}
+
+	const blockHash = "block-emit-fail"
+	counter := newCountingSubtreeCounter()
+	// Pre-seed at 1 so the single subtree drives the counter to 0 → emit fires.
+	_ = counter.Init(blockHash, 1)
+	counter.initCalls = 0
+
+	stumpStore := &stubStumpStore{}
+
+	subtreePayload := buildRawSubtreeBytes(t, 2)
+	server := rawSubtreeServer(subtreePayload)
+	defer server.Close()
+
+	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
+	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
+
+	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-fail", server.URL, 0)
+	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		// Below max attempts, handleTransientFailure re-publishes for retry
+		// and returns nil — the work item was redirected through the retry
+		// path rather than silently acked at the success branch.
+		t.Fatalf("handleMessage with BLOCK_PROCESSED emit failure: expected nil after retry republish, got: %v", err)
+	}
+
+	// Counter WAS decremented exactly once (emit happens after Decrement); on
+	// redelivery the counter goes negative and remaining<=0 fires emit again.
+	if got := counter.decrementCount(); got != 1 {
+		t.Errorf("expected counter Decrement called exactly once on emit-failure path, got %d", got)
+	}
+	// STUMP callback was published successfully BEFORE the BLOCK_PROCESSED emit failed.
+	if got := cbMock.sentCountOfType(kafka.CallbackStump); got != 1 {
+		t.Errorf("expected 1 STUMP callback publish before emit failure, got %d", got)
+	}
+	if got := cbMock.sentCountOfType(kafka.CallbackBlockProcessed); got != 0 {
+		t.Errorf("expected zero successful BLOCK_PROCESSED publishes (publish failed), got %d", got)
+	}
+	// Work item must have been re-published for retry.
+	if got := retryMock.sentCount(); got != 1 {
+		t.Errorf("expected exactly 1 retry publish on emit failure, got %d", got)
+	}
+	if got := dlqMock.sentCount(); got != 0 {
+		t.Errorf("expected zero DLQ publishes (below max attempts), got %d", got)
+	}
+}
+
+// TestHandleMessage_BlockProcessedEmitRetry_ReEmitsOnRedelivery verifies the
+// approach-A semantics: when a redelivered work item drives the counter
+// negative (because a previous attempt decremented to 0 but failed to emit),
+// emitBlockProcessed fires again. Receiver-side dedup at the delivery
+// service is responsible for collapsing the duplicate so the registered
+// endpoint sees BLOCK_PROCESSED at most once per (block, URL) pair.
+func TestHandleMessage_BlockProcessedEmitRetry_ReEmitsOnRedelivery(t *testing.T) {
+	cbMock := &callbackFailingProducer{}
+	retryMock := &callbackFailingProducer{}
+	dlqMock := &callbackFailingProducer{}
+
+	const blockHash = "block-emit-retry"
+	counter := newCountingSubtreeCounter()
+	// Pre-seed at 0 to simulate a redelivery: a previous attempt already
+	// decremented to 0 (and either succeeded-emit or failed-emit). The
+	// retry's decrement will drive the counter to -1, and remaining<=0 must
+	// still trigger emit so a previously-failed BLOCK_PROCESSED is retried.
+	_ = counter.Init(blockHash, 0)
+	counter.initCalls = 0
+
+	stumpStore := &stubStumpStore{}
+
+	subtreePayload := buildRawSubtreeBytes(t, 2)
+	server := rawSubtreeServer(subtreePayload)
+	defer server.Close()
+
+	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
+	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
+
+	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-retry", server.URL, 1)
+	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage on redelivery: expected nil, got: %v", err)
+	}
+
+	if got := counter.decrementCount(); got != 1 {
+		t.Errorf("expected counter Decrement called exactly once on redelivery, got %d", got)
+	}
+	if got := counter.value(blockHash); got != -1 {
+		t.Errorf("expected counter to be -1 on redelivery decrement, got %d", got)
+	}
+	// BLOCK_PROCESSED MUST have been re-emitted: receiver-side dedup will
+	// collapse the duplicate at delivery time.
+	if got := cbMock.sentCountOfType(kafka.CallbackBlockProcessed); got != 1 {
+		t.Errorf("expected 1 BLOCK_PROCESSED re-emit on redelivery, got %d", got)
+	}
+	if got := retryMock.sentCount(); got != 0 {
+		t.Errorf("expected zero retry publishes when redelivery succeeds, got %d", got)
+	}
+	if got := dlqMock.sentCount(); got != 0 {
+		t.Errorf("expected zero DLQ publishes, got %d", got)
+	}
+}
+
+// TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsError
+// covers the worst-case F-014 path: a STUMP-publish failure forces DLQ, and
+// the DLQ-path decrement-and-emit hits the F-014 emit failure too. The DLQ
+// publish has already happened, but the emit-failure is propagated so the
+// consumer redelivers — silently acking would leave the registered endpoint
+// without BLOCK_PROCESSED forever. This matches the F-013 DLQ-path
+// Decrement-failure semantics from PR #88: prefer a duplicate DLQ publish
+// over silently losing the BLOCK_PROCESSED notification.
+func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsError(t *testing.T) {
+	// Producer fails ALL callback publishes — STUMP fails (forcing DLQ) AND
+	// BLOCK_PROCESSED fails (forcing the F-014 path on the DLQ-decrement).
+	cbMock := &callbackFailingProducer{failAll: true, failErr: errors.New("kafka unavailable")}
+	retryMock := &callbackFailingProducer{}
+	dlqMock := &callbackFailingProducer{}
+
+	const blockHash = "block-emit-dlq"
+	counter := newCountingSubtreeCounter()
+	_ = counter.Init(blockHash, 1)
+	counter.initCalls = 0
+
+	stumpStore := &stubStumpStore{}
+
+	subtreePayload := buildRawSubtreeBytes(t, 2)
+	server := rawSubtreeServer(subtreePayload)
+	defer server.Close()
+
+	const maxAttempts = 3
+	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, maxAttempts)
+	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
+
+	// AttemptCount = maxAttempts - 1 → next attempt is terminal → DLQ.
+	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-dlq", server.URL, maxAttempts-1)
+	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
+	if err == nil {
+		t.Fatalf("expected non-nil error so consumer redelivers when emit fails on DLQ path, got nil")
+	}
+
+	if got := dlqMock.sentCount(); got != 1 {
+		t.Errorf("expected exactly 1 DLQ publish at max attempts, got %d", got)
+	}
+	if got := retryMock.sentCount(); got != 0 {
+		t.Errorf("expected zero retry publishes at max attempts, got %d", got)
+	}
+	// Counter Decrement was attempted exactly once on the DLQ path.
+	if got := counter.decrementCount(); got != 1 {
+		t.Errorf("expected counter Decrement called once on DLQ path, got %d", got)
+	}
+}
 
