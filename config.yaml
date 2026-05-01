@@ -321,6 +321,18 @@ callback:
   # Env: CALLBACK_MAX_IDLE_CONNS_PER_HOST
   maxIdleConnsPerHost: 16
 
+  # SSRF guard escape hatch. When false (the default), callback URLs that
+  # resolve to loopback (127.0.0.0/8, ::1), link-local (169.254.0.0/16,
+  # fe80::/10), or RFC1918 (10/8, 172.16/12, 192.168/16) addresses are
+  # rejected at /watch registration AND the callback delivery client
+  # refuses to dial them. Cloud metadata hostnames (metadata.google.internal,
+  # 169.254.169.254) are always blocked. Set to true ONLY if you need to
+  # deliver to internal services on purpose (e.g. local testing,
+  # in-cluster sidecars). The service logs a warning at startup when this
+  # is enabled.
+  # Env: CALLBACK_ALLOW_PRIVATE_IPS
+  allowPrivateIPs: false
+
 # ---------------------------------------------------------------------------
 # Blob Store — subtree data storage
 # ---------------------------------------------------------------------------
@@ -350,3 +362,18 @@ datahub:
   # Maximum number of retries for failed DataHub requests.
   # Env: DATAHUB_MAX_RETRIES
   maxRetries: 3
+
+  # Maximum response body size for /block/<hash> requests, in bytes.
+  # Block metadata is small (header + subtree-hash list), so the default
+  # 16 MiB leaves ~100x headroom. A hostile or malfunctioning DataHub
+  # returning more than this is rejected without buffering the whole body.
+  # Set <= 0 to use the built-in default. Mitigates F-027.
+  # Env: DATAHUB_MAX_BLOCK_BYTES
+  maxBlockBytes: 16777216
+
+  # Maximum response body size for /subtree/<hash> requests, in bytes.
+  # DataHub subtrees are concatenated 32-byte hashes; the default 1 GiB
+  # accommodates ~33.5M txids. Operators running with smaller subtree-size
+  # limits should tune this down. Set <= 0 to use the built-in default.
+  # Env: DATAHUB_MAX_SUBTREE_BYTES
+  maxSubtreeBytes: 1073741824

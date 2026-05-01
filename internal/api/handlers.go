@@ -2,11 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
-	"net/url"
 	"regexp"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 )
 
 var txidRegex = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
@@ -56,14 +58,31 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate callback URL
+	// Validate callback URL. ValidateURL covers scheme/host syntax AND the
+	// SSRF deny-list (loopback / link-local / RFC1918 / metadata endpoints
+	// / 0.0.0.0 / multicast). The dial-time guard in
+	// internal/callback.deliverCallback re-checks at connection time so a
+	// URL that survives validation but later DNS-rebinds onto a private
+	// IP is still refused.
 	if req.CallbackURL == "" {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "callbackUrl is required"})
 		return
 	}
-	parsedURL, err := url.Parse(req.CallbackURL)
-	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid callbackUrl: must be a valid HTTP/HTTPS URL"})
+	if err := ssrfguard.ValidateURL(req.CallbackURL, s.allowPrivateCallbackIPs, nil); err != nil {
+		// Distinguish the two error classes so callers get a useful 400 message
+		// without leaking internal lookup details.
+		var msg string
+		switch {
+		case errors.Is(err, ssrfguard.ErrBlockedAddress):
+			msg = "invalid callbackUrl: host is on the SSRF deny-list (private, loopback, link-local, or metadata-endpoint address)"
+		default:
+			msg = "invalid callbackUrl: must be a valid HTTP/HTTPS URL with a public host"
+		}
+		s.Logger.Warn("rejected callback URL registration",
+			"reason", err.Error(),
+			"txid", req.TxID,
+		)
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: msg})
 		return
 	}
 

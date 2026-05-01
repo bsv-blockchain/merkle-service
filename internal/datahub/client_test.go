@@ -264,3 +264,166 @@ func TestParseRawNodes(t *testing.T) {
 		}
 	}
 }
+
+// --- Response body size cap tests (F-027) ---------------------------------
+
+// TestFetchSubtreeRaw_BodyExceedsCap verifies that a /subtree response larger
+// than the configured cap is rejected with an error mentioning the cap, and
+// that the error does not embed the response content.
+func TestFetchSubtreeRaw_BodyExceedsCap(t *testing.T) {
+	const subtreeCap = 64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Don't set Content-Length so the cap is enforced by LimitReader,
+		// not by the pre-read Content-Length check (covered by another test).
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.WriteHeader(http.StatusOK)
+		// 65 bytes — one over the cap. Use distinctive content so we can
+		// assert it does NOT leak into the error.
+		body := strings.Repeat("A", subtreeCap+1)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	// Block cap is unrelated; subtree cap = 64.
+	client := NewClientWithCaps(5, 0, 0, subtreeCap, testLogger())
+	_, err := client.FetchSubtreeRaw(context.Background(), server.URL, "abc")
+	if err == nil {
+		t.Fatal("expected error for oversize subtree body")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("expected error mentioning the cap, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "AAAA") {
+		t.Errorf("error must not embed response content, got: %v", err)
+	}
+}
+
+// TestFetchSubtreeRaw_BodyAtCap verifies that a body exactly at the cap is
+// accepted (the LimitReader+1 trick must not reject the boundary case).
+func TestFetchSubtreeRaw_BodyAtCap(t *testing.T) {
+	// Use a multiple of 32 so ParseRawNodes would also be happy (we only
+	// fetch raw here, but it makes future test changes easier).
+	const subtreeCap = 64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, subtreeCap))
+	}))
+	defer server.Close()
+
+	client := NewClientWithCaps(5, 0, 0, subtreeCap, testLogger())
+	body, err := client.FetchSubtreeRaw(context.Background(), server.URL, "abc")
+	if err != nil {
+		t.Fatalf("expected success at cap boundary, got: %v", err)
+	}
+	if int64(len(body)) != subtreeCap {
+		t.Errorf("expected %d bytes, got %d", subtreeCap, len(body))
+	}
+}
+
+// TestFetchSubtreeRaw_ContentLengthExceedsCap verifies that an advertised
+// oversize Content-Length is rejected before the body is read.
+func TestFetchSubtreeRaw_ContentLengthExceedsCap(t *testing.T) {
+	const subtreeCap = 64
+	bodyRead := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1048576") // 1 MiB advertised
+		w.WriteHeader(http.StatusOK)
+		// Write a small amount; the client should reject based on Content-Length
+		// without attempting to consume this. The handler will hit a broken
+		// pipe when the client closes early, which is fine.
+		bodyRead = true
+		_, _ = w.Write(make([]byte, 1024))
+	}))
+	defer server.Close()
+
+	client := NewClientWithCaps(5, 0, 0, subtreeCap, testLogger())
+	_, err := client.FetchSubtreeRaw(context.Background(), server.URL, "abc")
+	if err == nil {
+		t.Fatal("expected error for advertised oversize Content-Length")
+	}
+	if !strings.Contains(err.Error(), "Content-Length") && !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("expected error mentioning Content-Length/exceeds, got: %v", err)
+	}
+	// We don't strictly require bodyRead == false because the server handler
+	// runs concurrently with our request; the important assertion is that the
+	// client rejected the response without surfacing it. Reference the var to
+	// keep the check meaningful and avoid an unused-write warning.
+	_ = bodyRead
+}
+
+// TestFetchBlockMetadata_BodyExceedsCap verifies the block endpoint enforces
+// its own (smaller) cap independently of the subtree cap.
+func TestFetchBlockMetadata_BodyExceedsCap(t *testing.T) {
+	const blockCap = 128
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, blockCap+10))
+	}))
+	defer server.Close()
+
+	// Block cap is tight; subtree cap is generous to confirm independence.
+	client := NewClientWithCaps(5, 0, blockCap, 1<<30, testLogger())
+	_, err := client.FetchBlockMetadata(context.Background(), server.URL, "blockhash")
+	if err == nil {
+		t.Fatal("expected error for oversize block body")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("expected error mentioning the cap, got: %v", err)
+	}
+}
+
+// TestFetchBlockMetadata_WithinCap verifies a valid block payload under the
+// configured cap is accepted.
+func TestFetchBlockMetadata_WithinCap(t *testing.T) {
+	hashes := [][]byte{
+		append([]byte{0x01}, make([]byte, 31)...),
+	}
+	payload := buildBinaryBlockBytes(7, hashes)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	// 1 MiB cap — well above the tiny payload.
+	client := NewClientWithCaps(5, 0, 1<<20, 1<<30, testLogger())
+	meta, err := client.FetchBlockMetadata(context.Background(), server.URL, "blockhash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta.Height != 7 {
+		t.Errorf("expected height 7, got %d", meta.Height)
+	}
+}
+
+// TestNewClient_AppliesDefaultCaps verifies that NewClient and
+// NewClientWithCaps with zero caps fall back to the documented defaults.
+func TestNewClient_AppliesDefaultCaps(t *testing.T) {
+	c := NewClient(5, 0, testLogger())
+	if c.maxBlockBytes != DefaultMaxBlockBytes {
+		t.Errorf("expected default block cap %d, got %d", DefaultMaxBlockBytes, c.maxBlockBytes)
+	}
+	if c.maxSubtreeBytes != DefaultMaxSubtreeBytes {
+		t.Errorf("expected default subtree cap %d, got %d", DefaultMaxSubtreeBytes, c.maxSubtreeBytes)
+	}
+
+	c2 := NewClientWithCaps(5, 0, 0, 0, testLogger())
+	if c2.maxBlockBytes != DefaultMaxBlockBytes {
+		t.Errorf("zero block cap should fall back to default; got %d", c2.maxBlockBytes)
+	}
+	if c2.maxSubtreeBytes != DefaultMaxSubtreeBytes {
+		t.Errorf("zero subtree cap should fall back to default; got %d", c2.maxSubtreeBytes)
+	}
+
+	// Negative caps must also fall back rather than silently disable the
+	// protection.
+	c3 := NewClientWithCaps(5, 0, -1, -1, testLogger())
+	if c3.maxBlockBytes != DefaultMaxBlockBytes {
+		t.Errorf("negative block cap should fall back to default; got %d", c3.maxBlockBytes)
+	}
+	if c3.maxSubtreeBytes != DefaultMaxSubtreeBytes {
+		t.Errorf("negative subtree cap should fall back to default; got %d", c3.maxSubtreeBytes)
+	}
+}

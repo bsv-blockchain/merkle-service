@@ -27,6 +27,11 @@ type Server struct {
 	regStore    store.RegistrationStore
 	urlRegistry store.CallbackURLRegistry
 	health      store.BackendHealth
+	// allowPrivateCallbackIPs, when true, lets /watch accept callback
+	// URLs that resolve to loopback/link-local/RFC1918 addresses.
+	// Defaults to false (deny). See SetAllowPrivateCallbackIPs and
+	// CallbackConfig.AllowPrivateIPs.
+	allowPrivateCallbackIPs bool
 }
 
 func NewServer(cfg config.APIConfig, regStore store.RegistrationStore, urlRegistry store.CallbackURLRegistry, health store.BackendHealth, logger *slog.Logger) *Server {
@@ -41,6 +46,20 @@ func NewServer(cfg config.APIConfig, regStore store.RegistrationStore, urlRegist
 		s.Logger = logger
 	}
 	return s
+}
+
+// SetAllowPrivateCallbackIPs toggles the SSRF guard on /watch. When false
+// (the default) callback URLs resolving to private/loopback/link-local
+// destinations are rejected at registration time. Wire this from
+// CallbackConfig.AllowPrivateIPs at startup.
+func (s *Server) SetAllowPrivateCallbackIPs(allow bool) {
+	s.allowPrivateCallbackIPs = allow
+	if allow && s.Logger != nil {
+		s.Logger.Warn(
+			"SSRF guard relaxed: /watch will accept callback URLs pointing at private/loopback/link-local addresses",
+			"setting", "callback.allowPrivateIPs",
+		)
+	}
 }
 
 // Router returns the chi router. Must be called after Init.
