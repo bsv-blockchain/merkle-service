@@ -325,11 +325,17 @@ callback:
 # Blob Store — subtree data storage
 # ---------------------------------------------------------------------------
 blobStore:
-  # Backend URL for subtree blob storage.
-  # Supports file:// (local filesystem) and http:// (remote blob server).
+  # Backend URL for subtree blob storage. Exactly two schemes are supported:
+  #   file://<path>  — durable on-disk store rooted at <path>. The path is
+  #                    created if missing. This is the only durable backend.
+  #   memory:        — in-memory store. Tests / ephemeral single-process
+  #                    deployments only; blobs are lost on restart and are
+  #                    not visible to other replicas.
+  # Any other scheme (s3://, gs://, http://, or a typo such as flie://) is
+  # rejected at startup — there is no silent fallback to in-memory.
   # Examples:
   #   file:///var/lib/merkle-subtrees
-  #   http://blob-server:8080/subtrees
+  #   memory:
   # Env: BLOB_STORE_URL
   url: file:///mnt/nvme/merkle-subtreestore
 
