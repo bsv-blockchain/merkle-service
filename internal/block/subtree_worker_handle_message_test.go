@@ -98,12 +98,15 @@ func (s *stubStumpStore) Get(ref string) ([]byte, error) { return nil, errors.Ne
 func (s *stubStumpStore) Delete(ref string) error        { return nil }
 
 // countingSubtreeCounter records every Decrement call so tests can assert
-// whether the counter was touched on a given handleMessage invocation.
+// whether the counter was touched on a given handleMessage invocation. When
+// decrementErr is non-nil, every Decrement returns it without mutating the
+// stored value — used to drive the F-013 counter-decrement-failure path.
 type countingSubtreeCounter struct {
 	mu             sync.Mutex
 	decrementCalls int
 	initCalls      int
 	values         map[string]int
+	decrementErr   error
 }
 
 func newCountingSubtreeCounter() *countingSubtreeCounter {
@@ -122,6 +125,11 @@ func (c *countingSubtreeCounter) Decrement(blockHash string) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.decrementCalls++
+	if c.decrementErr != nil {
+		// Do NOT mutate the stored value on failure — emulates an Aerospike/SQL
+		// transient where the operation never committed.
+		return 0, c.decrementErr
+	}
 	c.values[blockHash]--
 	return c.values[blockHash], nil
 }
@@ -130,6 +138,12 @@ func (c *countingSubtreeCounter) decrementCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.decrementCalls
+}
+
+func (c *countingSubtreeCounter) value(blockHash string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.values[blockHash]
 }
 
 // staticRegStore is a RegistrationStore that returns a pre-configured set of
@@ -467,4 +481,165 @@ func TestHandleMessage_StumpStoreFailure_RetriesAndDoesNotDecrement(t *testing.T
 		t.Errorf("expected zero callback publishes on stump-store failure, got %d", got)
 	}
 }
+
+// --- F-013 counter-decrement-failure tests ---
+
+// TestHandleMessage_DecrementFailureOnSuccessPath_RetriesAndPreservesCount
+// covers F-013: when Decrement fails after a successful subtree process +
+// callback publish, the work item must be re-driven through the retry
+// pipeline rather than silently acked. The counter value must remain at its
+// pre-attempt level (the failed Decrement didn't commit), and no
+// BLOCK_PROCESSED callback should be emitted.
+func TestHandleMessage_DecrementFailureOnSuccessPath_RetriesAndPreservesCount(t *testing.T) {
+	cbMock := &callbackFailingProducer{}
+	retryMock := &callbackFailingProducer{}
+	dlqMock := &callbackFailingProducer{}
+
+	const blockHash = "block-dec-fail"
+	counter := newCountingSubtreeCounter()
+	_ = counter.Init(blockHash, 3)
+	counter.initCalls = 0
+	counter.decrementErr = errors.New("aerospike timeout")
+
+	stumpStore := &stubStumpStore{}
+
+	subtreePayload := buildRawSubtreeBytes(t, 2)
+	server := rawSubtreeServer(subtreePayload)
+	defer server.Close()
+
+	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
+
+	value := makeWorkMessageBytes(t, blockHash, "subtree-dec-fail", server.URL, 0)
+	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
+	if err != nil {
+		// Below max attempts, handleTransientFailure re-publishes for retry
+		// and returns nil — but the work item was redirected through the
+		// retry path (not silently acked at the success branch).
+		t.Fatalf("handleMessage with decrement failure (below max attempts): expected nil after retry republish, got: %v", err)
+	}
+
+	// Decrement was attempted exactly once.
+	if got := counter.decrementCount(); got != 1 {
+		t.Errorf("expected counter Decrement called once, got %d", got)
+	}
+	// The stored counter value must be UNCHANGED — the decrement failed and
+	// didn't commit, so the next attempt sees the same starting count.
+	if got := counter.value(blockHash); got != 3 {
+		t.Errorf("expected stored counter to remain at 3 (decrement did not commit), got %d", got)
+	}
+
+	// The callback was published successfully BEFORE Decrement failed.
+	if got := cbMock.sentCount(); got != 1 {
+		t.Errorf("expected exactly 1 callback publish before decrement failure, got %d", got)
+	}
+	// The work item must have been re-published for retry (not DLQ'd, not silently acked).
+	if got := retryMock.sentCount(); got != 1 {
+		t.Errorf("expected exactly 1 retry publish on decrement failure, got %d", got)
+	}
+	if got := dlqMock.sentCount(); got != 0 {
+		t.Errorf("expected zero DLQ publishes (below max attempts), got %d", got)
+	}
+}
+
+// TestHandleMessage_DecrementFailureOnDLQPath_ReturnsError covers the harder
+// F-013 case: a callback-publish failure that has reached max attempts (so
+// the work item is DLQ'd) plus a Decrement failure. The DLQ publish itself
+// has already happened, but the Decrement error must surface to the caller
+// so the consumer redelivers — silently acking would leave the per-block
+// counter > 0 forever and BLOCK_PROCESSED would never fire.
+func TestHandleMessage_DecrementFailureOnDLQPath_ReturnsError(t *testing.T) {
+	// Force DLQ path: callback publish always fails, AttemptCount = max-1.
+	cbMock := &callbackFailingProducer{failAll: true, failErr: errors.New("kafka unavailable")}
+	retryMock := &callbackFailingProducer{}
+	dlqMock := &callbackFailingProducer{}
+
+	const blockHash = "block-dlq-dec-fail"
+	counter := newCountingSubtreeCounter()
+	_ = counter.Init(blockHash, 1)
+	counter.initCalls = 0
+	counter.decrementErr = errors.New("aerospike cluster degraded")
+
+	stumpStore := &stubStumpStore{}
+
+	subtreePayload := buildRawSubtreeBytes(t, 2)
+	server := rawSubtreeServer(subtreePayload)
+	defer server.Close()
+
+	const maxAttempts = 3
+	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, maxAttempts)
+
+	value := makeWorkMessageBytes(t, blockHash, "subtree-dlq-dec-fail", server.URL, maxAttempts-1)
+	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
+	if err == nil {
+		t.Fatalf("expected non-nil error when Decrement fails on DLQ path so consumer redelivers, got nil")
+	}
+
+	// DLQ was published BEFORE the decrement attempt — that ordering matches
+	// PR #77's terminal-failure semantics.
+	if got := dlqMock.sentCount(); got != 1 {
+		t.Errorf("expected exactly 1 DLQ publish, got %d", got)
+	}
+	if got := retryMock.sentCount(); got != 0 {
+		t.Errorf("expected zero retry publishes at max attempts, got %d", got)
+	}
+	// Decrement was attempted exactly once.
+	if got := counter.decrementCount(); got != 1 {
+		t.Errorf("expected counter Decrement called once on DLQ path, got %d", got)
+	}
+	// Stored counter must be UNCHANGED — Decrement failed, no commit.
+	if got := counter.value(blockHash); got != 1 {
+		t.Errorf("expected stored counter to remain at 1 after failed Decrement, got %d", got)
+	}
+}
+
+// TestHandleMessage_HappyPath_DecrementToZeroEmitsBlockProcessed extends the
+// happy-path coverage from PR #77 to also assert the count→0 → emit
+// BLOCK_PROCESSED transition (which in this test is observable via the
+// callback producer — emitBlockProcessed publishes one BLOCK_PROCESSED
+// message per registered URL).
+func TestHandleMessage_HappyPath_DecrementToZeroEmitsBlockProcessed(t *testing.T) {
+	cbMock := &callbackFailingProducer{}
+	retryMock := &callbackFailingProducer{}
+	dlqMock := &callbackFailingProducer{}
+
+	const blockHash = "block-zero-emit"
+	counter := newCountingSubtreeCounter()
+	// Pre-seed counter at 1 so the single subtree work item drives it to 0.
+	_ = counter.Init(blockHash, 1)
+	counter.initCalls = 0
+
+	stumpStore := &stubStumpStore{}
+
+	subtreePayload := buildRawSubtreeBytes(t, 2)
+	server := rawSubtreeServer(subtreePayload)
+	defer server.Close()
+
+	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
+	// Wire up urlRegistry so emitBlockProcessed has somewhere to publish.
+	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
+
+	value := makeWorkMessageBytes(t, blockHash, "subtree-zero-emit", server.URL, 0)
+	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage happy path: expected nil error, got: %v", err)
+	}
+
+	if got := counter.decrementCount(); got != 1 {
+		t.Errorf("expected counter Decrement called exactly once, got %d", got)
+	}
+	if got := counter.value(blockHash); got != 0 {
+		t.Errorf("expected counter to be 0 after decrement, got %d", got)
+	}
+	// One STUMP callback + one BLOCK_PROCESSED callback = 2 callback messages.
+	if got := cbMock.sentCount(); got != 2 {
+		t.Errorf("expected 2 callback publishes (1 STUMP + 1 BLOCK_PROCESSED), got %d", got)
+	}
+}
+
+// fakeURLRegistry satisfies store.CallbackURLRegistry for the count→0 emit test.
+type fakeURLRegistry struct {
+	urls []string
+}
+
+func (f *fakeURLRegistry) Add(callbackURL string) error { return nil }
+func (f *fakeURLRegistry) GetAll() ([]string, error)    { return f.urls, nil }
 
