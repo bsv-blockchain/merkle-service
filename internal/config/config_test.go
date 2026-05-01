@@ -110,8 +110,8 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Subtree.CacheMaxMB != 64 {
 		t.Errorf("Subtree.CacheMaxMB: expected 64, got %d", cfg.Subtree.CacheMaxMB)
 	}
-	if cfg.Subtree.MaxAttempts != 10 {
-		t.Errorf("Subtree.MaxAttempts: expected 10, got %d", cfg.Subtree.MaxAttempts)
+	if cfg.Subtree.MaxAttempts != 3 {
+		t.Errorf("Subtree.MaxAttempts: expected 3, got %d", cfg.Subtree.MaxAttempts)
 	}
 
 	// Block defaults

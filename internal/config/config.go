@@ -109,6 +109,16 @@ type AerospikeConfig struct {
 	// with proto-fd-idle-ms=0 (otherwise idle conns accumulate forever and
 	// starve the pool). Default 55.
 	IdleTimeoutSec int `yaml:"idleTimeoutSec" mapstructure:"idletimeoutsec"`
+	// MaxErrorRate is the threshold for the client's per-node circuit
+	// breaker — once a node returns this many errors within an
+	// ErrorRateWindow, subsequent requests fast-fail with MAX_ERROR_RATE
+	// instead of timing out and holding pool slots. Default 5 — Aerospike's
+	// stock 100 is too lenient for multi-tenant clusters where one slow node
+	// would otherwise drain the pool before tripping.
+	MaxErrorRate int `yaml:"maxErrorRate" mapstructure:"maxerrorrate"`
+	// ErrorRateWindow is the number of cluster-tend iterations over which
+	// MaxErrorRate accumulates. Default 1 (~1 second of accumulation).
+	ErrorRateWindow int `yaml:"errorRateWindow" mapstructure:"errorratewindow"`
 }
 
 // SeedHosts returns the list of seed hosts to use when constructing the
@@ -255,6 +265,8 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.writetimeoutms", 5000)
 	v.SetDefault("aerospike.batchtimeoutms", 15000)
 	v.SetDefault("aerospike.idletimeoutsec", 55)
+	v.SetDefault("aerospike.maxerrorrate", 5)
+	v.SetDefault("aerospike.errorratewindow", 1)
 
 	// Kafka
 	v.SetDefault("kafka.brokers", []string{"localhost:9092"})
@@ -281,7 +293,11 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("subtree.stumpdahoffset", 6)
 	v.SetDefault("subtree.cachemaxmb", 64)
 	v.SetDefault("subtree.dedupcachesize", 100000)
-	v.SetDefault("subtree.maxattempts", 10)
+	// 10 was too aggressive — when Aerospike has a slow node, every retry
+	// re-fans-out a BatchGet that piles up on the bad node. 3 attempts
+	// (initial + 2 retries) gives us recovery from transient blips without
+	// turning into a self-inflicted DoS.
+	v.SetDefault("subtree.maxattempts", 3)
 
 	// Block
 	v.SetDefault("block.workerpoolsize", 16)
@@ -358,6 +374,8 @@ func bindEnvVars(v *viper.Viper) {
 		"aerospike.writetimeoutms":              "AEROSPIKE_WRITE_TIMEOUT_MS",
 		"aerospike.batchtimeoutms":              "AEROSPIKE_BATCH_TIMEOUT_MS",
 		"aerospike.idletimeoutsec":              "AEROSPIKE_IDLE_TIMEOUT_SEC",
+		"aerospike.maxerrorrate":                "AEROSPIKE_MAX_ERROR_RATE",
+		"aerospike.errorratewindow":             "AEROSPIKE_ERROR_RATE_WINDOW",
 
 		// Kafka
 		"kafka.brokers":        "KAFKA_BROKERS",

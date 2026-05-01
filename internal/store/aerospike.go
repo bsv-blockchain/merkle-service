@@ -27,11 +27,18 @@ type AerospikeClient struct {
 
 // defaults applied when the corresponding cfg.* field is 0.
 const (
-	defaultReadTimeoutMs   = 3000  // single-record reads should be sub-second under healthy load
-	defaultWriteTimeoutMs  = 5000  // writes include replication round-trips
-	defaultBatchTimeoutMs  = 15000 // batch ops legitimately take longer
-	defaultSocketTimeoutMs = 5000  // per-attempt socket cap
-	defaultIdleTimeoutSec  = 55    // < server proto-fd-idle-ms so client reaps first
+	defaultReadTimeoutMs   = 1000 // sub-second by design — fail fast and let the app retry
+	defaultWriteTimeoutMs  = 2000 // writes include replication round-trips
+	defaultBatchTimeoutMs  = 3000 // batch fan-out across the cluster; one slow node shouldn't block 15s
+	defaultSocketTimeoutMs = 1000 // per-attempt socket cap
+	defaultIdleTimeoutSec  = 55   // < server proto-fd-idle-ms so client reaps first
+	// Circuit-breaker defaults. With Aerospike's stock MaxErrorRate=100/s a
+	// transiently-sick node never trips the breaker — every client keeps
+	// pounding it, holding pool slots open until each individual op times out.
+	// 5 errors/window flips the breaker fast enough that we route around the
+	// node instead of stacking timeouts on it.
+	defaultMaxErrorRate    = 5
+	defaultErrorRateWindow = 1
 )
 
 // NewAerospikeClient creates a new Aerospike client wrapper from a single seed.
@@ -93,10 +100,19 @@ func NewAerospikeClientFromConfig(cfg config.AerospikeConfig, logger *slog.Logge
 	}
 	policy.IdleTimeout = time.Duration(idleSec) * time.Second
 
+	// Aggressive node-level circuit breaker. When one node in a multi-tenant
+	// cluster is squeezed by a different namespace's traffic, our requests
+	// would otherwise pile timeouts on it for as long as our app-level retries
+	// keep firing. Tripping the breaker after a handful of errors makes the
+	// client return MAX_ERROR_RATE immediately for affected partitions so the
+	// pool isn't held hostage by the bad node.
+	policy.MaxErrorRate = nz(cfg.MaxErrorRate, defaultMaxErrorRate)
+	policy.ErrorRateWindow = nz(cfg.ErrorRateWindow, defaultErrorRateWindow)
+
 	// MinConnectionsPerNode and LimitConnectionsToQueueSize are intentionally
 	// left at Aerospike defaults — overriding either has triggered intermittent
 	// bootstrap timeouts in microservice deployments. The pool-pressure fix
-	// lives in ConnectionQueueSize + per-operation TotalTimeout.
+	// lives in ConnectionQueueSize + per-operation TotalTimeout + circuit breaker.
 
 	client, err := as.NewClientWithPolicyAndHost(policy, hosts...)
 	if err != nil {
@@ -119,6 +135,8 @@ func NewAerospikeClientFromConfig(cfg config.AerospikeConfig, logger *slog.Logge
 		"port", cfg.Port,
 		"connectionQueueSize", policy.ConnectionQueueSize,
 		"idleTimeoutSec", idleSec,
+		"maxErrorRate", policy.MaxErrorRate,
+		"errorRateWindow", policy.ErrorRateWindow,
 		"readTimeoutMs", c.readTimeoutMs,
 		"writeTimeoutMs", c.writeTimeoutMs,
 		"batchTimeoutMs", c.batchTimeoutMs,
@@ -165,17 +183,16 @@ func (c *AerospikeClient) WritePolicy(maxRetries int, retryBaseMs int) *as.Write
 	return wp
 }
 
-// BatchPolicy returns a batch policy with conservative retry + bounded timeouts.
-// MaxRetries is intentionally capped at 1 regardless of the legacy maxRetries
-// argument — batch failures amplify connection pressure (every retry re-fans
-// out to every node), and the application layer handles retries through the
-// subtree-work Kafka topic instead.
+// BatchPolicy returns a batch policy with NO in-client retries and tight
+// bounded timeouts. Batch failures amplify connection pressure exponentially
+// — every retry re-fans out to every node, and a single sick partition
+// owner means we'd retry against the same dead node, holding pool slots open
+// for the full timeout × retry count. The application handles retries via
+// Kafka (subtree-work / subtree topic) which is rate-limited, idempotent,
+// and doesn't pile up on the unhealthy node.
 func (c *AerospikeClient) BatchPolicy(maxRetries int, retryBaseMs int) *as.BatchPolicy {
 	bp := as.NewBatchPolicy()
-	if maxRetries > 1 {
-		maxRetries = 1
-	}
-	bp.MaxRetries = maxRetries
+	bp.MaxRetries = 0
 	bp.SleepBetweenRetries = time.Duration(retryBaseMs) * time.Millisecond
 	bp.TotalTimeout = time.Duration(c.batchTimeoutMs) * time.Millisecond
 	bp.SocketTimeout = time.Duration(c.socketTimeoutMs) * time.Millisecond
