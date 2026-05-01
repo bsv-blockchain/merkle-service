@@ -55,18 +55,23 @@ type sweeper struct {
 	db       *sql.DB
 	d        *dialect
 	interval time.Duration
-	logger   *slog.Logger
-	done     chan struct{}
-	once     sync.Once
+	// urlRetention bounds the callback_urls registry: rows whose last_seen_at
+	// is older than now() - urlRetention are evicted on every tick. Zero or
+	// negative disables the eviction (don't do that in prod — F-037).
+	urlRetention time.Duration
+	logger       *slog.Logger
+	done         chan struct{}
+	once         sync.Once
 }
 
-func newSweeper(db *sql.DB, d *dialect, interval time.Duration, logger *slog.Logger) *sweeper {
+func newSweeper(db *sql.DB, d *dialect, interval, urlRetention time.Duration, logger *slog.Logger) *sweeper {
 	return &sweeper{
-		db:       db,
-		d:        d,
-		interval: interval,
-		logger:   logger,
-		done:     make(chan struct{}),
+		db:           db,
+		d:            d,
+		interval:     interval,
+		urlRetention: urlRetention,
+		logger:       logger,
+		done:         make(chan struct{}),
 	}
 }
 
@@ -104,6 +109,36 @@ func (s *sweeper) sweepOnce(ctx context.Context) {
 			s.logger.Debug("ttl sweeper: expired rows deleted", "table", t.parent, "rows", rows)
 		}
 	}
+	// callback_urls uses a different recency model (last_seen_at refreshed on
+	// every Add) so it doesn't fit the expires_at-driven ttlTable shape.
+	// Sweep it separately, gated on a positive retention.
+	if s.urlRetention > 0 {
+		rows, err := s.sweepCallbackURLs(ctx)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Warn("ttl sweeper: callback_urls delete failed", "error", err)
+			}
+		} else if rows > 0 && s.logger != nil {
+			s.logger.Debug("ttl sweeper: expired callback URLs deleted", "rows", rows)
+		}
+	}
+}
+
+// sweepCallbackURLs deletes URLs whose last_seen_at is older than the
+// configured retention. Rows with NULL last_seen_at (legacy rows from before
+// migration 0002) are left alone — the next Add() stamps last_seen_at and
+// brings them under the eviction window.
+func (s *sweeper) sweepCallbackURLs(ctx context.Context) (int64, error) {
+	cutoff := -int(s.urlRetention / time.Second)
+	q := fmt.Sprintf(
+		"DELETE FROM callback_urls WHERE last_seen_at IS NOT NULL AND last_seen_at < %s",
+		s.d.intervalSeconds(cutoff))
+	res, err := s.db.ExecContext(ctx, q)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // sweepTable deletes up to 1000 parent rows per call to keep locks short.

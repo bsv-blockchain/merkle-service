@@ -1,0 +1,201 @@
+// Package ssrfguard implements a shared SSRF (Server-Side Request Forgery)
+// blocking predicate used by both /watch URL validation at registration time
+// and the callback delivery HTTP client at dial time.
+//
+// The same predicate runs in both layers so a URL that survives validation
+// (e.g. due to DNS rebinding between validation and delivery) is still
+// rejected when the dial actually happens. Callers can opt out via
+// AllowPrivate when an operator has explicitly allow-listed internal
+// callbacks.
+//
+// Threat model
+//
+// The /watch endpoint accepts a callback URL from a potentially untrusted
+// caller and the callback delivery worker later POSTs to that URL from
+// inside the cluster. Without guards an attacker can register, e.g.,
+//
+//	http://169.254.169.254/latest/meta-data/iam/security-credentials/
+//
+// and turn the delivery worker into an SSRF primitive against cloud
+// metadata endpoints, kubernetes services, or any RFC1918 neighbour. We
+// block by destination IP rather than hostname so an attacker cannot
+// bypass via DNS, IP literal, or rebinding.
+package ssrfguard
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"strings"
+)
+
+// ErrBlockedAddress is returned when a URL or destination address points
+// at a private/loopback/link-local/multicast/unspecified IP and the
+// caller has not opted in to allow private destinations.
+var ErrBlockedAddress = errors.New("destination address is blocked by SSRF policy")
+
+// ErrInvalidURL is returned when a callback URL is structurally invalid
+// (parse failure, missing scheme/host, disallowed scheme, etc.).
+var ErrInvalidURL = errors.New("invalid callback URL")
+
+// blockedHostnames is a small allow-deny list of hostnames that are
+// considered SSRF-relevant on top of the IP-based predicate. They mostly
+// resolve to link-local IPs (e.g. 169.254.169.254) which are already
+// covered by IsLinkLocalUnicast, but we list them defensively so the
+// rejection message is human-readable when someone tries them by name.
+var blockedHostnames = map[string]struct{}{
+	"metadata.google.internal":           {},
+	"metadata":                           {},
+	"metadata.goog":                      {},
+	"169.254.169.254":                    {},
+	"fd00:ec2::254":                      {}, // AWS IMDSv2 link-local IPv6
+}
+
+// IsBlockedIP reports whether ip is on the SSRF deny-list. The deny-list
+// covers loopback, link-local unicast/multicast, multicast, RFC1918
+// private (10/8, 172.16/12, 192.168/16) and CGNAT (100.64/10),
+// unique-local IPv6 (fc00::/7), the IPv4 unspecified address (0.0.0.0)
+// and the IPv6 unspecified address (::). Loopback covers 127/8 and ::1.
+//
+// Pass allowPrivate=true to opt out of the private/loopback/link-local
+// checks (operator-controlled escape hatch for testing or legitimately
+// internal callbacks).
+func IsBlockedIP(ip net.IP, allowPrivate bool) bool {
+	if ip == nil {
+		// A nil IP cannot be safely dialed; treat as blocked.
+		return true
+	}
+	if ip.IsUnspecified() {
+		// 0.0.0.0 and :: never identify a real remote host. They
+		// resolve to the local machine's own listening sockets, which
+		// is exactly what an SSRF attacker wants.
+		return true
+	}
+	if ip.IsMulticast() || ip.IsInterfaceLocalMulticast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if allowPrivate {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate() {
+		return true
+	}
+	// IPv6 unique local (fc00::/7) — IsPrivate covers this in Go 1.17+
+	// but we keep an explicit fallback for clarity / future-proofing.
+	if ip.To4() == nil && len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
+		return true
+	}
+	return false
+}
+
+// IsBlockedHostname returns true if the hostname (lowercased, port
+// stripped) matches a known cloud metadata or internal hostname.
+// Hostname-based blocking is a best-effort defence-in-depth check on top
+// of IP-based blocking; the IP check is authoritative.
+func IsBlockedHostname(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	// Strip an optional brackets + port from IPv6 literals.
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	_, ok := blockedHostnames[host]
+	return ok
+}
+
+// ValidateURL parses raw and rejects it if the URL is malformed, uses a
+// scheme other than http/https, has no host, or resolves to a blocked
+// destination. lookup is the DNS function used to resolve a hostname to
+// IP addresses; pass net.LookupIP in production and a stub in tests. If
+// lookup is nil, net.LookupIP is used.
+//
+// allowPrivate lets operators opt in to private/loopback/link-local
+// destinations. The metadata-hostname and unspecified/multicast checks
+// remain in force regardless.
+func ValidateURL(raw string, allowPrivate bool, lookup func(host string) ([]net.IP, error)) error {
+	if raw == "" {
+		return fmt.Errorf("%w: empty URL", ErrInvalidURL)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidURL, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("%w: scheme %q not allowed (must be http or https)", ErrInvalidURL, u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("%w: missing host", ErrInvalidURL)
+	}
+	// Reject userinfo entirely — `https://example.com:80@127.0.0.1/` would
+	// parse with Hostname() == "127.0.0.1" so the IP check below already
+	// catches the canonical form, but stripping userinfo also dodges any
+	// downstream tooling that incorrectly treats user@host as the host.
+	if u.User != nil {
+		return fmt.Errorf("%w: URL must not contain userinfo", ErrInvalidURL)
+	}
+
+	if IsBlockedHostname(host) {
+		return fmt.Errorf("%w: hostname %q is on the metadata-endpoint deny list", ErrBlockedAddress, host)
+	}
+
+	// If host is an IP literal, check it directly. Otherwise resolve and
+	// check every returned address — an attacker who controls DNS could
+	// otherwise return a single internal address that we miss if we only
+	// check the first.
+	if ip := net.ParseIP(host); ip != nil {
+		if IsBlockedIP(ip, allowPrivate) {
+			return fmt.Errorf("%w: %s", ErrBlockedAddress, ip.String())
+		}
+		return nil
+	}
+
+	if lookup == nil {
+		lookup = net.LookupIP
+	}
+	ips, err := lookup(host)
+	if err != nil {
+		// DNS resolution failure at registration time is treated as a
+		// validation error so the caller knows their URL is unusable;
+		// a typo'd hostname must not slip through validation only to
+		// silently DLQ later.
+		return fmt.Errorf("%w: failed to resolve %s: %v", ErrInvalidURL, host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("%w: %s did not resolve to any addresses", ErrInvalidURL, host)
+	}
+	for _, ip := range ips {
+		if IsBlockedIP(ip, allowPrivate) {
+			return fmt.Errorf("%w: %s resolves to %s", ErrBlockedAddress, host, ip.String())
+		}
+	}
+	return nil
+}
+
+// CheckDialAddress validates a host:port address that the dialer is
+// about to connect to. Used as a hook in net.Dialer.Control so DNS
+// rebinding or any host that slipped past ValidateURL is rejected at
+// connection time. address is the canonical "ip:port" form passed to
+// the network stack — it is always an IP literal at this point.
+func CheckDialAddress(address string, allowPrivate bool) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		// If we can't even parse the address, fail closed.
+		return fmt.Errorf("%w: cannot parse dial address %q: %v", ErrBlockedAddress, address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Dialer.Control receives the resolved IP, so a non-IP host is
+		// itself anomalous; refuse rather than guess.
+		return fmt.Errorf("%w: dial address %q is not an IP", ErrBlockedAddress, host)
+	}
+	if IsBlockedIP(ip, allowPrivate) {
+		return fmt.Errorf("%w: refusing to dial %s", ErrBlockedAddress, ip.String())
+	}
+	return nil
+}

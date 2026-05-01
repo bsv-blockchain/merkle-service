@@ -27,6 +27,7 @@ func main() {
 	defer registry.Close()
 
 	server := api.NewServer(cfg.API, registry.Registration, registry.CallbackURLRegistry, registry.Health, logger)
+	server.SetAllowPrivateCallbackIPs(cfg.Callback.AllowPrivateIPs)
 
 	if err := server.Init(nil); err != nil {
 		log.Fatal("failed to init api server: ", err)

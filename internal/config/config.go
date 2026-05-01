@@ -47,6 +47,11 @@ type StoreSQLConfig struct {
 	SweeperInterval string `yaml:"sweeperInterval" mapstructure:"sweeperinterval"`
 	MaxOpenConns    int    `yaml:"maxOpenConns"    mapstructure:"maxopenconns"`
 	MaxIdleConns    int    `yaml:"maxIdleConns"    mapstructure:"maxidleconns"`
+	// CallbackURLRegistryRetention bounds the SQL callback URL registry. URLs
+	// whose last `Add` is older than this are dropped by the TTL sweeper.
+	// Format: any time.ParseDuration string ("168h", "7d" is NOT supported).
+	// Default 168h (7 days). See F-037 / issue #23.
+	CallbackURLRegistryRetention string `yaml:"callbackUrlRegistryRetention" mapstructure:"callbackurlregistryretention"`
 }
 
 // APIConfig holds HTTP API configuration.
@@ -68,6 +73,12 @@ type AerospikeConfig struct {
 	SeenSet              string   `yaml:"seenSet"              mapstructure:"seenset"`
 	CallbackDedupSet     string   `yaml:"callbackDedupSet"     mapstructure:"callbackdedupset"`
 	CallbackURLRegistry  string   `yaml:"callbackUrlRegistry"  mapstructure:"callbackurlregistry"`
+	// CallbackURLRegistryTTLSec is the per-URL eviction window applied by the
+	// Aerospike callback URL registry (and the SQL sibling). URLs whose last
+	// `Add` is older than this are evicted, bounding the registry's growth so
+	// BLOCK_PROCESSED fan-out and the underlying record(s) never grow without
+	// limit. Default 7 days. See F-037 / issue #23.
+	CallbackURLRegistryTTLSec int `yaml:"callbackUrlRegistryTTLSec" mapstructure:"callbackurlregistryttlsec"`
 	SubtreeCounterSet    string   `yaml:"subtreeCounterSet"    mapstructure:"subtreecounterset"`
 	SubtreeCounterTTLSec int      `yaml:"subtreeCounterTTLSec" mapstructure:"subtreecounterttlsec"`
 	CallbackAccumulatorSet    string `yaml:"callbackAccumulatorSet"    mapstructure:"callbackaccumulatorset"`
@@ -211,6 +222,13 @@ type CallbackConfig struct {
 	DeliveryWorkers     int `yaml:"deliveryWorkers"     mapstructure:"deliveryworkers"`
 	MaxConnsPerHost     int `yaml:"maxConnsPerHost"     mapstructure:"maxconnsperhost"`
 	MaxIdleConnsPerHost int `yaml:"maxIdleConnsPerHost" mapstructure:"maxidleconnsperhost"`
+	// AllowPrivateIPs disables the SSRF guard that normally rejects
+	// callback URLs (or dial addresses) pointing at loopback,
+	// link-local, or RFC1918 destinations. Default false. Operators
+	// who legitimately need to deliver to internal services (testing,
+	// in-cluster sidecars) can set this to true. The guard against
+	// 0.0.0.0/multicast destinations remains in force regardless.
+	AllowPrivateIPs bool `yaml:"allowPrivateIPs" mapstructure:"allowprivateips"`
 }
 
 // BlobStoreConfig holds blob store configuration.
@@ -222,6 +240,19 @@ type BlobStoreConfig struct {
 type DataHubConfig struct {
 	TimeoutSec int `yaml:"timeoutSec" mapstructure:"timeoutsec"`
 	MaxRetries int `yaml:"maxRetries" mapstructure:"maxretries"`
+
+	// MaxBlockBytes caps a single /block/<hash> response body. Block metadata
+	// is small (header + subtree-hash list) so the default 16 MiB is two
+	// orders of magnitude of headroom. A value <= 0 selects the default.
+	// Mitigates F-027 (DataHub responses read into memory without a cap).
+	MaxBlockBytes int64 `yaml:"maxBlockBytes" mapstructure:"maxblockbytes"`
+
+	// MaxSubtreeBytes caps a single /subtree/<hash> binary response body.
+	// DataHub subtrees are concatenated 32-byte hashes; the default 1 GiB
+	// (~33.5M txids) accommodates Teranode's largest realistic subtrees.
+	// Operators with a smaller subtree size limit should tune this down.
+	// A value <= 0 selects the default.
+	MaxSubtreeBytes int64 `yaml:"maxSubtreeBytes" mapstructure:"maxsubtreebytes"`
 }
 
 // registerDefaults sets all default values in the Viper instance.
@@ -240,6 +271,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("store.sql.sweeperinterval", "60s")
 	v.SetDefault("store.sql.maxopenconns", 25)
 	v.SetDefault("store.sql.maxidleconns", 5)
+	v.SetDefault("store.sql.callbackurlregistryretention", "168h")
 
 	// Aerospike
 	v.SetDefault("aerospike.host", "localhost")
@@ -250,6 +282,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.seenset", "merkle_seen_counters")
 	v.SetDefault("aerospike.callbackdedupset", "merkle_callback_dedup")
 	v.SetDefault("aerospike.callbackurlregistry", "merkle_callback_urls")
+	v.SetDefault("aerospike.callbackurlregistryttlsec", 7*24*60*60)
 	v.SetDefault("aerospike.subtreecounterset", "merkle_subtree_counters")
 	v.SetDefault("aerospike.subtreecounterttlsec", 600)
 	v.SetDefault("aerospike.callbackaccumulatorset", "merkle_callback_accum")
@@ -316,6 +349,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("callback.deliveryworkers", 64)
 	v.SetDefault("callback.maxconnsperhost", 32)
 	v.SetDefault("callback.maxidleconnsperhost", 16)
+	v.SetDefault("callback.allowprivateips", false)
 
 	// BlobStore
 	v.SetDefault("blobstore.url", "file:///tmp/merkle-subtrees")
@@ -323,6 +357,12 @@ func registerDefaults(v *viper.Viper) {
 	// DataHub
 	v.SetDefault("datahub.timeoutsec", 30)
 	v.SetDefault("datahub.maxretries", 3)
+	// 16 MiB — block metadata is small; this leaves ~100x headroom over the
+	// largest realistic block-metadata payload while still bounding memory.
+	v.SetDefault("datahub.maxblockbytes", int64(16*1024*1024))
+	// 1 GiB — accommodates Teranode subtrees up to ~33.5M txids; operators
+	// running with smaller per-subtree limits should tune this down.
+	v.SetDefault("datahub.maxsubtreebytes", int64(1*1024*1024*1024))
 }
 
 // bindEnvVars explicitly binds environment variable names to Viper keys.
@@ -349,6 +389,7 @@ func bindEnvVars(v *viper.Viper) {
 		"store.sql.sweeperinterval": "STORE_SQL_SWEEPER_INTERVAL",
 		"store.sql.maxopenconns":    "STORE_SQL_MAX_OPEN_CONNS",
 		"store.sql.maxidleconns":    "STORE_SQL_MAX_IDLE_CONNS",
+		"store.sql.callbackurlregistryretention": "STORE_SQL_CALLBACK_URL_REGISTRY_RETENTION",
 
 		// Aerospike
 		"aerospike.host":      "AEROSPIKE_HOST",
@@ -358,7 +399,8 @@ func bindEnvVars(v *viper.Viper) {
 		"aerospike.setname":   "AEROSPIKE_SET",
 		"aerospike.seenset":             "AEROSPIKE_SEEN_SET",
 		"aerospike.callbackdedupset":    "AEROSPIKE_CALLBACK_DEDUP_SET",
-		"aerospike.callbackurlregistry": "AEROSPIKE_CALLBACK_URL_REGISTRY",
+		"aerospike.callbackurlregistry":         "AEROSPIKE_CALLBACK_URL_REGISTRY",
+		"aerospike.callbackurlregistryttlsec":   "AEROSPIKE_CALLBACK_URL_REGISTRY_TTL_SEC",
 		"aerospike.subtreecounterset":         "AEROSPIKE_SUBTREE_COUNTER_SET",
 		"aerospike.subtreecounterttlsec":      "AEROSPIKE_SUBTREE_COUNTER_TTL_SEC",
 		"aerospike.callbackaccumulatorset":    "AEROSPIKE_CALLBACK_ACCUMULATOR_SET",
@@ -425,13 +467,16 @@ func bindEnvVars(v *viper.Viper) {
 		"callback.deliveryworkers":     "CALLBACK_DELIVERY_WORKERS",
 		"callback.maxconnsperhost":     "CALLBACK_MAX_CONNS_PER_HOST",
 		"callback.maxidleconnsperhost": "CALLBACK_MAX_IDLE_CONNS_PER_HOST",
+		"callback.allowprivateips":     "CALLBACK_ALLOW_PRIVATE_IPS",
 
 		// BlobStore
 		"blobstore.url": "BLOB_STORE_URL",
 
 		// DataHub
-		"datahub.timeoutsec": "DATAHUB_TIMEOUT_SEC",
-		"datahub.maxretries": "DATAHUB_MAX_RETRIES",
+		"datahub.timeoutsec":      "DATAHUB_TIMEOUT_SEC",
+		"datahub.maxretries":      "DATAHUB_MAX_RETRIES",
+		"datahub.maxblockbytes":   "DATAHUB_MAX_BLOCK_BYTES",
+		"datahub.maxsubtreebytes": "DATAHUB_MAX_SUBTREE_BYTES",
 	}
 
 	for key, env := range bindings {

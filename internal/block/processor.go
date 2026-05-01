@@ -57,7 +57,13 @@ func NewProcessor(
 }
 
 func (p *Processor) Init(cfg interface{}) error {
-	p.dataHubClient = datahub.NewClient(p.datahubCfg.TimeoutSec, p.datahubCfg.MaxRetries, p.Logger)
+	p.dataHubClient = datahub.NewClientWithCaps(
+		p.datahubCfg.TimeoutSec,
+		p.datahubCfg.MaxRetries,
+		p.datahubCfg.MaxBlockBytes,
+		p.datahubCfg.MaxSubtreeBytes,
+		p.Logger,
+	)
 
 	// Initialize message dedup cache.
 	if p.blockCfg.DedupCacheSize > 0 {

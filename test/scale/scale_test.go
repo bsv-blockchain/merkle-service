@@ -179,7 +179,9 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 	regStore := store.NewRegistrationStore(asClient, regSetName, 3, 100, logger)
 
 	urlRegistrySetName := fmt.Sprintf("scale_urls_%d", time.Now().UnixNano())
-	urlRegistry := store.NewCallbackURLRegistry(asClient, urlRegistrySetName, 3, 100, logger)
+	// 0 ttlSec → constructor falls back to the default 7-day window, which is
+	// far longer than any scale-test run.
+	urlRegistry := store.NewCallbackURLRegistry(asClient, urlRegistrySetName, 0, 3, 100, logger)
 
 	blobStore := store.NewMemoryBlobStore()
 	subtreeStore := store.NewSubtreeStore(blobStore, 100, logger)
