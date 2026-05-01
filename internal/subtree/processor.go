@@ -231,11 +231,12 @@ func (p *Processor) Health() service.HealthStatus {
 
 // handleMessage processes a single subtree announcement message from Kafka.
 //
-// On transient failure (DataHub/blob store/parse/registration lookup) the
-// message is re-published to the subtree topic with AttemptCount+1 and nil is
-// returned so the consumer MarkMessage's and the partition advances. Once
-// AttemptCount reaches SubtreeConfig.MaxAttempts the message is routed to the
-// subtree-dlq topic instead of being re-driven again.
+// On transient failure (DataHub/blob store/parse/registration lookup, or any
+// SEEN callback encode/publish failure) the message is re-published to the
+// subtree topic with AttemptCount+1 and nil is returned so the consumer
+// MarkMessage's and the partition advances. Once AttemptCount reaches
+// SubtreeConfig.MaxAttempts the message is routed to the subtree-dlq topic
+// instead of being re-driven again.
 //
 // The only errors returned upward are producer-level failures that prevent us
 // from either acking or requeueing — those still stall the partition so we
@@ -304,7 +305,16 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	}
 
 	// 4.5-4.6: Emit batched callbacks grouped by callbackURL.
-	p.emitBatchedSeenCallbacks(registeredTxids, subtreeMsg.Hash)
+	//
+	// A failure to encode/publish a SEEN_ON_NETWORK or SEEN_MULTIPLE_NODES
+	// notification must NOT be silently swallowed: route through the same
+	// retry/DLQ pipeline as a processing failure so the subtree message is
+	// either retried or terminally DLQ'd. Otherwise downstream callback
+	// consumers permanently lose SEEN notifications during a Kafka
+	// callback-topic outage (F-057).
+	if err := p.emitBatchedSeenCallbacks(registeredTxids, subtreeMsg.Hash); err != nil {
+		return p.handleTransientFailure(subtreeMsg, "publishing batched SEEN callbacks", err)
+	}
 
 	// Mark subtree as successfully processed for dedup.
 	if p.dedupCache != nil {
@@ -429,10 +439,23 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]string, er
 
 // emitBatchedSeenCallbacks emits batched SEEN_ON_NETWORK and SEEN_MULTIPLE_NODES callbacks.
 // Groups txids by callbackURL and publishes one message per callbackURL.
-func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string, subtreeID string) {
+//
+// Returns a non-nil error if any per-URL encode or publish fails. The loop
+// continues past a single per-URL failure so independent callback targets
+// still receive their best-effort delivery on this attempt (partial success),
+// but the first error encountered is returned to the caller so handleMessage
+// can re-drive the subtree message through handleTransientFailure rather than
+// silently acking and dropping SEEN notifications — see F-057.
+func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string, subtreeID string) error {
 	if len(registeredTxids) == 0 {
-		return
+		return nil
 	}
+
+	// Track the first error so the caller can re-drive the whole subtree
+	// message, while still attempting the remaining URLs (each callback target
+	// is independent — a hiccup on one shouldn't deny delivery to the others
+	// on this attempt).
+	var firstErr error
 
 	// Invert txid→callbackURLs to callbackURL→txids for SEEN_ON_NETWORK.
 	seenGroups := make(map[string][]string)
@@ -454,10 +477,16 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string
 			data, err := msg.Encode()
 			if err != nil {
 				p.Logger.Error("failed to encode batched SEEN_ON_NETWORK", "callbackURL", callbackURL, "error", err)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("encoding SEEN_ON_NETWORK for %s: %w", callbackURL, err)
+				}
 				continue
 			}
 			if err := p.callbackProducer.PublishWithHashKey(callbackURL, data); err != nil {
 				p.Logger.Error("failed to publish batched SEEN_ON_NETWORK", "callbackURL", callbackURL, "error", err)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("publishing SEEN_ON_NETWORK for %s: %w", callbackURL, err)
+				}
 			}
 		}
 	}
@@ -488,13 +517,21 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string
 			data, err := msg.Encode()
 			if err != nil {
 				p.Logger.Error("failed to encode batched SEEN_MULTIPLE_NODES", "callbackURL", callbackURL, "error", err)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("encoding SEEN_MULTIPLE_NODES for %s: %w", callbackURL, err)
+				}
 				continue
 			}
 			if err := p.callbackProducer.PublishWithHashKey(callbackURL, data); err != nil {
 				p.Logger.Error("failed to publish batched SEEN_MULTIPLE_NODES", "callbackURL", callbackURL, "error", err)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("publishing SEEN_MULTIPLE_NODES for %s: %w", callbackURL, err)
+				}
 			}
 		}
 	}
+
+	return firstErr
 }
 
 // callbackBatchChunkSize caps txids per batched callback message so the JSON

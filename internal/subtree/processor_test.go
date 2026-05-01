@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +21,16 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
+
+// startRawSubtreeServer serves a raw 32-byte-hash subtree payload at any path,
+// satisfying the merkle-service's DataHub fetch in tests that exercise
+// handleMessage end-to-end.
+func startRawSubtreeServer(payload []byte) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(payload)
+	}))
+}
 
 // --- Mock implementations ---
 
@@ -962,7 +974,9 @@ func TestBatchedSeenCallbacks_SingleCallbackURL(t *testing.T) {
 		"tx3": {"http://arcade.example.com/cb"},
 	}
 
-	p.emitBatchedSeenCallbacks(registered, "subtree-A")
+	if err := p.emitBatchedSeenCallbacks(registered, "subtree-A"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
 
 	msgs := mockProd.getMessages()
 	// 1 SEEN_ON_NETWORK (no threshold reached → 0 SEEN_MULTIPLE_NODES)
@@ -1000,7 +1014,9 @@ func TestBatchedSeenCallbacks_MultipleCallbackURLs(t *testing.T) {
 		"tx3": {"http://url-A/cb"},
 	}
 
-	p.emitBatchedSeenCallbacks(registered, "subtree-A")
+	if err := p.emitBatchedSeenCallbacks(registered, "subtree-A"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
 
 	msgs := mockProd.getMessages()
 	if len(msgs) != 2 {
@@ -1028,7 +1044,9 @@ func TestBatchedSeenCallbacks_NoRegistered(t *testing.T) {
 	regStore := &mockRegStore{registrations: map[string][]string{}}
 	p, mockProd := newTestProcessor(t, regStore, &mockSeenCounter{})
 
-	p.emitBatchedSeenCallbacks(map[string][]string{}, "subtree-A")
+	if err := p.emitBatchedSeenCallbacks(map[string][]string{}, "subtree-A"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
 
 	if len(mockProd.getMessages()) != 0 {
 		t.Error("expected no messages for empty registered map")
@@ -1047,7 +1065,9 @@ func TestBatchedSeenCallbacks_SeenMultipleNodesThreshold(t *testing.T) {
 		"tx2": {"http://arcade/cb"},
 	}
 
-	p.emitBatchedSeenCallbacks(registered, "subtree-A")
+	if err := p.emitBatchedSeenCallbacks(registered, "subtree-A"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
 
 	msgs := mockProd.getMessages()
 	// 1 SEEN_ON_NETWORK + 1 SEEN_MULTIPLE_NODES = 2 messages
@@ -1086,7 +1106,9 @@ func TestBatchedSeenCallbacks_PartialThreshold(t *testing.T) {
 		"tx2": {"http://arcade/cb"},
 	}
 
-	p.emitBatchedSeenCallbacks(registered, "subtree-A")
+	if err := p.emitBatchedSeenCallbacks(registered, "subtree-A"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
 
 	msgs := mockProd.getMessages()
 	// 1 SEEN_ON_NETWORK (both txids) + 1 SEEN_MULTIPLE_NODES (only tx1) = 2
@@ -1117,7 +1139,9 @@ func TestBatchedSeenCallbacks_ChunksLargeBatch(t *testing.T) {
 		registered[fmt.Sprintf("tx%05d", i)] = []string{"http://arcade/cb"}
 	}
 
-	p.emitBatchedSeenCallbacks(registered, "subtree-A")
+	if err := p.emitBatchedSeenCallbacks(registered, "subtree-A"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
 
 	msgs := mockProd.getMessages()
 	// total txids / chunk size, rounded up → 3 SEEN_ON_NETWORK messages.
@@ -1256,5 +1280,291 @@ func TestHandleTransientFailure_DefaultsMaxAttemptsWhenUnset(t *testing.T) {
 	}
 	if len(dlqMock.getMessages()) != 0 {
 		t.Errorf("expected 0 DLQ publishes, got %d", len(dlqMock.getMessages()))
+	}
+}
+
+// --- F-057: SEEN callback publish failure propagation tests ---
+//
+// The fakes/helpers below are named distinctly from the existing mockSyncProducer
+// (which always succeeds) so they can be added without disturbing the existing
+// tests. They mirror the "callbackFailingProducer" pattern from PR #77's
+// subtree_worker tests but live in this package.
+
+// callbackFailingSyncProducer is a sarama.SyncProducer that records every call
+// and can be configured to fail every send. Used to drive the
+// emitBatchedSeenCallbacks → handleTransientFailure path for F-057.
+type callbackFailingSyncProducer struct {
+	mu       sync.Mutex
+	messages []*sarama.ProducerMessage
+	failAll  bool
+	failErr  error
+}
+
+func (f *callbackFailingSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failAll {
+		return 0, 0, f.failErr
+	}
+	f.messages = append(f.messages, msg)
+	return 0, int64(len(f.messages)), nil
+}
+
+func (f *callbackFailingSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
+	for _, m := range msgs {
+		if _, _, err := f.SendMessage(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *callbackFailingSyncProducer) Close() error          { return nil }
+func (f *callbackFailingSyncProducer) IsTransactional() bool { return false }
+func (f *callbackFailingSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
+	return sarama.ProducerTxnFlagReady
+}
+func (f *callbackFailingSyncProducer) BeginTxn() error  { return nil }
+func (f *callbackFailingSyncProducer) CommitTxn() error { return nil }
+func (f *callbackFailingSyncProducer) AbortTxn() error  { return nil }
+func (f *callbackFailingSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
+	return nil
+}
+func (f *callbackFailingSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
+	return nil
+}
+
+func (f *callbackFailingSyncProducer) sentCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.messages)
+}
+
+// urlFailingSyncProducer fails publishes whose decoded CallbackURL matches the
+// configured failURL and lets every other publish through. Used to verify
+// partial-success semantics: independent URLs still receive their best-effort
+// delivery on a per-URL failure. Inspecting the value (not the key) sidesteps
+// the SHA256 hashing that PublishWithHashKey applies.
+type urlFailingSyncProducer struct {
+	mu        sync.Mutex
+	messages  []*sarama.ProducerMessage
+	failURL   string
+	failErr   error
+	failCount int
+}
+
+func (f *urlFailingSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if msg.Value != nil {
+		raw, err := msg.Value.Encode()
+		if err == nil {
+			if decoded, decErr := kafka.DecodeCallbackTopicMessage(raw); decErr == nil {
+				if decoded.CallbackURL == f.failURL {
+					f.failCount++
+					return 0, 0, f.failErr
+				}
+			}
+		}
+	}
+	f.messages = append(f.messages, msg)
+	return 0, int64(len(f.messages)), nil
+}
+
+func (f *urlFailingSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
+	for _, m := range msgs {
+		if _, _, err := f.SendMessage(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *urlFailingSyncProducer) Close() error          { return nil }
+func (f *urlFailingSyncProducer) IsTransactional() bool { return false }
+func (f *urlFailingSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
+	return sarama.ProducerTxnFlagReady
+}
+func (f *urlFailingSyncProducer) BeginTxn() error  { return nil }
+func (f *urlFailingSyncProducer) CommitTxn() error { return nil }
+func (f *urlFailingSyncProducer) AbortTxn() error  { return nil }
+func (f *urlFailingSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
+	return nil
+}
+func (f *urlFailingSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
+	return nil
+}
+
+func (f *urlFailingSyncProducer) getMessages() []*sarama.ProducerMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	result := make([]*sarama.ProducerMessage, len(f.messages))
+	copy(result, f.messages)
+	return result
+}
+
+// TestEmitBatchedSeenCallbacks_HappyPathReturnsNil verifies the no-error path
+// for the new error-returning signature.
+func TestEmitBatchedSeenCallbacks_HappyPathReturnsNil(t *testing.T) {
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p, mockProd := newTestProcessor(t, regStore, &mockSeenCounter{})
+
+	registered := map[string][]string{
+		"tx1": {"http://url-A/cb"},
+		"tx2": {"http://url-B/cb"},
+	}
+
+	if err := p.emitBatchedSeenCallbacks(registered, "subtree-happy"); err != nil {
+		t.Fatalf("expected nil error on happy path, got: %v", err)
+	}
+	if got := len(mockProd.getMessages()); got != 2 {
+		t.Errorf("expected 2 callback publishes on happy path, got %d", got)
+	}
+}
+
+// TestEmitBatchedSeenCallbacks_PublishFailureReturnsError verifies that a
+// callback-producer failure for ANY URL surfaces an error to the caller —
+// the F-057 fix.
+func TestEmitBatchedSeenCallbacks_PublishFailureReturnsError(t *testing.T) {
+	cbMock := &callbackFailingSyncProducer{failAll: true, failErr: errors.New("kafka unavailable")}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p := &Processor{
+		registrationStore: &mockRegStore{registrations: map[string][]string{}},
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(cbMock, "callback-test", logger),
+	}
+	p.InitBase("subtree-cb-fail-test")
+	p.Logger = logger
+
+	registered := map[string][]string{
+		"tx1": {"http://url-A/cb"},
+		"tx2": {"http://url-B/cb"},
+	}
+
+	err := p.emitBatchedSeenCallbacks(registered, "subtree-fail")
+	if err == nil {
+		t.Fatalf("expected non-nil error when callback publish fails")
+	}
+	if cbMock.sentCount() != 0 {
+		t.Errorf("expected 0 successful sends with failAll=true, got %d", cbMock.sentCount())
+	}
+}
+
+// TestEmitBatchedSeenCallbacks_PartialFailureStillAttemptsOtherURLs verifies
+// the partial-success contract: a per-URL publish failure does NOT short-circuit
+// the loop — independent callback targets still receive their best-effort
+// delivery on this attempt — but an error IS returned so the caller re-drives.
+func TestEmitBatchedSeenCallbacks_PartialFailureStillAttemptsOtherURLs(t *testing.T) {
+	failingURL := "http://url-fail/cb"
+	okURL := "http://url-ok/cb"
+
+	cbMock := &urlFailingSyncProducer{
+		failURL: failingURL,
+		failErr: errors.New("kafka transient"),
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p := &Processor{
+		registrationStore: &mockRegStore{registrations: map[string][]string{}},
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(cbMock, "callback-test", logger),
+	}
+	p.InitBase("subtree-cb-partial-test")
+	p.Logger = logger
+
+	registered := map[string][]string{
+		"tx1": {failingURL},
+		"tx2": {okURL},
+	}
+
+	err := p.emitBatchedSeenCallbacks(registered, "subtree-partial")
+	if err == nil {
+		t.Fatalf("expected non-nil error when one callback URL publish fails")
+	}
+
+	// The successful URL must still have received its best-effort delivery,
+	// matching the partial-success semantics from PR #77's publishSubtreeCallbacks.
+	msgs := cbMock.getMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected exactly 1 successful publish (the OK URL), got %d", len(msgs))
+	}
+	cb := decodeCallbackMsg(t, msgs[0])
+	if cb.CallbackURL != okURL {
+		t.Errorf("expected successful publish targeted at %s, got %s", okURL, cb.CallbackURL)
+	}
+	if cbMock.failCount == 0 {
+		t.Errorf("expected at least 1 failed publish targeted at %s", failingURL)
+	}
+}
+
+// TestHandleMessage_CallbackPublishFailure_RoutesToRetry verifies the F-057
+// end-to-end fix: when emitBatchedSeenCallbacks fails, handleMessage routes
+// the subtree message through handleTransientFailure rather than silently
+// acking and dropping the SEEN notification.
+func TestHandleMessage_CallbackPublishFailure_RoutesToRetry(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	registeredTxid := "9602604163d73e2ab424bad28b1363694c397512dfa883ec1ee90cc92f847359"
+
+	regStore := &mockRegStore{
+		registrations: map[string][]string{
+			registeredTxid: {"http://callback.example.com/notify"},
+		},
+	}
+
+	// Fake DataHub: serve a single 32-byte raw hash for the registered txid.
+	rawBytes := hashFromHex(t, registeredTxid)
+	dataHubServer := startRawSubtreeServer(rawBytes)
+	defer dataHubServer.Close()
+
+	cbMock := &callbackFailingSyncProducer{failAll: true, failErr: errors.New("kafka callback topic outage")}
+	retryMock := &mockSyncProducer{}
+	dlqMock := &mockSyncProducer{}
+
+	p := &Processor{
+		cfg: &config.Config{
+			Subtree: config.SubtreeConfig{
+				MaxAttempts: 5,
+				StorageMode: "stream", // skip blob store
+			},
+		},
+		registrationStore: regStore,
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(cbMock, "callback-test", logger),
+		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		dataHubClient:     datahub.NewClient(5, 0, logger),
+	}
+	p.InitBase("subtree-handle-cb-fail-test")
+	p.Logger = logger
+
+	subtreeMsg := &kafka.SubtreeMessage{
+		Hash:         "subtree-cb-fail",
+		DataHubURL:   dataHubServer.URL,
+		AttemptCount: 0,
+	}
+	value, err := subtreeMsg.Encode()
+	if err != nil {
+		t.Fatalf("encode subtree msg: %v", err)
+	}
+
+	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage: expected nil error (retry path returns nil after re-publishing), got: %v", err)
+	}
+
+	// Retry producer must have received the re-published subtree message.
+	if got := len(retryMock.getMessages()); got != 1 {
+		t.Errorf("expected exactly 1 retry publish, got %d", got)
+	}
+	// DLQ must NOT have been touched (we're nowhere near max attempts).
+	if got := len(dlqMock.getMessages()); got != 0 {
+		t.Errorf("expected zero DLQ publishes, got %d", got)
+	}
+	// messagesProcessed must NOT have been incremented — the subtree wasn't
+	// successfully processed end-to-end.
+	if got := p.messagesProcessed.Load(); got != 0 {
+		t.Errorf("expected messagesProcessed=0 after callback failure, got %d", got)
+	}
+	if got := p.messagesRetried.Load(); got != 1 {
+		t.Errorf("expected messagesRetried=1 after callback failure, got %d", got)
 	}
 }
