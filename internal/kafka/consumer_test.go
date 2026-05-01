@@ -198,6 +198,24 @@ func TestConsumeClaim_FirstMessageError(t *testing.T) {
 	}
 }
 
+// TestNewConsumerConfig_InitialOffsetOldest is the regression test for F-031.
+// Consumer groups with no committed offsets must start at the OLDEST available
+// offset so renaming a group, recovering lost offsets, or deploying into a
+// fresh environment with a non-empty topic still processes the durable
+// backlog instead of silently skipping it.
+func TestNewConsumerConfig_InitialOffsetOldest(t *testing.T) {
+	cfg := newConsumerConfig()
+	if cfg == nil {
+		t.Fatal("newConsumerConfig returned nil")
+	}
+	if got, want := cfg.Consumer.Offsets.Initial, sarama.OffsetOldest; got != want {
+		t.Errorf("Consumer.Offsets.Initial = %d, want %d (sarama.OffsetOldest); a new consumer group must replay the backlog, not jump to the topic head", got, want)
+	}
+	if got := cfg.Consumer.Offsets.Initial; got == sarama.OffsetNewest {
+		t.Errorf("Consumer.Offsets.Initial must not be sarama.OffsetNewest (F-031): new groups would silently skip queued work")
+	}
+}
+
 // TestConsumeClaim_ContextCancelled verifies the loop exits cleanly when the
 // session context is cancelled mid-flight (Stop / rebalance path).
 func TestConsumeClaim_ContextCancelled(t *testing.T) {
