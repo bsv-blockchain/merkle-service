@@ -68,35 +68,43 @@ func (s *aerospikeCallbackAccumulator) Append(blockHash, callbackURL string, txi
 }
 
 // ReadAndDelete reads all accumulated callback data for the given block and
-// deletes the record atomically. Returns a map of callbackURL → AccumulatedCallback.
+// removes the entries atomically. Returns a map of callbackURL → AccumulatedCallback.
+//
+// NOTE: this uses a single Aerospike Operate call with ListPopRangeFromOp so
+// the read-and-remove executes as one server-side transaction. Splitting it
+// into Get + Delete (the previous implementation) opened a window where a
+// concurrent Append could land between the two operations and be silently
+// dropped along with the deleted record (F-035). The empty record left behind
+// after the pop is reaped by the bin TTL — explicitly deleting it here would
+// reintroduce the same lost-Append race against any Append that ran between
+// the Pop and the Delete.
 func (s *aerospikeCallbackAccumulator) ReadAndDelete(blockHash string) (map[string]*AccumulatedCallback, error) {
 	key, err := as.NewKey(s.client.Namespace(), s.setName, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create key: %w", err)
 	}
 
-	// Read the record first.
-	record, err := s.client.Client().Get(s.client.ReadPolicy(), key, accumEntriesBin)
+	// Atomically pop all entries from the list bin. ListPopRangeFromOp(bin, 0)
+	// returns every item from index 0 to the end and removes them in a single
+	// server-side operation, so a concurrent Append cannot be lost.
+	wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
+	wp.RecordExistsAction = as.UPDATE_ONLY
+
+	record, err := s.client.Client().Operate(wp, key,
+		as.ListPopRangeFromOp(accumEntriesBin, 0),
+	)
 	if err != nil {
 		var asErr *as.AerospikeError
 		if errors.As(err, &asErr) && asErr.Matches(astypes.KEY_NOT_FOUND_ERROR) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to read accumulator: %w", err)
+		return nil, fmt.Errorf("failed to pop accumulator entries: %w", err)
 	}
 	if record == nil {
 		return nil, nil
 	}
 
-	// Delete the record.
-	wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
-	_, err = s.client.Client().Delete(wp, key)
-	if err != nil {
-		s.logger.Warn("failed to delete accumulator record after read",
-			"blockHash", blockHash, "error", err)
-	}
-
-	// Parse the entries list.
+	// Parse the popped entries list.
 	binVal := record.Bins[accumEntriesBin]
 	if binVal == nil {
 		return nil, nil
