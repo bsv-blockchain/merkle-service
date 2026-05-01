@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"regexp"
 
+	"github.com/bsv-blockchain/merkle-service/internal/store"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
@@ -88,6 +89,17 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 
 	// Store registration
 	if err := s.regStore.Add(req.TxID, req.CallbackURL); err != nil {
+		// F-050: surface the per-txid callback cap as a 429 so the caller can
+		// distinguish a quota error from a transient backend failure and back
+		// off accordingly. The body still uses the standard ErrorResponse shape.
+		if errors.Is(err, store.ErrMaxCallbacksPerTxIDExceeded) {
+			s.Logger.Warn("registration rejected: per-txid callback cap exceeded",
+				"txid", req.TxID, "callbackUrl", req.CallbackURL)
+			writeJSON(w, http.StatusTooManyRequests, ErrorResponse{
+				Error: "too many callback URLs registered for this txid",
+			})
+			return
+		}
 		s.Logger.Error("failed to add registration", "txid", req.TxID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal server error"})
 		return

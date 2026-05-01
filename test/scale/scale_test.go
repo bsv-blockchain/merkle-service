@@ -56,7 +56,7 @@ func findNamespace() string {
 			continue
 		}
 		// Verify namespace is writable with a probe write.
-		regStore := store.NewRegistrationStore(client, "ns_probe", 1, 50, logger)
+		regStore := store.NewRegistrationStore(client, "ns_probe", 1, 50, 0, logger)
 		if err := regStore.Add("probe_txid", "http://probe"); err != nil {
 			client.Close()
 			continue
@@ -176,7 +176,7 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 	t.Cleanup(func() { asClient.Close() })
 
 	regSetName := fmt.Sprintf("scale_reg_%d", time.Now().UnixNano())
-	regStore := store.NewRegistrationStore(asClient, regSetName, 3, 100, logger)
+	regStore := store.NewRegistrationStore(asClient, regSetName, 3, 100, 0, logger)
 
 	urlRegistrySetName := fmt.Sprintf("scale_urls_%d", time.Now().UnixNano())
 	// 0 ttlSec → constructor falls back to the default 7-day window, which is

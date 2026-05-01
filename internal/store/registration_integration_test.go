@@ -31,7 +31,7 @@ func uniqueSet(t *testing.T, prefix string) string {
 func TestRegistrationStore_AddAndGet(t *testing.T) {
 	client := newAerospikeClient(t)
 	setName := uniqueSet(t, "reg_add")
-	regStore := store.NewRegistrationStore(client, setName, 3, 100, slog.Default())
+	regStore := store.NewRegistrationStore(client, setName, 3, 100, 0, slog.Default())
 
 	txid := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	callback := "https://example.com/cb1"
@@ -56,7 +56,7 @@ func TestRegistrationStore_AddAndGet(t *testing.T) {
 func TestRegistrationStore_MultipleCallbacksSameTxid(t *testing.T) {
 	client := newAerospikeClient(t)
 	setName := uniqueSet(t, "reg_multi")
-	regStore := store.NewRegistrationStore(client, setName, 3, 100, slog.Default())
+	regStore := store.NewRegistrationStore(client, setName, 3, 100, 0, slog.Default())
 
 	txid := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	cb1 := "https://example.com/cb1"
@@ -89,7 +89,7 @@ func TestRegistrationStore_MultipleCallbacksSameTxid(t *testing.T) {
 func TestRegistrationStore_IdempotentAdd(t *testing.T) {
 	client := newAerospikeClient(t)
 	setName := uniqueSet(t, "reg_idem")
-	regStore := store.NewRegistrationStore(client, setName, 3, 100, slog.Default())
+	regStore := store.NewRegistrationStore(client, setName, 3, 100, 0, slog.Default())
 
 	txid := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	callback := "https://example.com/cb_dup"
@@ -117,7 +117,7 @@ func TestRegistrationStore_IdempotentAdd(t *testing.T) {
 func TestRegistrationStore_BatchGet(t *testing.T) {
 	client := newAerospikeClient(t)
 	setName := uniqueSet(t, "reg_batch")
-	regStore := store.NewRegistrationStore(client, setName, 3, 100, slog.Default())
+	regStore := store.NewRegistrationStore(client, setName, 3, 100, 0, slog.Default())
 
 	txid1 := "1111111111111111111111111111111111111111111111111111111111111111"
 	txid2 := "2222222222222222222222222222222222222222222222222222222222222222"
@@ -149,7 +149,7 @@ func TestRegistrationStore_BatchGet(t *testing.T) {
 func TestRegistrationStore_UpdateTTL(t *testing.T) {
 	client := newAerospikeClient(t)
 	setName := uniqueSet(t, "reg_ttl")
-	regStore := store.NewRegistrationStore(client, setName, 3, 100, slog.Default())
+	regStore := store.NewRegistrationStore(client, setName, 3, 100, 0, slog.Default())
 
 	txid := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	callback := "https://example.com/ttl"
@@ -193,7 +193,7 @@ func TestRegistrationStore_UpdateTTL(t *testing.T) {
 func TestRegistrationStore_GetNonExistent(t *testing.T) {
 	client := newAerospikeClient(t)
 	setName := uniqueSet(t, "reg_noexist")
-	regStore := store.NewRegistrationStore(client, setName, 3, 100, slog.Default())
+	regStore := store.NewRegistrationStore(client, setName, 3, 100, 0, slog.Default())
 
 	urls, err := regStore.Get("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
 	if err != nil {

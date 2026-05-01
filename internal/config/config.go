@@ -23,6 +23,20 @@ type Config struct {
 	Callback  CallbackConfig  `yaml:"callback"  mapstructure:"callback"`
 	BlobStore BlobStoreConfig `yaml:"blobStore" mapstructure:"blobstore"`
 	DataHub   DataHubConfig   `yaml:"datahub"   mapstructure:"datahub"`
+	Registry  RegistryConfig  `yaml:"registry"  mapstructure:"registry"`
+}
+
+// RegistryConfig holds policy for the txid -> callback URL registration store.
+// Limits and quotas live here regardless of whether the backend is Aerospike
+// or SQL, so behavior stays identical across deployments.
+type RegistryConfig struct {
+	// MaxCallbacksPerTxID caps the number of distinct callback URLs that may
+	// be registered for a single txid. Once reached, further Add calls fail
+	// with store.ErrMaxCallbacksPerTxIDExceeded. Idempotent re-registration
+	// of an already-known URL is unaffected by the limit. 0 disables the cap
+	// (matches the legacy unbounded behavior — not recommended in
+	// production; F-050 documents the resource-exhaustion risk).
+	MaxCallbacksPerTxID int `yaml:"maxCallbacksPerTxID" mapstructure:"maxcallbackspertxid"`
 }
 
 // Backend names. Kept as package-level consts so callers don't stringly-type.
@@ -363,6 +377,9 @@ func registerDefaults(v *viper.Viper) {
 	// 1 GiB — accommodates Teranode subtrees up to ~33.5M txids; operators
 	// running with smaller per-subtree limits should tune this down.
 	v.SetDefault("datahub.maxsubtreebytes", int64(1*1024*1024*1024))
+
+	// Registry
+	v.SetDefault("registry.maxcallbackspertxid", 10)
 }
 
 // bindEnvVars explicitly binds environment variable names to Viper keys.
@@ -477,6 +494,9 @@ func bindEnvVars(v *viper.Viper) {
 		"datahub.maxretries":      "DATAHUB_MAX_RETRIES",
 		"datahub.maxblockbytes":   "DATAHUB_MAX_BLOCK_BYTES",
 		"datahub.maxsubtreebytes": "DATAHUB_MAX_SUBTREE_BYTES",
+
+		// Registry
+		"registry.maxcallbackspertxid": "REGISTRY_MAX_CALLBACKS_PER_TXID",
 	}
 
 	for key, env := range bindings {

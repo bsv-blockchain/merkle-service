@@ -70,7 +70,7 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 	go sw.run(sweeperCtx)
 
 	r := &storepkg.Registry{
-		Registration:        newRegistrationStore(db, d),
+		Registration:        newRegistrationStore(db, d, cfg.Registry.MaxCallbacksPerTxID),
 		Subtree:             storepkg.NewSubtreeStore(blob, uint64(cfg.Subtree.DAHOffset), logger),
 		Stump:               storepkg.NewStumpStore(blob, uint64(cfg.Subtree.StumpDAHOffset), logger),
 		CallbackDedup:       newCallbackDedup(db, d),

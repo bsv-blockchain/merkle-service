@@ -14,7 +14,7 @@ import (
 // so we don't leak an unbounded set of orphaned URLs.
 func TestSweeper_CascadesRegistrationChildren(t *testing.T) {
 	db, d := newTestDB(t)
-	r := newRegistrationStore(db, d)
+	r := newRegistrationStore(db, d, 0)
 
 	// Two txids: one we'll expire in the past, one fresh.
 	if err := r.Add("tx-old", "http://old1"); err != nil {

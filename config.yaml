@@ -377,3 +377,16 @@ datahub:
   # limits should tune this down. Set <= 0 to use the built-in default.
   # Env: DATAHUB_MAX_SUBTREE_BYTES
   maxSubtreeBytes: 1073741824
+
+# ---------------------------------------------------------------------------
+# Registry — policy for the txid -> callback URL registration store.
+# (applies regardless of whether the backend is Aerospike or SQL)
+# ---------------------------------------------------------------------------
+registry:
+  # Maximum number of distinct callback URLs that may be registered against
+  # a single txid. Once reached, further /watch calls for the same txid
+  # return HTTP 429. Re-registering an already-known URL is idempotent and
+  # is unaffected by the cap. 0 disables the cap (legacy unbounded
+  # behavior — strongly discouraged in production; see F-050).
+  # Env: REGISTRY_MAX_CALLBACKS_PER_TXID
+  maxCallbacksPerTxID: 10

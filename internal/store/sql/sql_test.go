@@ -3,6 +3,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -40,7 +41,7 @@ func newTestDB(t *testing.T) (*sql.DB, *dialect) {
 
 func TestRegistrationStore_IdempotentAdd(t *testing.T) {
 	db, d := newTestDB(t)
-	s := newRegistrationStore(db, d)
+	s := newRegistrationStore(db, d, 0)
 
 	for i := 0; i < 3; i++ {
 		if err := s.Add("tx1", "http://cb1"); err != nil {
@@ -58,7 +59,7 @@ func TestRegistrationStore_IdempotentAdd(t *testing.T) {
 
 func TestRegistrationStore_BatchGet(t *testing.T) {
 	db, d := newTestDB(t)
-	s := newRegistrationStore(db, d)
+	s := newRegistrationStore(db, d, 0)
 	if err := s.Add("a", "u1"); err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +82,101 @@ func TestRegistrationStore_BatchGet(t *testing.T) {
 	}
 	if _, ok := got["c"]; ok {
 		t.Fatalf("c should not be present")
+	}
+}
+
+// TestRegistrationStore_MaxCallbacksPerTxID covers F-050: once the per-txid
+// callback URL cap is reached, further Add calls return the sentinel error,
+// the row count in registration_urls is exactly the cap, and existing rows
+// are not mutated.
+func TestRegistrationStore_MaxCallbacksPerTxID(t *testing.T) {
+	db, d := newTestDB(t)
+	const max = 3
+	s := newRegistrationStore(db, d, max)
+
+	// First `max` distinct URLs succeed.
+	for i := 0; i < max; i++ {
+		if err := s.Add("tx1", fmt.Sprintf("http://cb/%d", i)); err != nil {
+			t.Fatalf("Add #%d: %v", i, err)
+		}
+	}
+
+	// (max+1)-th distinct URL is rejected with the sentinel.
+	err := s.Add("tx1", "http://cb/overflow")
+	if !errors.Is(err, storepkg.ErrMaxCallbacksPerTxIDExceeded) {
+		t.Fatalf("expected ErrMaxCallbacksPerTxIDExceeded, got %v", err)
+	}
+
+	// DB count is exactly `max` — the rejected insert did not slip through.
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM registration_urls WHERE txid = ?", "tx1").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != max {
+		t.Fatalf("registration_urls count = %d, want %d", count, max)
+	}
+
+	// A different txid is unaffected by the first txid's cap.
+	if err := s.Add("tx2", "http://cb/tx2"); err != nil {
+		t.Fatalf("unrelated txid Add: %v", err)
+	}
+}
+
+// TestRegistrationStore_MaxCallbacksIdempotent verifies that re-registering
+// an already-known URL is a no-op and never trips the cap, even when the
+// txid is already at `max` distinct URLs.
+func TestRegistrationStore_MaxCallbacksIdempotent(t *testing.T) {
+	db, d := newTestDB(t)
+	const max = 2
+	s := newRegistrationStore(db, d, max)
+
+	if err := s.Add("tx1", "http://cb/a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Add("tx1", "http://cb/b"); err != nil {
+		t.Fatal(err)
+	}
+
+	// At cap: re-adding either existing URL must succeed (idempotent set add).
+	for _, url := range []string{"http://cb/a", "http://cb/b"} {
+		if err := s.Add("tx1", url); err != nil {
+			t.Fatalf("idempotent re-add of %q: %v", url, err)
+		}
+	}
+
+	// And a NEW URL still trips the cap.
+	if err := s.Add("tx1", "http://cb/c"); !errors.Is(err, storepkg.ErrMaxCallbacksPerTxIDExceeded) {
+		t.Fatalf("expected ErrMaxCallbacksPerTxIDExceeded, got %v", err)
+	}
+
+	// Count should still be exactly `max`.
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM registration_urls WHERE txid = ?", "tx1").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != max {
+		t.Fatalf("registration_urls count = %d, want %d", count, max)
+	}
+}
+
+// TestRegistrationStore_MaxCallbacksDisabled covers the legacy unbounded
+// path: when maxCallbacksPerTxID is 0 the cap is disabled and arbitrarily
+// many URLs may be registered without ever returning the sentinel.
+func TestRegistrationStore_MaxCallbacksDisabled(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newRegistrationStore(db, d, 0)
+
+	for i := 0; i < 25; i++ {
+		if err := s.Add("tx1", fmt.Sprintf("http://cb/%d", i)); err != nil {
+			t.Fatalf("Add #%d: %v", i, err)
+		}
+	}
+	urls, err := s.Get("tx1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(urls) != 25 {
+		t.Fatalf("got %d urls, want 25 (cap disabled)", len(urls))
 	}
 }
 
@@ -491,7 +587,7 @@ func TestSweeper_StopsOnClose(t *testing.T) {
 func TestSQLBackend_InterfaceSatisfaction(t *testing.T) {
 	db, d := newTestDB(t)
 	var (
-		_ storepkg.RegistrationStore        = newRegistrationStore(db, d)
+		_ storepkg.RegistrationStore        = newRegistrationStore(db, d, 0)
 		_ storepkg.CallbackDedupStore       = newCallbackDedup(db, d)
 		_ storepkg.CallbackURLRegistry      = newCallbackURLRegistry(db, d, time.Hour)
 		_ storepkg.CallbackAccumulatorStore = newCallbackAccumulator(db, d, 60)

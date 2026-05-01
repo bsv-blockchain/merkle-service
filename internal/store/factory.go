@@ -62,7 +62,8 @@ func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Lo
 	r := &Registry{
 		Registration: NewRegistrationStore(
 			asClient, cfg.Aerospike.SetName,
-			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
+			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs,
+			cfg.Registry.MaxCallbacksPerTxID, logger,
 		),
 		Subtree: NewSubtreeStore(blob, uint64(cfg.Subtree.DAHOffset), logger),
 		Stump:   NewStumpStore(blob, uint64(cfg.Subtree.StumpDAHOffset), logger),
