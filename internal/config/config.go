@@ -222,6 +222,19 @@ type BlobStoreConfig struct {
 type DataHubConfig struct {
 	TimeoutSec int `yaml:"timeoutSec" mapstructure:"timeoutsec"`
 	MaxRetries int `yaml:"maxRetries" mapstructure:"maxretries"`
+
+	// MaxBlockBytes caps a single /block/<hash> response body. Block metadata
+	// is small (header + subtree-hash list) so the default 16 MiB is two
+	// orders of magnitude of headroom. A value <= 0 selects the default.
+	// Mitigates F-027 (DataHub responses read into memory without a cap).
+	MaxBlockBytes int64 `yaml:"maxBlockBytes" mapstructure:"maxblockbytes"`
+
+	// MaxSubtreeBytes caps a single /subtree/<hash> binary response body.
+	// DataHub subtrees are concatenated 32-byte hashes; the default 1 GiB
+	// (~33.5M txids) accommodates Teranode's largest realistic subtrees.
+	// Operators with a smaller subtree size limit should tune this down.
+	// A value <= 0 selects the default.
+	MaxSubtreeBytes int64 `yaml:"maxSubtreeBytes" mapstructure:"maxsubtreebytes"`
 }
 
 // registerDefaults sets all default values in the Viper instance.
@@ -323,6 +336,12 @@ func registerDefaults(v *viper.Viper) {
 	// DataHub
 	v.SetDefault("datahub.timeoutsec", 30)
 	v.SetDefault("datahub.maxretries", 3)
+	// 16 MiB — block metadata is small; this leaves ~100x headroom over the
+	// largest realistic block-metadata payload while still bounding memory.
+	v.SetDefault("datahub.maxblockbytes", int64(16*1024*1024))
+	// 1 GiB — accommodates Teranode subtrees up to ~33.5M txids; operators
+	// running with smaller per-subtree limits should tune this down.
+	v.SetDefault("datahub.maxsubtreebytes", int64(1*1024*1024*1024))
 }
 
 // bindEnvVars explicitly binds environment variable names to Viper keys.
@@ -430,8 +449,10 @@ func bindEnvVars(v *viper.Viper) {
 		"blobstore.url": "BLOB_STORE_URL",
 
 		// DataHub
-		"datahub.timeoutsec": "DATAHUB_TIMEOUT_SEC",
-		"datahub.maxretries": "DATAHUB_MAX_RETRIES",
+		"datahub.timeoutsec":      "DATAHUB_TIMEOUT_SEC",
+		"datahub.maxretries":      "DATAHUB_MAX_RETRIES",
+		"datahub.maxblockbytes":   "DATAHUB_MAX_BLOCK_BYTES",
+		"datahub.maxsubtreebytes": "DATAHUB_MAX_SUBTREE_BYTES",
 	}
 
 	for key, env := range bindings {

@@ -75,7 +75,13 @@ func (p *Processor) Init(_ interface{}) error {
 	p.InitBase("subtree-fetcher")
 
 	// Initialize DataHub client.
-	p.dataHubClient = datahub.NewClient(p.cfg.DataHub.TimeoutSec, p.cfg.DataHub.MaxRetries, p.Logger)
+	p.dataHubClient = datahub.NewClientWithCaps(
+		p.cfg.DataHub.TimeoutSec,
+		p.cfg.DataHub.MaxRetries,
+		p.cfg.DataHub.MaxBlockBytes,
+		p.cfg.DataHub.MaxSubtreeBytes,
+		p.Logger,
+	)
 
 	// Initialize message dedup cache.
 	if p.cfg.Subtree.DedupCacheSize > 0 {
