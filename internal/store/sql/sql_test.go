@@ -268,6 +268,64 @@ func TestSeenCounter_ThresholdFiresOnce(t *testing.T) {
 	}
 }
 
+// TestSeenCounter_ConcurrentThresholdFiresOnce is the F-045 regression test:
+// many goroutines call Increment for the same txid past the threshold and
+// exactly one must observe ThresholdReached=true. The previous
+// read-then-update sequence allowed two concurrent callers to both see
+// fired=0 and both report fired, producing duplicate SEEN_MULTIPLE_NODES
+// callbacks. The fix folds the check + flip into a single conditional UPDATE
+// so only one caller wins.
+func TestSeenCounter_ConcurrentThresholdFiresOnce(t *testing.T) {
+	tmp := t.TempDir() + "/concurrent.db"
+	// Allow multiple connections so goroutines actually contend; SQLite
+	// serializes writes via its file lock, which is exactly the property we
+	// rely on for atomicity. Without WAL + multiple conns the test would just
+	// queue every goroutine through one conn and never exercise the race.
+	db, err := sql.Open("sqlite", "file:"+tmp+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.SetMaxOpenConns(8)
+	t.Cleanup(func() { db.Close() })
+
+	d := sqliteDialect()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := runMigrations(context.Background(), db, d, logger); err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+
+	const (
+		threshold = 5
+		workers   = 32
+	)
+	s := newSeenCounter(db, d, threshold)
+
+	var firedCount int64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			res, err := s.Increment("tx-race", fmt.Sprintf("st%d", i))
+			if err != nil {
+				t.Errorf("Increment %d: %v", i, err)
+				return
+			}
+			if res.ThresholdReached {
+				atomic.AddInt64(&firedCount, 1)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	if got := atomic.LoadInt64(&firedCount); got != 1 {
+		t.Fatalf("F-045 regression: threshold fired %d times across %d concurrent workers, want exactly 1", got, workers)
+	}
+}
+
 func TestSubtreeCounter_InitAndDecrement(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)
