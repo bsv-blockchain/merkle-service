@@ -211,6 +211,13 @@ type CallbackConfig struct {
 	DeliveryWorkers     int `yaml:"deliveryWorkers"     mapstructure:"deliveryworkers"`
 	MaxConnsPerHost     int `yaml:"maxConnsPerHost"     mapstructure:"maxconnsperhost"`
 	MaxIdleConnsPerHost int `yaml:"maxIdleConnsPerHost" mapstructure:"maxidleconnsperhost"`
+	// AllowPrivateIPs disables the SSRF guard that normally rejects
+	// callback URLs (or dial addresses) pointing at loopback,
+	// link-local, or RFC1918 destinations. Default false. Operators
+	// who legitimately need to deliver to internal services (testing,
+	// in-cluster sidecars) can set this to true. The guard against
+	// 0.0.0.0/multicast destinations remains in force regardless.
+	AllowPrivateIPs bool `yaml:"allowPrivateIPs" mapstructure:"allowprivateips"`
 }
 
 // BlobStoreConfig holds blob store configuration.
@@ -329,6 +336,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("callback.deliveryworkers", 64)
 	v.SetDefault("callback.maxconnsperhost", 32)
 	v.SetDefault("callback.maxidleconnsperhost", 16)
+	v.SetDefault("callback.allowprivateips", false)
 
 	// BlobStore
 	v.SetDefault("blobstore.url", "file:///tmp/merkle-subtrees")
@@ -444,6 +452,7 @@ func bindEnvVars(v *viper.Viper) {
 		"callback.deliveryworkers":     "CALLBACK_DELIVERY_WORKERS",
 		"callback.maxconnsperhost":     "CALLBACK_MAX_CONNS_PER_HOST",
 		"callback.maxidleconnsperhost": "CALLBACK_MAX_IDLE_CONNS_PER_HOST",
+		"callback.allowprivateips":     "CALLBACK_ALLOW_PRIVATE_IPS",
 
 		// BlobStore
 		"blobstore.url": "BLOB_STORE_URL",

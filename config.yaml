@@ -321,6 +321,18 @@ callback:
   # Env: CALLBACK_MAX_IDLE_CONNS_PER_HOST
   maxIdleConnsPerHost: 16
 
+  # SSRF guard escape hatch. When false (the default), callback URLs that
+  # resolve to loopback (127.0.0.0/8, ::1), link-local (169.254.0.0/16,
+  # fe80::/10), or RFC1918 (10/8, 172.16/12, 192.168/16) addresses are
+  # rejected at /watch registration AND the callback delivery client
+  # refuses to dial them. Cloud metadata hostnames (metadata.google.internal,
+  # 169.254.169.254) are always blocked. Set to true ONLY if you need to
+  # deliver to internal services on purpose (e.g. local testing,
+  # in-cluster sidecars). The service logs a warning at startup when this
+  # is enabled.
+  # Env: CALLBACK_ALLOW_PRIVATE_IPS
+  allowPrivateIPs: false
+
 # ---------------------------------------------------------------------------
 # Blob Store — subtree data storage
 # ---------------------------------------------------------------------------

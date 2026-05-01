@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -22,6 +23,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
+	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
@@ -126,32 +128,13 @@ func NewDeliveryService(cfg *config.Config, dedupStore CallbackDeduper, stumpSto
 func (d *DeliveryService) Init(_ interface{}) error {
 	d.InitBase("callback-delivery")
 
-	// Set up the HTTP client with tuned transport for high-throughput delivery.
-	maxConnsPerHost := d.cfg.Callback.MaxConnsPerHost
-	if maxConnsPerHost <= 0 {
-		maxConnsPerHost = 32
+	if d.cfg.Callback.AllowPrivateIPs {
+		d.Logger.Warn(
+			"SSRF guard relaxed: callback delivery will dial private/loopback/link-local addresses",
+			"setting", "callback.allowPrivateIPs",
+		)
 	}
-	maxIdleConnsPerHost := d.cfg.Callback.MaxIdleConnsPerHost
-	if maxIdleConnsPerHost <= 0 {
-		maxIdleConnsPerHost = 16
-	}
-
-	transport := &http.Transport{
-		MaxIdleConns:        maxConnsPerHost * 10, // global pool
-		MaxIdleConnsPerHost: maxIdleConnsPerHost,
-		MaxConnsPerHost:     maxConnsPerHost,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true, // small JSON payloads — compression adds latency
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-	}
-
-	d.httpClient = &http.Client{
-		Timeout:   time.Duration(d.cfg.Callback.TimeoutSec) * time.Second,
-		Transport: transport,
-	}
+	d.httpClient = newDeliveryHTTPClient(d.cfg.Callback)
 
 	// Create producer for publishing permanently failed messages to the DLQ topic.
 	dlqProducer, err := kafka.NewProducer(
@@ -197,8 +180,9 @@ func (d *DeliveryService) Init(_ interface{}) error {
 		"backoffBaseSec", d.cfg.Callback.BackoffBaseSec,
 		"timeoutSec", d.cfg.Callback.TimeoutSec,
 		"futureRetryWaitCap", futureRetryWaitCap,
-		"maxConnsPerHost", maxConnsPerHost,
-		"maxIdleConnsPerHost", maxIdleConnsPerHost,
+		"maxConnsPerHost", maxConnsPerHostOrDefault(d.cfg.Callback.MaxConnsPerHost),
+		"maxIdleConnsPerHost", maxIdleConnsPerHostOrDefault(d.cfg.Callback.MaxIdleConnsPerHost),
+		"allowPrivateIPs", d.cfg.Callback.AllowPrivateIPs,
 	)
 
 	return nil
@@ -690,6 +674,54 @@ func hashTxIDs(txids []string) string {
 	sort.Strings(sorted)
 	h := sha256.Sum256([]byte(strings.Join(sorted, ",")))
 	return hex.EncodeToString(h[:8])
+}
+
+// maxConnsPerHostOrDefault returns v or 32 when v <= 0.
+func maxConnsPerHostOrDefault(v int) int {
+	if v <= 0 {
+		return 32
+	}
+	return v
+}
+
+// maxIdleConnsPerHostOrDefault returns v or 16 when v <= 0.
+func maxIdleConnsPerHostOrDefault(v int) int {
+	if v <= 0 {
+		return 16
+	}
+	return v
+}
+
+// newDeliveryHTTPClient builds the HTTP client used to deliver callbacks.
+// It applies an SSRF-aware Dialer.Control hook that rejects connections
+// to private/loopback/link-local IPs unless cfg.AllowPrivateIPs is set.
+// The hook fires after DNS resolution so DNS rebinding cannot bypass it
+// (Go's resolver passes the resolved IP to Control as part of address).
+func newDeliveryHTTPClient(cfg config.CallbackConfig) *http.Client {
+	allowPrivate := cfg.AllowPrivateIPs
+	transport := &http.Transport{
+		MaxIdleConns:        maxConnsPerHostOrDefault(cfg.MaxConnsPerHost) * 10,
+		MaxIdleConnsPerHost: maxIdleConnsPerHostOrDefault(cfg.MaxIdleConnsPerHost),
+		MaxConnsPerHost:     maxConnsPerHostOrDefault(cfg.MaxConnsPerHost),
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true, // small JSON payloads — compression adds latency
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+			Control: func(network, address string, _ syscall.RawConn) error {
+				// Only filter inet sockets — Control is also called for
+				// unix sockets in pathological cases; ignore those.
+				if network != "tcp" && network != "tcp4" && network != "tcp6" {
+					return nil
+				}
+				return ssrfguard.CheckDialAddress(address, allowPrivate)
+			},
+		}).DialContext,
+	}
+	return &http.Client{
+		Timeout:   time.Duration(cfg.TimeoutSec) * time.Second,
+		Transport: transport,
+	}
 }
 
 // publishToDLQ publishes a permanently failed message to the dead-letter queue topic.
