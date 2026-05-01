@@ -44,6 +44,14 @@ func NewAerospikeClient(host string, port int, namespace string, maxRetries int,
 // NewAerospikeClientFromConfig builds a client using the full AerospikeConfig
 // — multiple seed nodes, raised connection-queue size, and operation-level
 // socket/total timeouts that get applied to BatchPolicy.
+//
+// Connection-queue size is intentionally the only ClientPolicy knob we change
+// from defaults: production Aerospike defaults (Timeout=30s, MinConnections=0,
+// LimitConnectionsToQueueSize=true) are sane, and overriding them turns
+// cluster bootstrap into a flaky operation under load. The fix for the
+// "connection pool is empty" failure mode is the queue size + the per-batch
+// SocketTimeout/TotalTimeout we set on BatchPolicy below, NOT churn at the
+// client-policy layer.
 func NewAerospikeClientFromConfig(cfg config.AerospikeConfig, logger *slog.Logger) (*AerospikeClient, error) {
 	seeds := cfg.SeedHosts()
 	if len(seeds) == 0 {
@@ -56,14 +64,13 @@ func NewAerospikeClientFromConfig(cfg config.AerospikeConfig, logger *slog.Logge
 	}
 
 	policy := as.NewClientPolicy()
-	policy.Timeout = 5 * time.Second
 	if cfg.ConnectionQueueSize > 0 {
 		policy.ConnectionQueueSize = cfg.ConnectionQueueSize
 	}
-	if cfg.MinConnectionsPerNode > 0 {
-		policy.MinConnectionsPerNode = cfg.MinConnectionsPerNode
-	}
-	policy.LimitConnectionsToQueueSize = cfg.LimitConnectionsToQueueSize
+	// MinConnectionsPerNode and LimitConnectionsToQueueSize are intentionally
+	// left at Aerospike defaults — overriding either has triggered intermittent
+	// bootstrap timeouts in microservice deployments. The connection pool
+	// fix lives in ConnectionQueueSize + BatchPolicy timeouts.
 
 	client, err := as.NewClientWithPolicyAndHost(policy, hosts...)
 	if err != nil {
@@ -74,8 +81,6 @@ func NewAerospikeClientFromConfig(cfg config.AerospikeConfig, logger *slog.Logge
 		"seeds", seeds,
 		"port", cfg.Port,
 		"connectionQueueSize", policy.ConnectionQueueSize,
-		"minConnectionsPerNode", policy.MinConnectionsPerNode,
-		"limitConnectionsToQueueSize", policy.LimitConnectionsToQueueSize,
 		"socketTimeoutMs", cfg.SocketTimeoutMs,
 		"totalTimeoutMs", cfg.TotalTimeoutMs,
 	)
