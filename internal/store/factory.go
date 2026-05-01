@@ -72,6 +72,7 @@ func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Lo
 		),
 		CallbackURLRegistry: NewCallbackURLRegistry(
 			asClient, cfg.Aerospike.CallbackURLRegistry,
+			cfg.Aerospike.CallbackURLRegistryTTLSec,
 			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
 		),
 		CallbackAccumulator: NewCallbackAccumulatorStore(
