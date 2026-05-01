@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -19,9 +20,23 @@ import (
 const (
 	// maxPublishRetries is the maximum number of retries for Kafka publish failures.
 	maxPublishRetries = 5
-	// baseRetryDelay is the initial delay between publish retries.
-	baseRetryDelay = 500 * time.Millisecond
+	// defaultBaseRetryDelay is the initial delay between publish retries.
+	defaultBaseRetryDelay = 500 * time.Millisecond
 )
+
+// baseRetryDelay is the initial delay between publish retries. It is a var
+// (rather than a const) so tests can shrink it; production code should not
+// reassign it.
+var baseRetryDelay = defaultBaseRetryDelay
+
+// ErrPublishExhausted is returned by the publish helper when all Kafka publish
+// retries have been exhausted. It is treated as a terminal/fatal condition by
+// the P2P client: the announcement cannot be re-observed from the network
+// (peers are unlikely to re-broadcast one-shot subtree gossip), so the process
+// exits non-zero and relies on the orchestrator (Kubernetes restartPolicy:
+// Always, Docker restart: always, systemd, etc.) to restart the pod and
+// re-establish a fresh P2P session against a recovered Kafka.
+var ErrPublishExhausted = errors.New("kafka publish retries exhausted")
 
 // Client is a P2P client service that connects to the Teranode P2P network
 // via go-teranode-p2p-client, subscribes to subtree and block topics, and publishes
@@ -38,6 +53,12 @@ type Client struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	// fatalErr is signalled (non-blocking, buffered=1) when a publish loop hits
+	// a terminal condition (e.g. ErrPublishExhausted). Run reads from it to
+	// propagate the failure to the caller, which is expected to exit the
+	// process so an orchestrator-managed restart can re-establish state.
+	fatalErr chan error
+
 	mu        sync.RWMutex
 	connected bool
 }
@@ -53,6 +74,7 @@ func NewClient(
 		cfg:             cfg,
 		subtreeProducer: subtreeProducer,
 		blockProducer:   blockProducer,
+		fatalErr:        make(chan error, 1),
 	}
 	c.InitBase("p2p-client")
 	if logger != nil {
@@ -129,6 +151,48 @@ func (c *Client) Start(ctx context.Context) error {
 
 	c.Logger.Info("p2p client started")
 	return nil
+}
+
+// Run starts the client (if it has not already been started) and blocks until
+// either the supplied context is cancelled or a terminal/fatal error is
+// signalled by the publish path (e.g. ErrPublishExhausted).
+//
+// On terminal error the returned error is non-nil; callers (typically a
+// process entry point) should log it and exit the process with a non-zero
+// status so the orchestrator restarts the pod. A clean context cancellation
+// returns nil.
+func (c *Client) Run(ctx context.Context) error {
+	if !c.IsStarted() {
+		if err := c.Start(ctx); err != nil {
+			return err
+		}
+	}
+
+	select {
+	case err := <-c.fatalErr:
+		c.Logger.Error("p2p client terminating due to fatal error", "error", err)
+		return err
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+// signalFatal records a terminal error and cancels the client's internal
+// context so processing goroutines unwind. Only the first terminal error is
+// reported to Run; subsequent calls are best-effort no-ops.
+func (c *Client) signalFatal(err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case c.fatalErr <- err:
+	default:
+		// A fatal error has already been reported; drop the duplicate but
+		// still ensure the context is cancelled.
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
 }
 
 // Stop gracefully shuts down the P2P client, closing the message bus and
@@ -213,7 +277,10 @@ func (c *Client) processSubtreeMessages(ctx context.Context, ch <-chan teranode.
 				c.Logger.Info("subtree message channel closed")
 				return
 			}
-			c.handleSubtreeMessage(msg)
+			if err := c.handleSubtreeMessage(ctx, msg); err != nil {
+				c.signalFatal(err)
+				return
+			}
 		case <-ctx.Done():
 			c.Logger.Info("subtree message loop exiting: context cancelled")
 			return
@@ -234,7 +301,10 @@ func (c *Client) processBlockMessages(ctx context.Context, ch <-chan teranode.Bl
 				c.Logger.Info("block message channel closed")
 				return
 			}
-			c.handleBlockMessage(msg)
+			if err := c.handleBlockMessage(ctx, msg); err != nil {
+				c.signalFatal(err)
+				return
+			}
 		case <-ctx.Done():
 			c.Logger.Info("block message loop exiting: context cancelled")
 			return
@@ -243,7 +313,11 @@ func (c *Client) processBlockMessages(ctx context.Context, ch <-chan teranode.Bl
 }
 
 // handleSubtreeMessage maps a teranode SubtreeMessage to a Kafka SubtreeMessage and publishes it.
-func (c *Client) handleSubtreeMessage(msg teranode.SubtreeMessage) {
+//
+// Returns a non-nil error only for terminal/fatal conditions (currently
+// ErrPublishExhausted). Encoding errors and transient publish errors are
+// logged and swallowed so the loop can continue on subsequent messages.
+func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeMessage) error {
 	c.Logger.Debug("received subtree announcement",
 		"hash", msg.Hash,
 		"dataHubUrl", msg.DataHubURL,
@@ -262,14 +336,18 @@ func (c *Client) handleSubtreeMessage(msg teranode.SubtreeMessage) {
 			"hash", msg.Hash,
 			"error", err,
 		)
-		return
+		return nil
 	}
 
-	c.publishWithRetry(c.subtreeProducer, msg.Hash, encoded, "subtree")
+	return c.publishWithRetry(ctx, c.subtreeProducer, msg.Hash, encoded, "subtree")
 }
 
 // handleBlockMessage maps a teranode BlockMessage to a Kafka BlockMessage and publishes it.
-func (c *Client) handleBlockMessage(msg teranode.BlockMessage) {
+//
+// Returns a non-nil error only for terminal/fatal conditions (currently
+// ErrPublishExhausted). Encoding errors and transient publish errors are
+// logged and swallowed so the loop can continue on subsequent messages.
+func (c *Client) handleBlockMessage(ctx context.Context, msg teranode.BlockMessage) error {
 	c.Logger.Debug("received block announcement",
 		"hash", msg.Hash,
 		"height", msg.Height,
@@ -292,20 +370,32 @@ func (c *Client) handleBlockMessage(msg teranode.BlockMessage) {
 			"hash", msg.Hash,
 			"error", err,
 		)
-		return
+		return nil
 	}
 
-	c.publishWithRetry(c.blockProducer, msg.Hash, encoded, "block")
+	return c.publishWithRetry(ctx, c.blockProducer, msg.Hash, encoded, "block")
 }
 
-// publishWithRetry attempts to publish a message to Kafka with exponential backoff retries.
-func (c *Client) publishWithRetry(producer *kafka.Producer, key string, value []byte, msgType string) {
+// publishWithRetry attempts to publish a message to Kafka with exponential
+// backoff retries.
+//
+// Returns ErrPublishExhausted (wrapped) if all attempts fail. Callers are
+// expected to treat this as a terminal/fatal condition: the announcement
+// cannot be reconstructed from the network (peers are unlikely to re-broadcast
+// one-shot subtree gossip and there is no on-disk outbox), so silently
+// continuing would cause permanent loss of network observations the longer a
+// Kafka outage lasts. Instead, the client signals shutdown to its supervisor
+// (see Client.Run) which exits non-zero so the process orchestrator can
+// restart the pod from a fresh, durable P2P session.
+//
+// A nil return means the message was successfully published.
+func (c *Client) publishWithRetry(ctx context.Context, producer *kafka.Producer, key string, value []byte, msgType string) error {
 	delay := baseRetryDelay
 
 	for attempt := 1; attempt <= maxPublishRetries; attempt++ {
 		err := producer.Publish(key, value)
 		if err == nil {
-			return
+			return nil
 		}
 
 		c.Logger.Error("kafka publish failed",
@@ -317,17 +407,24 @@ func (c *Client) publishWithRetry(producer *kafka.Producer, key string, value []
 		)
 
 		if attempt == maxPublishRetries {
-			c.Logger.Error("kafka publish exhausted all retries, message dropped",
+			c.Logger.Error("kafka publish exhausted all retries, signalling fatal shutdown",
 				"type", msgType,
 				"key", key,
 				"valueLen", len(value),
 			)
-			return
+			return fmt.Errorf("%w: type=%s key=%s: %v", ErrPublishExhausted, msgType, key, err)
 		}
 
-		time.Sleep(delay)
+		select {
+		case <-ctx.Done():
+			// Treat shutdown during retry as non-fatal; the supervising
+			// process is already tearing things down.
+			return nil
+		case <-time.After(delay):
+		}
 		delay = time.Duration(math.Min(float64(delay)*2, float64(10*time.Second)))
 	}
+	return nil
 }
 
 // setConnected updates the connected state in a thread-safe manner.
