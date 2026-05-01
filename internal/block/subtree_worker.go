@@ -217,6 +217,15 @@ func (s *SubtreeWorkerService) maxAttempts() int {
 // max attempts (decrementing the counter so BLOCK_PROCESSED can still fire).
 // This prevents the silent drop where a Kafka/blob-store hiccup left the
 // downstream consumer waiting for STUMPs that never arrive (F-012).
+//
+// A failure of the counter Decrement itself (Aerospike/SQL transient hiccup)
+// is propagated to the consumer rather than being swallowed (F-013): on the
+// success path we route through handleTransientFailure so the work item is
+// retried and the next attempt can re-try the decrement; on the DLQ path we
+// return the error so the consumer redelivers and we eventually emit
+// BLOCK_PROCESSED once the counter store recovers. Without this, a transient
+// Decrement failure would silently leave the per-block counter > 0 forever,
+// arcade waiting for a BLOCK_PROCESSED that never fires.
 func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
 	workMsg, err := kafka.DecodeSubtreeWorkMessage(msg.Value)
 	if err != nil {
@@ -270,8 +279,14 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.Co
 		}
 	}
 
-	// Successful processing — decrement the per-block counter.
-	s.decrementCounterAndMaybeEmit(workMsg.BlockHash)
+	// Successful processing — decrement the per-block counter. If the
+	// counter store fails transiently here, route through the retry pipeline
+	// so the work item is redelivered and the decrement is re-attempted; we
+	// must not ack with a non-decremented counter, or BLOCK_PROCESSED will
+	// never fire for this block (F-013).
+	if err := s.decrementCounterAndMaybeEmit(workMsg.BlockHash); err != nil {
+		return s.handleTransientFailure(workMsg, fmt.Errorf("decrementing subtree counter: %w", err))
+	}
 	return nil
 }
 
@@ -279,6 +294,15 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.Co
 // retry or, once max attempts is reached, parks it on subtree-work-dlq and
 // decrements the counter so BLOCK_PROCESSED can still fire (with a missing
 // STUMP that arcade will surface as a BUMP build error rather than silent loss).
+//
+// If the counter Decrement on the DLQ path fails, the error is returned to the
+// caller so the consumer redelivers the work item rather than silently acking
+// with a non-decremented counter (F-013). The work has already been published
+// to the DLQ, so on redelivery the next attempt will see AttemptCount past
+// max and DLQ-publish again — that is acceptable until the counter store
+// recovers and Decrement succeeds; BLOCK_PROCESSED is delayed but not
+// silently lost. Operators should treat repeated DLQ-publish-then-Decrement
+// failures as alert-worthy (the loud Error-level log below).
 func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWorkMessage, cause error) error {
 	nextAttempt := workMsg.AttemptCount + 1
 	maxAttempts := s.maxAttempts()
@@ -305,8 +329,21 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 		}
 		// Counter decrement is required here: the work item is terminally
 		// failed but we still need BLOCK_PROCESSED to fire so arcade isn't
-		// stuck waiting for a STUMP that will never arrive.
-		s.decrementCounterAndMaybeEmit(workMsg.BlockHash)
+		// stuck waiting for a STUMP that will never arrive. If the decrement
+		// itself fails (counter-store transient hiccup), surface the error so
+		// the consumer redelivers and we re-attempt; the DLQ publish above
+		// will repeat, but that's preferable to silently acking with the
+		// counter still > 0 and BLOCK_PROCESSED never firing (F-013).
+		if decErr := s.decrementCounterAndMaybeEmit(workMsg.BlockHash); decErr != nil {
+			s.Logger.Error("ALERT: subtree counter decrement failed on DLQ path; BLOCK_PROCESSED delayed until counter store recovers",
+				"subtreeHash", workMsg.SubtreeHash,
+				"blockHash", workMsg.BlockHash,
+				"subtreeIndex", workMsg.SubtreeIndex,
+				"error", decErr,
+			)
+			return fmt.Errorf("decrementing subtree counter on DLQ path for block %s: %w",
+				workMsg.BlockHash, decErr)
+		}
 		return nil
 	}
 
@@ -332,9 +369,15 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 
 // decrementCounterAndMaybeEmit drives the per-block subtree counter and emits
 // BLOCK_PROCESSED when the last subtree finishes.
-func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash string) {
+//
+// Returns a non-nil error if the underlying counter store's Decrement fails.
+// The error MUST be propagated by callers so the work item is redelivered:
+// previously the failure was logged and swallowed, leaving the counter > 0
+// forever and BLOCK_PROCESSED never emitted for the affected block (F-013).
+// If no counter store is configured (test/dry-run), this is a no-op.
+func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash string) error {
 	if s.subtreeCounter == nil {
-		return
+		return nil
 	}
 	remaining, err := s.subtreeCounter.Decrement(blockHash)
 	if err != nil {
@@ -342,11 +385,12 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash string) {
 			"blockHash", blockHash,
 			"error", err,
 		)
-		return
+		return err
 	}
 	if remaining == 0 {
 		s.emitBlockProcessed(blockHash)
 	}
+	return nil
 }
 
 // publishSubtreeCallbacks publishes one CallbackTopicMessage per callbackURL per subtree.
