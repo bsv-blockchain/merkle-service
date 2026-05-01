@@ -44,6 +44,7 @@ func main() {
 	defer blockProducer.Close()
 
 	apiServer := api.NewServer(cfg.API, registry.Registration, registry.CallbackURLRegistry, registry.Health, logger)
+	apiServer.SetAllowPrivateCallbackIPs(cfg.Callback.AllowPrivateIPs)
 	p2pClient := p2p.NewClient(cfg.P2P, subtreeProducer, blockProducer, logger)
 	subtreeFetcher := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree)
 	blockProcessor := block.NewProcessor(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.CallbackURLRegistry, registry.SubtreeCounter, logger)
