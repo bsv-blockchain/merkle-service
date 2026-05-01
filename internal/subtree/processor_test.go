@@ -62,9 +62,12 @@ func (m *mockSeenCounter) Increment(txid string, subtreeID string) (*store.Incre
 }
 
 type mockRegCache struct {
-	cached map[string]bool // txid -> isRegistered
-	setReg []string        // txids passed to SetMultiRegistered
-	setNot []string        // txids passed to SetMultiNotRegistered
+	// cached tracks positive cache entries only. A txid present in this
+	// map is treated as "cached and registered". Negative results are
+	// not cached (see RegistrationCache documentation / F-020), so we
+	// no longer carry an isRegistered bool per entry.
+	cached map[string]bool
+	setReg []string // txids passed to SetMultiRegistered
 }
 
 func (m *mockRegCache) FilterUncached(txids []string) (uncached []string, cachedRegistered []string) {
@@ -81,11 +84,6 @@ func (m *mockRegCache) FilterUncached(txids []string) (uncached []string, cached
 
 func (m *mockRegCache) SetMultiRegistered(txids []string) error {
 	m.setReg = append(m.setReg, txids...)
-	return nil
-}
-
-func (m *mockRegCache) SetMultiNotRegistered(txids []string) error {
-	m.setNot = append(m.setNot, txids...)
 	return nil
 }
 
@@ -241,9 +239,14 @@ func TestFindRegisteredTxids_NoCache(t *testing.T) {
 }
 
 // TestFindRegisteredTxids_WithCache tests the cache + store interaction.
+//
+// Negatives are not cached (F-020), so a txid that the cache has
+// "no positive entry" for is treated as uncached and re-queried against
+// the backing store every pass. Only positive cache entries short-
+// circuit the registration lookup.
 func TestFindRegisteredTxids_WithCache(t *testing.T) {
 	cachedRegTxid := "aaaa000000000000000000000000000000000000000000000000000000000001"
-	cachedNotRegTxid := "bbbb000000000000000000000000000000000000000000000000000000000002"
+	uncachedTxidA := "bbbb000000000000000000000000000000000000000000000000000000000002"
 	uncachedRegTxid := "cccc000000000000000000000000000000000000000000000000000000000003"
 	uncachedNotRegTxid := "dddd000000000000000000000000000000000000000000000000000000000004"
 
@@ -256,9 +259,8 @@ func TestFindRegisteredTxids_WithCache(t *testing.T) {
 
 	cache := &mockRegCache{
 		cached: map[string]bool{
-			cachedRegTxid:    true,  // cached as registered
-			cachedNotRegTxid: false, // cached as NOT registered
-			// uncached txids not in map
+			cachedRegTxid: true, // cached as registered (positive)
+			// every other txid is uncached — negatives are never cached
 		},
 	}
 
@@ -267,7 +269,7 @@ func TestFindRegisteredTxids_WithCache(t *testing.T) {
 		regCache:          cache,
 	}
 
-	txids := []string{cachedRegTxid, cachedNotRegTxid, uncachedRegTxid, uncachedNotRegTxid}
+	txids := []string{cachedRegTxid, uncachedTxidA, uncachedRegTxid, uncachedNotRegTxid}
 	result, err := p.findRegisteredTxids(txids)
 	if err != nil {
 		t.Fatalf("findRegisteredTxids: %v", err)
@@ -290,24 +292,25 @@ func TestFindRegisteredTxids_WithCache(t *testing.T) {
 		t.Fatalf("expected 2 BatchGet calls, got %d", len(regStore.batchGetCalls))
 	}
 	batchTxids := regStore.batchGetCalls[0]
-	if len(batchTxids) != 2 {
-		t.Errorf("expected 2 uncached txids in first BatchGet, got %d", len(batchTxids))
+	if len(batchTxids) != 3 {
+		t.Errorf("expected 3 uncached txids in first BatchGet, got %d: %v", len(batchTxids), batchTxids)
 	}
 	cachedBatchTxids := regStore.batchGetCalls[1]
 	if len(cachedBatchTxids) != 1 || cachedBatchTxids[0] != cachedRegTxid {
 		t.Errorf("expected cached-registered txid in second BatchGet, got %v", cachedBatchTxids)
 	}
 
-	// Cache should be updated: uncachedRegTxid → registered, uncachedNotRegTxid → not registered
+	// Cache should record exactly one positive update (uncachedRegTxid).
+	// The two not-found txids must NOT produce any cache writes — that is
+	// the F-020 fix.
 	if len(cache.setReg) != 1 || cache.setReg[0] != uncachedRegTxid {
 		t.Errorf("expected SetMultiRegistered([%s]), got %v", uncachedRegTxid, cache.setReg)
 	}
-	if len(cache.setNot) != 1 || cache.setNot[0] != uncachedNotRegTxid {
-		t.Errorf("expected SetMultiNotRegistered([%s]), got %v", uncachedNotRegTxid, cache.setNot)
-	}
 }
 
-// TestFindRegisteredTxids_AllCached tests when all txids are cached.
+// TestFindRegisteredTxids_AllCached tests when all txids hit positive
+// cache entries (no uncached lookups). Since negatives are not cached
+// (F-020), "fully cached" means every input has a positive entry.
 func TestFindRegisteredTxids_AllCached(t *testing.T) {
 	txid1 := "1111000000000000000000000000000000000000000000000000000000000001"
 	txid2 := "2222000000000000000000000000000000000000000000000000000000000002"
@@ -315,13 +318,14 @@ func TestFindRegisteredTxids_AllCached(t *testing.T) {
 	regStore := &mockRegStore{
 		registrations: map[string][]string{
 			txid1: {"http://cb.example.com"},
+			txid2: {"http://cb2.example.com"},
 		},
 	}
 
 	cache := &mockRegCache{
 		cached: map[string]bool{
 			txid1: true,
-			txid2: false,
+			txid2: true,
 		},
 	}
 
@@ -335,11 +339,14 @@ func TestFindRegisteredTxids_AllCached(t *testing.T) {
 		t.Fatalf("findRegisteredTxids: %v", err)
 	}
 
-	if len(result) != 1 {
-		t.Fatalf("expected 1 registered txid, got %d", len(result))
+	if len(result) != 2 {
+		t.Fatalf("expected 2 registered txids, got %d", len(result))
 	}
 	if _, ok := result[txid1]; !ok {
 		t.Errorf("expected %s in result", txid1)
+	}
+	if _, ok := result[txid2]; !ok {
+		t.Errorf("expected %s in result", txid2)
 	}
 
 	// One BatchGet call for cached-registered txids' URLs (no call for uncached since all cached).
@@ -541,7 +548,8 @@ func TestFindRegisteredTxids_LargeSubtree(t *testing.T) {
 }
 
 // TestFindRegisteredTxids_CacheUpdatedCorrectly verifies the cache is properly
-// populated after a store lookup.
+// populated after a store lookup. Only positive results should be cached;
+// not-registered txids must not produce cache writes (F-020).
 func TestFindRegisteredTxids_CacheUpdatedCorrectly(t *testing.T) {
 	txidReg := "aaaa000000000000000000000000000000000000000000000000000000000001"
 	txidNot1 := "bbbb000000000000000000000000000000000000000000000000000000000002"
@@ -567,19 +575,9 @@ func TestFindRegisteredTxids_CacheUpdatedCorrectly(t *testing.T) {
 		t.Fatalf("findRegisteredTxids: %v", err)
 	}
 
-	// Verify cache was updated
+	// Verify cache was updated with the single positive result only.
 	if len(cache.setReg) != 1 || cache.setReg[0] != txidReg {
 		t.Errorf("expected registered cache update for %s, got %v", txidReg, cache.setReg)
-	}
-	if len(cache.setNot) != 2 {
-		t.Errorf("expected 2 not-registered cache updates, got %d: %v", len(cache.setNot), cache.setNot)
-	}
-	notSet := make(map[string]bool)
-	for _, txid := range cache.setNot {
-		notSet[txid] = true
-	}
-	if !notSet[txidNot1] || !notSet[txidNot2] {
-		t.Errorf("missing expected not-registered txids in cache: %v", cache.setNot)
 	}
 }
 

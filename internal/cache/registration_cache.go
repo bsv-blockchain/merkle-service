@@ -7,7 +7,23 @@ import (
 )
 
 // RegistrationCache wraps ImprovedCache for deduplicating registration lookups.
-// It caches whether a txid has been checked against Aerospike recently.
+//
+// Only positive results ("this txid is registered") are cached. Negative
+// results ("not registered") are intentionally NOT cached because the
+// registration store is mutated out-of-band by the API server's /watch
+// handler, which has no way to invalidate this in-process cache — and in
+// the microservices deployment topology (api-server, subtree-fetcher and
+// block-processor as separate processes) cannot reach the cache at all.
+//
+// Caching negatives previously caused F-020: a txid observed by the
+// subtree-fetcher before it was registered would be cached as
+// "not registered" with no TTL and remain hidden until the cache
+// wrapped around, suppressing callbacks for any later /watch.
+//
+// The performance loss vs caching negatives is bounded: every uncached
+// txid still flows through a single batched BatchGet against the
+// backing store. The hot positive-hit path (cachedRegistered in
+// FilterUncached) is unchanged.
 type RegistrationCache struct {
 	cache  *ImprovedCache
 	logger *slog.Logger
@@ -29,12 +45,12 @@ func NewRegistrationCache(maxMB int, logger *slog.Logger) (*RegistrationCache, e
 }
 
 // cacheValue represents a cached registration lookup result.
-// 0 = not registered, 1 = registered
+// Only `registered` is ever stored; see the package-level comment on
+// RegistrationCache for why negatives are not cached.
 type cacheValue byte
 
 const (
-	notRegistered cacheValue = 0
-	registered    cacheValue = 1
+	registered cacheValue = 1
 )
 
 // SetRegistered marks a txid as having been checked and found registered.
@@ -44,15 +60,6 @@ func (rc *RegistrationCache) SetRegistered(txid string) error {
 		return err
 	}
 	return rc.cache.Set(key, []byte{byte(registered)})
-}
-
-// SetNotRegistered marks a txid as having been checked and found not registered.
-func (rc *RegistrationCache) SetNotRegistered(txid string) error {
-	key, err := hex.DecodeString(txid)
-	if err != nil {
-		return err
-	}
-	return rc.cache.Set(key, []byte{byte(notRegistered)})
 }
 
 // SetMultiRegistered marks multiple txids as registered in batch.
@@ -73,27 +80,27 @@ func (rc *RegistrationCache) SetMultiRegistered(txids []string) error {
 	return rc.cache.SetMulti(keys, values)
 }
 
-// SetMultiNotRegistered marks multiple txids as not registered in batch.
-func (rc *RegistrationCache) SetMultiNotRegistered(txids []string) error {
-	keys := make([][]byte, 0, len(txids))
-	values := make([][]byte, 0, len(txids))
-	for _, txid := range txids {
-		key, err := hex.DecodeString(txid)
-		if err != nil {
-			continue
-		}
-		keys = append(keys, key)
-		values = append(values, []byte{byte(notRegistered)})
+// Invalidate removes any cached entry for txid. Safe to call for txids
+// that were never cached. Provided so an in-process /watch handler can
+// drop a stale entry as defence in depth — note that the canonical fix
+// for F-020 is "do not cache negatives", which this cache enforces by
+// construction (there is no SetNotRegistered).
+func (rc *RegistrationCache) Invalidate(txid string) error {
+	key, err := hex.DecodeString(txid)
+	if err != nil {
+		return err
 	}
-	if len(keys) == 0 {
-		return nil
-	}
-	return rc.cache.SetMulti(keys, values)
+	rc.cache.Del(key)
+	return nil
 }
 
 // GetCached checks if a txid lookup result is cached.
 // Returns (isRegistered, isCached).
-// If isCached is false, the caller should query Aerospike.
+//
+// Because negatives are never cached, isCached==true always implies
+// isRegistered==true. The two-value signature is preserved so callers
+// can reason about cache hits explicitly. If isCached is false, the
+// caller must query the backing store.
 func (rc *RegistrationCache) GetCached(txid string) (isRegistered bool, isCached bool) {
 	key, err := hex.DecodeString(txid)
 	if err != nil {
@@ -111,6 +118,9 @@ func (rc *RegistrationCache) GetCached(txid string) (isRegistered bool, isCached
 
 // FilterUncached takes a list of txids and returns only those NOT in the cache.
 // Also returns the cached results for those that ARE cached.
+//
+// Because negatives are never cached, every cached entry is positive,
+// and cachedRegistered will contain every txid that hits the cache.
 func (rc *RegistrationCache) FilterUncached(txids []string) (uncached []string, cachedRegistered []string) {
 	for _, txid := range txids {
 		isReg, isCached := rc.GetCached(txid)
