@@ -344,3 +344,18 @@ datahub:
   # Maximum number of retries for failed DataHub requests.
   # Env: DATAHUB_MAX_RETRIES
   maxRetries: 3
+
+  # Maximum response body size for /block/<hash> requests, in bytes.
+  # Block metadata is small (header + subtree-hash list), so the default
+  # 16 MiB leaves ~100x headroom. A hostile or malfunctioning DataHub
+  # returning more than this is rejected without buffering the whole body.
+  # Set <= 0 to use the built-in default. Mitigates F-027.
+  # Env: DATAHUB_MAX_BLOCK_BYTES
+  maxBlockBytes: 16777216
+
+  # Maximum response body size for /subtree/<hash> requests, in bytes.
+  # DataHub subtrees are concatenated 32-byte hashes; the default 1 GiB
+  # accommodates ~33.5M txids. Operators running with smaller subtree-size
+  # limits should tune this down. Set <= 0 to use the built-in default.
+  # Env: DATAHUB_MAX_SUBTREE_BYTES
+  maxSubtreeBytes: 1073741824

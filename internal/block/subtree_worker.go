@@ -76,7 +76,13 @@ func NewSubtreeWorkerService(
 }
 
 func (s *SubtreeWorkerService) Init(_ interface{}) error {
-	s.dataHubClient = datahub.NewClient(s.datahubCfg.TimeoutSec, s.datahubCfg.MaxRetries, s.Logger)
+	s.dataHubClient = datahub.NewClientWithCaps(
+		s.datahubCfg.TimeoutSec,
+		s.datahubCfg.MaxRetries,
+		s.datahubCfg.MaxBlockBytes,
+		s.datahubCfg.MaxSubtreeBytes,
+		s.Logger,
+	)
 
 	// Initialize block-time registration cache. A miss falls through to
 	// Aerospike, so a cache failure is not fatal — log and proceed.
