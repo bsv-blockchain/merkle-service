@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -140,5 +142,82 @@ func TestCallbackAccumulatorStore_ReadNonexistent(t *testing.T) {
 	}
 	if result != nil {
 		t.Errorf("expected nil result for nonexistent block, got %v", result)
+	}
+}
+
+// TestCallbackAccumulatorStore_ConcurrentAppendReadAndDelete is a regression
+// test for F-035: the previous Get-then-Delete implementation had a window
+// between the read and the delete where a concurrent Append would land in the
+// record, then be erased by the subsequent Delete without ever being returned.
+// The fix uses a single Operate(ListPopRangeFromOp) so the read+remove is
+// atomic. This test verifies that running Append concurrently with repeated
+// ReadAndDelete loses no entries.
+func TestCallbackAccumulatorStore_ConcurrentAppendReadAndDelete(t *testing.T) {
+	store := newAccumulatorTestStore(t)
+
+	const (
+		blockHash    = "block-race"
+		callbackURL  = "http://example.com/cb"
+		appenders    = 8
+		appendsEach  = 50
+		totalAppends = appenders * appendsEach
+	)
+
+	stump := []byte{0xAB}
+
+	// Reader goroutine: drain ReadAndDelete in a loop while appenders run.
+	var seen int64
+	stop := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-stop:
+				// One final drain after appenders are done.
+				result, err := store.ReadAndDelete(blockHash)
+				if err != nil {
+					t.Errorf("final ReadAndDelete failed: %v", err)
+					return
+				}
+				if acc := result[callbackURL]; acc != nil {
+					atomic.AddInt64(&seen, int64(len(acc.Entries)))
+				}
+				return
+			default:
+			}
+			result, err := store.ReadAndDelete(blockHash)
+			if err != nil {
+				t.Errorf("ReadAndDelete failed: %v", err)
+				return
+			}
+			if acc := result[callbackURL]; acc != nil {
+				atomic.AddInt64(&seen, int64(len(acc.Entries)))
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < appenders; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for j := 0; j < appendsEach; j++ {
+				txid := fmt.Sprintf("worker%d-tx%d", workerID, j)
+				if err := store.Append(blockHash, callbackURL, []string{txid}, workerID*appendsEach+j, stump); err != nil {
+					t.Errorf("Append failed: %v", err)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(stop)
+	<-readerDone
+
+	got := atomic.LoadInt64(&seen)
+	if got != int64(totalAppends) {
+		t.Fatalf("F-035 regression: expected %d entries observed across ReadAndDelete calls, got %d (%d lost)",
+			totalAppends, got, int64(totalAppends)-got)
 	}
 }
