@@ -48,8 +48,10 @@ func TestSubtreeWorkerService_EmitBlockProcessed_NilRegistry(t *testing.T) {
 	svc.Logger = logger
 	svc.callbackProducer = newTestKafkaProducer(mock, "callback-test", logger)
 
-	// Should not panic with nil registry.
-	svc.emitBlockProcessed("blockhash-123")
+	// Should not panic, and should return nil since there's no registry.
+	if err := svc.emitBlockProcessed("blockhash-123"); err != nil {
+		t.Errorf("expected nil error with nil registry, got: %v", err)
+	}
 
 	if len(mock.messages) != 0 {
 		t.Errorf("expected no messages with nil registry, got %d", len(mock.messages))

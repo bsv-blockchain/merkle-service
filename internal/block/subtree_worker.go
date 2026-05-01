@@ -232,6 +232,15 @@ func (s *SubtreeWorkerService) maxAttempts() int {
 // BLOCK_PROCESSED once the counter store recovers. Without this, a transient
 // Decrement failure would silently leave the per-block counter > 0 forever,
 // arcade waiting for a BLOCK_PROCESSED that never fires.
+//
+// A failure of the BLOCK_PROCESSED publish itself (callback-topic Kafka
+// outage) is also propagated rather than swallowed (F-014). The counter has
+// already been decremented to 0 at this point; the work item is re-driven
+// through handleTransientFailure so the consumer retries. On redelivery the
+// counter goes negative; we treat remaining<=0 as "still need to emit" and
+// re-publish BLOCK_PROCESSED. Receiver-side dedup at the delivery service
+// (keyed by blockHash + callbackURL + type) ensures the registered endpoint
+// sees BLOCK_PROCESSED at most once per (block, URL) pair.
 func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
 	workMsg, err := kafka.DecodeSubtreeWorkMessage(msg.Value)
 	if err != nil {
@@ -376,10 +385,22 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 // decrementCounterAndMaybeEmit drives the per-block subtree counter and emits
 // BLOCK_PROCESSED when the last subtree finishes.
 //
-// Returns a non-nil error if the underlying counter store's Decrement fails.
-// The error MUST be propagated by callers so the work item is redelivered:
-// previously the failure was logged and swallowed, leaving the counter > 0
-// forever and BLOCK_PROCESSED never emitted for the affected block (F-013).
+// Returns a non-nil error if either the underlying counter store's Decrement
+// fails (F-013) or if BLOCK_PROCESSED emission fails (F-014). The error MUST
+// be propagated by callers so the work item is redelivered:
+//   - F-013: a Decrement failure left the counter > 0 forever and
+//     BLOCK_PROCESSED never emitted for the affected block.
+//   - F-014: a callback-topic publish failure during emit silently dropped
+//     BLOCK_PROCESSED — the counter had already hit 0, the work item was
+//     ack'd, and the registered callback endpoint never got the notification.
+//
+// Note: when emit fails on the success path, the counter has already been
+// decremented to 0. On redelivery the counter will go to -1 and emit will
+// fire again (we treat remaining<=0 as "last subtree, emit now"). Duplicate
+// BLOCK_PROCESSED messages are deduplicated at the callback delivery service
+// (keyed by blockHash + callbackURL + BLOCK_PROCESSED), so the receiver sees
+// at most one BLOCK_PROCESSED per (block, callbackURL) pair.
+//
 // If no counter store is configured (test/dry-run), this is a no-op.
 func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash string) error {
 	if s.subtreeCounter == nil {
@@ -393,8 +414,20 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash string) er
 		)
 		return err
 	}
-	if remaining == 0 {
-		s.emitBlockProcessed(blockHash)
+	// remaining<=0 covers both the normal "last subtree" case (==0) and the
+	// retry-after-emit-failure case (<0): if a previous attempt decremented to
+	// 0 but failed to publish BLOCK_PROCESSED, the redelivered work item will
+	// drive the counter negative; we still need to emit so the notification is
+	// not silently lost. Receiver-side dedup handles the duplicate.
+	if remaining <= 0 {
+		if emitErr := s.emitBlockProcessed(blockHash); emitErr != nil {
+			s.Logger.Error("failed to emit BLOCK_PROCESSED; work item will be redelivered",
+				"blockHash", blockHash,
+				"remaining", remaining,
+				"error", emitErr,
+			)
+			return fmt.Errorf("emitting BLOCK_PROCESSED for block %s: %w", blockHash, emitErr)
+		}
 	}
 	return nil
 }
@@ -467,45 +500,76 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 	return firstErr
 }
 
-// emitBlockProcessed publishes a BLOCK_PROCESSED message to every registered callback URL.
-func (s *SubtreeWorkerService) emitBlockProcessed(blockHash string) {
+// emitBlockProcessed publishes a BLOCK_PROCESSED message to every registered
+// callback URL.
+//
+// Returns a non-nil error if the URL-registry lookup fails OR if any per-URL
+// encode/publish fails. The loop continues past a single per-URL failure so
+// independent callbacks still go out (partial-success), but the first error
+// encountered is returned to the caller so decrementCounterAndMaybeEmit can
+// propagate it back through handleMessage → handleTransientFailure rather
+// than silently swallowing it. Without this, a transient callback-topic
+// outage when the LAST subtree's decrement-to-zero triggers emit would
+// permanently drop BLOCK_PROCESSED — the counter has already reached zero,
+// the work item is ack'd, and the registered endpoint never receives the
+// notification (F-014).
+//
+// On retry, the redelivered work item drives the counter past zero and
+// emit fires again; duplicate BLOCK_PROCESSED messages are deduplicated at
+// the callback delivery service (keyed by blockHash + callbackURL + type).
+func (s *SubtreeWorkerService) emitBlockProcessed(blockHash string) error {
 	if s.urlRegistry == nil {
-		return
+		return nil
 	}
 
 	urls, err := s.urlRegistry.GetAll()
 	if err != nil {
 		s.Logger.Error("failed to get callback URLs for BLOCK_PROCESSED", "error", err)
-		return
+		return fmt.Errorf("getting callback URLs for BLOCK_PROCESSED on block %s: %w", blockHash, err)
 	}
 	if len(urls) == 0 {
-		return
+		return nil
 	}
 
+	// Track the first error so the caller can re-drive the work item, while
+	// still attempting the remaining URLs (each callback target is
+	// independent — a hiccup on one shouldn't deny delivery to the others on
+	// this attempt). Matches publishSubtreeCallbacks's partial-success
+	// pattern from PR #77.
+	var firstErr error
 	for _, callbackURL := range urls {
 		msg := &kafka.CallbackTopicMessage{
 			CallbackURL: callbackURL,
 			Type:        kafka.CallbackBlockProcessed,
 			BlockHash:   blockHash,
 		}
-		data, err := msg.Encode()
-		if err != nil {
+		data, encErr := msg.Encode()
+		if encErr != nil {
 			s.Logger.Error("failed to encode BLOCK_PROCESSED message",
 				"callbackURL", callbackURL,
-				"error", err,
+				"error", encErr,
 			)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("encoding BLOCK_PROCESSED for %s: %w", callbackURL, encErr)
+			}
 			continue
 		}
-		if err := s.callbackProducer.PublishWithHashKey(callbackURL, data); err != nil {
+		if pubErr := s.callbackProducer.PublishWithHashKey(callbackURL, data); pubErr != nil {
 			s.Logger.Error("failed to publish BLOCK_PROCESSED callback",
 				"callbackURL", callbackURL,
-				"error", err,
+				"error", pubErr,
 			)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("publishing BLOCK_PROCESSED for %s: %w", callbackURL, pubErr)
+			}
 		}
 	}
 
-	s.Logger.Info("emitted BLOCK_PROCESSED callbacks",
-		"blockHash", blockHash,
-		"callbackURLs", len(urls),
-	)
+	if firstErr == nil {
+		s.Logger.Info("emitted BLOCK_PROCESSED callbacks",
+			"blockHash", blockHash,
+			"callbackURLs", len(urls),
+		)
+	}
+	return firstErr
 }
