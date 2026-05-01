@@ -56,31 +56,68 @@ type APIConfig struct {
 
 // AerospikeConfig holds Aerospike connection configuration.
 type AerospikeConfig struct {
-	Host             string `yaml:"host"             mapstructure:"host"`
-	Port             int    `yaml:"port"             mapstructure:"port"`
-	Namespace        string `yaml:"namespace"        mapstructure:"namespace"`
-	SetName          string `yaml:"setName"          mapstructure:"setname"`
-	SeenSet          string `yaml:"seenSet"          mapstructure:"seenset"`
-	CallbackDedupSet      string `yaml:"callbackDedupSet"      mapstructure:"callbackdedupset"`
-	CallbackURLRegistry   string `yaml:"callbackUrlRegistry"   mapstructure:"callbackurlregistry"`
-	SubtreeCounterSet     string `yaml:"subtreeCounterSet"     mapstructure:"subtreecounterset"`
-	SubtreeCounterTTLSec  int    `yaml:"subtreeCounterTTLSec"  mapstructure:"subtreecounterttlsec"`
+	// Host is a single seed node address. Kept for backward compatibility;
+	// prefer Seeds for production (multiple seeds protect against the seed
+	// node's connection pool becoming the bottleneck).
+	Host string `yaml:"host" mapstructure:"host"`
+	// Seeds is a list of seed node addresses. When non-empty, Host is ignored.
+	Seeds                []string `yaml:"seeds"                mapstructure:"seeds"`
+	Port                 int      `yaml:"port"                 mapstructure:"port"`
+	Namespace            string   `yaml:"namespace"            mapstructure:"namespace"`
+	SetName              string   `yaml:"setName"              mapstructure:"setname"`
+	SeenSet              string   `yaml:"seenSet"              mapstructure:"seenset"`
+	CallbackDedupSet     string   `yaml:"callbackDedupSet"     mapstructure:"callbackdedupset"`
+	CallbackURLRegistry  string   `yaml:"callbackUrlRegistry"  mapstructure:"callbackurlregistry"`
+	SubtreeCounterSet    string   `yaml:"subtreeCounterSet"    mapstructure:"subtreecounterset"`
+	SubtreeCounterTTLSec int      `yaml:"subtreeCounterTTLSec" mapstructure:"subtreecounterttlsec"`
 	CallbackAccumulatorSet    string `yaml:"callbackAccumulatorSet"    mapstructure:"callbackaccumulatorset"`
 	CallbackAccumulatorTTLSec int    `yaml:"callbackAccumulatorTTLSec" mapstructure:"callbackaccumulatorttlsec"`
-	MaxRetries                int    `yaml:"maxRetries"                mapstructure:"maxretries"`
-	RetryBaseMs           int    `yaml:"retryBaseMs"           mapstructure:"retrybasems"`
+	MaxRetries  int `yaml:"maxRetries"  mapstructure:"maxretries"`
+	RetryBaseMs int `yaml:"retryBaseMs" mapstructure:"retrybasems"`
+	// ConnectionQueueSize is the per-node connection pool size. The Aerospike
+	// Go client default is 100; under bursty BatchGet load (e.g. 14+ subtrees
+	// processed in parallel during block-time, each fanning out thousands of
+	// txid lookups) the pool is trivially exhausted and we see
+	// "connection pool is empty" timeouts.
+	ConnectionQueueSize int `yaml:"connectionQueueSize" mapstructure:"connectionqueuesize"`
+	// MinConnectionsPerNode keeps a warm baseline of connections so the first
+	// burst after idle doesn't pay the dial cost on every request.
+	MinConnectionsPerNode int `yaml:"minConnectionsPerNode" mapstructure:"minconnectionspernode"`
+	// LimitConnectionsToQueueSize, when false, allows transient bursts above
+	// ConnectionQueueSize (extra connections are closed when returned). Set to
+	// true to enforce a hard cap (fails fast under sustained overload).
+	LimitConnectionsToQueueSize bool `yaml:"limitConnectionsToQueueSize" mapstructure:"limitconnectionstoqueuesize"`
+	// SocketTimeoutMs caps the time spent on a single transport-level
+	// read/write attempt before retrying. 0 = client default.
+	SocketTimeoutMs int `yaml:"socketTimeoutMs" mapstructure:"sockettimeoutms"`
+	// TotalTimeoutMs is the overall deadline for a batch operation across all
+	// retries. 0 = client default (no overall cap).
+	TotalTimeoutMs int `yaml:"totalTimeoutMs" mapstructure:"totaltimeoutms"`
+}
+
+// SeedHosts returns the list of seed hosts to use when constructing the
+// Aerospike client. Falls back to the single Host when Seeds is empty.
+func (a AerospikeConfig) SeedHosts() []string {
+	if len(a.Seeds) > 0 {
+		return a.Seeds
+	}
+	if a.Host == "" {
+		return nil
+	}
+	return []string{a.Host}
 }
 
 // KafkaConfig holds Kafka connection configuration.
 type KafkaConfig struct {
-	Brokers          []string `yaml:"brokers"          mapstructure:"brokers"`
-	SubtreeTopic     string   `yaml:"subtreeTopic"     mapstructure:"subtreetopic"`
-	BlockTopic       string   `yaml:"blockTopic"       mapstructure:"blocktopic"`
-	CallbackTopic    string   `yaml:"callbackTopic"    mapstructure:"callbacktopic"`
-	CallbackDLQTopic string   `yaml:"callbackDlqTopic" mapstructure:"callbackdlqtopic"`
-	SubtreeDLQTopic  string   `yaml:"subtreeDlqTopic"  mapstructure:"subtreedlqtopic"`
-	SubtreeWorkTopic string   `yaml:"subtreeWorkTopic" mapstructure:"subtreeworktopic"`
-	ConsumerGroup    string   `yaml:"consumerGroup"    mapstructure:"consumergroup"`
+	Brokers             []string `yaml:"brokers"             mapstructure:"brokers"`
+	SubtreeTopic        string   `yaml:"subtreeTopic"        mapstructure:"subtreetopic"`
+	BlockTopic          string   `yaml:"blockTopic"          mapstructure:"blocktopic"`
+	CallbackTopic       string   `yaml:"callbackTopic"       mapstructure:"callbacktopic"`
+	CallbackDLQTopic    string   `yaml:"callbackDlqTopic"    mapstructure:"callbackdlqtopic"`
+	SubtreeDLQTopic     string   `yaml:"subtreeDlqTopic"     mapstructure:"subtreedlqtopic"`
+	SubtreeWorkTopic    string   `yaml:"subtreeWorkTopic"    mapstructure:"subtreeworktopic"`
+	SubtreeWorkDLQTopic string   `yaml:"subtreeWorkDlqTopic" mapstructure:"subtreeworkdlqtopic"`
+	ConsumerGroup       string   `yaml:"consumerGroup"       mapstructure:"consumergroup"`
 }
 
 // P2PMsgBusConfig holds configuration for the underlying libp2p message bus.
@@ -121,6 +158,21 @@ type BlockConfig struct {
 	WorkerPoolSize int `yaml:"workerPoolSize" mapstructure:"workerpoolsize"`
 	PostMineTTLSec int `yaml:"postMineTTLSec" mapstructure:"postminettlsec"`
 	DedupCacheSize int `yaml:"dedupCacheSize" mapstructure:"dedupcachesize"`
+	// MaxAttempts caps how many times a subtree work item is re-driven through
+	// the subtree-work topic before it is parked on subtree-work-dlq. The DLQ
+	// hand-off still decrements the per-block subtree counter so BLOCK_PROCESSED
+	// can fire — at that point arcade will see a missing STUMP for that subtree
+	// and surface it as a BUMP build error rather than silently going stale.
+	MaxAttempts int `yaml:"maxAttempts" mapstructure:"maxattempts"`
+	// RegCacheMaxMB sizes the in-process registration deduplication cache used
+	// by block-time subtree processing. Same shape as Subtree.CacheMaxMB but
+	// independent so all-in-one and microservice topologies behave identically.
+	RegCacheMaxMB int `yaml:"regCacheMaxMB" mapstructure:"regcachemaxmb"`
+	// BatchGetConcurrency caps the number of concurrent registration BatchGet
+	// calls per subtree-worker process. Without this limit a single block
+	// announcement can fire one BatchGet per subtree (up to 30+) in parallel
+	// and exhaust the Aerospike connection pool.
+	BatchGetConcurrency int `yaml:"batchGetConcurrency" mapstructure:"batchgetconcurrency"`
 }
 
 // CallbackConfig holds callback delivery configuration.
@@ -165,6 +217,7 @@ func registerDefaults(v *viper.Viper) {
 
 	// Aerospike
 	v.SetDefault("aerospike.host", "localhost")
+	v.SetDefault("aerospike.seeds", []string{})
 	v.SetDefault("aerospike.port", 3000)
 	v.SetDefault("aerospike.namespace", "merkle")
 	v.SetDefault("aerospike.setname", "merkle_registrations")
@@ -177,6 +230,11 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.callbackaccumulatorttlsec", 600)
 	v.SetDefault("aerospike.maxretries", 3)
 	v.SetDefault("aerospike.retrybasems", 100)
+	v.SetDefault("aerospike.connectionqueuesize", 256)
+	v.SetDefault("aerospike.minconnectionspernode", 16)
+	v.SetDefault("aerospike.limitconnectionstoqueuesize", false)
+	v.SetDefault("aerospike.sockettimeoutms", 5000)
+	v.SetDefault("aerospike.totaltimeoutms", 15000)
 
 	// Kafka
 	v.SetDefault("kafka.brokers", []string{"localhost:9092"})
@@ -186,6 +244,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("kafka.callbackdlqtopic", "callback-dlq")
 	v.SetDefault("kafka.subtreedlqtopic", "subtree-dlq")
 	v.SetDefault("kafka.subtreeworktopic", "subtree-work")
+	v.SetDefault("kafka.subtreeworkdlqtopic", "subtree-work-dlq")
 	v.SetDefault("kafka.consumergroup", "merkle-service")
 
 	// P2P
@@ -208,6 +267,9 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("block.workerpoolsize", 16)
 	v.SetDefault("block.postminettlsec", 1800)
 	v.SetDefault("block.dedupcachesize", 10000)
+	v.SetDefault("block.maxattempts", 10)
+	v.SetDefault("block.regcachemaxmb", 64)
+	v.SetDefault("block.batchgetconcurrency", 4)
 
 	// Callback
 	v.SetDefault("callback.maxretries", 5)
@@ -253,19 +315,25 @@ func bindEnvVars(v *viper.Viper) {
 		"store.sql.maxidleconns":    "STORE_SQL_MAX_IDLE_CONNS",
 
 		// Aerospike
-		"aerospike.host":        "AEROSPIKE_HOST",
-		"aerospike.port":        "AEROSPIKE_PORT",
-		"aerospike.namespace":   "AEROSPIKE_NAMESPACE",
-		"aerospike.setname":     "AEROSPIKE_SET",
-		"aerospike.seenset":          "AEROSPIKE_SEEN_SET",
+		"aerospike.host":      "AEROSPIKE_HOST",
+		"aerospike.seeds":     "AEROSPIKE_SEEDS",
+		"aerospike.port":      "AEROSPIKE_PORT",
+		"aerospike.namespace": "AEROSPIKE_NAMESPACE",
+		"aerospike.setname":   "AEROSPIKE_SET",
+		"aerospike.seenset":             "AEROSPIKE_SEEN_SET",
 		"aerospike.callbackdedupset":    "AEROSPIKE_CALLBACK_DEDUP_SET",
 		"aerospike.callbackurlregistry": "AEROSPIKE_CALLBACK_URL_REGISTRY",
-		"aerospike.subtreecounterset":    "AEROSPIKE_SUBTREE_COUNTER_SET",
-		"aerospike.subtreecounterttlsec": "AEROSPIKE_SUBTREE_COUNTER_TTL_SEC",
+		"aerospike.subtreecounterset":         "AEROSPIKE_SUBTREE_COUNTER_SET",
+		"aerospike.subtreecounterttlsec":      "AEROSPIKE_SUBTREE_COUNTER_TTL_SEC",
 		"aerospike.callbackaccumulatorset":    "AEROSPIKE_CALLBACK_ACCUMULATOR_SET",
 		"aerospike.callbackaccumulatorttlsec": "AEROSPIKE_CALLBACK_ACCUMULATOR_TTL_SEC",
-		"aerospike.maxretries":           "AEROSPIKE_MAX_RETRIES",
-		"aerospike.retrybasems":          "AEROSPIKE_RETRY_BASE_MS",
+		"aerospike.maxretries":                "AEROSPIKE_MAX_RETRIES",
+		"aerospike.retrybasems":               "AEROSPIKE_RETRY_BASE_MS",
+		"aerospike.connectionqueuesize":         "AEROSPIKE_CONNECTION_QUEUE_SIZE",
+		"aerospike.minconnectionspernode":       "AEROSPIKE_MIN_CONNECTIONS_PER_NODE",
+		"aerospike.limitconnectionstoqueuesize": "AEROSPIKE_LIMIT_CONNECTIONS_TO_QUEUE_SIZE",
+		"aerospike.sockettimeoutms":             "AEROSPIKE_SOCKET_TIMEOUT_MS",
+		"aerospike.totaltimeoutms":              "AEROSPIKE_TOTAL_TIMEOUT_MS",
 
 		// Kafka
 		"kafka.brokers":        "KAFKA_BROKERS",
@@ -274,8 +342,9 @@ func bindEnvVars(v *viper.Viper) {
 		"kafka.callbacktopic":    "KAFKA_CALLBACK_TOPIC",
 		"kafka.callbackdlqtopic": "KAFKA_CALLBACK_DLQ_TOPIC",
 		"kafka.subtreedlqtopic":  "KAFKA_SUBTREE_DLQ_TOPIC",
-		"kafka.subtreeworktopic": "KAFKA_SUBTREE_WORK_TOPIC",
-		"kafka.consumergroup":    "KAFKA_CONSUMER_GROUP",
+		"kafka.subtreeworktopic":    "KAFKA_SUBTREE_WORK_TOPIC",
+		"kafka.subtreeworkdlqtopic": "KAFKA_SUBTREE_WORK_DLQ_TOPIC",
+		"kafka.consumergroup":       "KAFKA_CONSUMER_GROUP",
 
 		// P2P
 		"p2p.network":     "P2P_NETWORK",
@@ -298,9 +367,12 @@ func bindEnvVars(v *viper.Viper) {
 		"subtree.maxattempts":    "SUBTREE_MAX_ATTEMPTS",
 
 		// Block
-		"block.workerpoolsize": "BLOCK_WORKER_POOL_SIZE",
-		"block.postminettlsec":  "BLOCK_POST_MINE_TTL_SEC",
-		"block.dedupcachesize":  "BLOCK_DEDUP_CACHE_SIZE",
+		"block.workerpoolsize":      "BLOCK_WORKER_POOL_SIZE",
+		"block.postminettlsec":      "BLOCK_POST_MINE_TTL_SEC",
+		"block.dedupcachesize":      "BLOCK_DEDUP_CACHE_SIZE",
+		"block.maxattempts":         "BLOCK_MAX_ATTEMPTS",
+		"block.regcachemaxmb":       "BLOCK_REG_CACHE_MAX_MB",
+		"block.batchgetconcurrency": "BLOCK_BATCH_GET_CONCURRENCY",
 
 		// Callback
 		"callback.maxretries":     "CALLBACK_MAX_RETRIES",

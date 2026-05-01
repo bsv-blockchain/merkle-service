@@ -73,12 +73,18 @@ func DecodeBlockMessage(data []byte) (*BlockMessage, error) {
 }
 
 // SubtreeWorkMessage represents a subtree processing work item dispatched by the block processor.
+// AttemptCount is incremented by subtree-worker when re-publishing the message
+// for retry; on reaching BlockConfig.MaxAttempts the message is routed to the
+// subtree-work-dlq topic instead of being re-driven again. The original counter
+// is decremented exactly once per subtree (on success or DLQ), so retries
+// don't cause BLOCK_PROCESSED to fire prematurely.
 type SubtreeWorkMessage struct {
 	BlockHash    string `json:"blockHash"`
 	BlockHeight  uint32 `json:"blockHeight"`
 	SubtreeHash  string `json:"subtreeHash"`
 	SubtreeIndex int    `json:"subtreeIndex"`
 	DataHubURL   string `json:"dataHubUrl"`
+	AttemptCount int    `json:"attemptCount,omitempty"`
 }
 
 func (m *SubtreeWorkMessage) Encode() ([]byte, error) {

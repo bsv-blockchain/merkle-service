@@ -7,6 +7,7 @@ import (
 
 	"github.com/IBM/sarama"
 
+	"github.com/bsv-blockchain/merkle-service/internal/cache"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
@@ -18,20 +19,32 @@ import (
 // subtree (registration lookup, STUMP build, MINED callback publishing), writes
 // STUMPs to the shared cache, and coordinates BLOCK_PROCESSED emission via an
 // Aerospike subtree counter.
+//
+// On transient processing failure (Aerospike timeout, DataHub fetch failure,
+// blob store hiccup) the work item is re-published to subtree-work with
+// AttemptCount+1 instead of being silently dropped. The per-block subtree
+// counter is decremented exactly once per work item — on successful processing
+// or on DLQ hand-off — so BLOCK_PROCESSED still fires when retries exhaust,
+// but a transient blip during a single block no longer leaves the bump-builder
+// staring at an incomplete STUMP set.
 type SubtreeWorkerService struct {
 	service.BaseService
 
-	kafkaCfg       config.KafkaConfig
-	blockCfg       config.BlockConfig
-	datahubCfg     config.DataHubConfig
+	kafkaCfg         config.KafkaConfig
+	blockCfg         config.BlockConfig
+	datahubCfg       config.DataHubConfig
 	consumer         *kafka.Consumer
 	callbackProducer *kafka.Producer
+	retryProducer    *kafka.Producer // re-publishes to subtree-work on transient failure
+	dlqProducer      *kafka.Producer // publishes to subtree-work-dlq when MaxAttempts is exceeded
 	regStore         store.RegistrationStore
 	subtreeStore     store.SubtreeStore
 	stumpStore       store.StumpStore
 	urlRegistry      store.CallbackURLRegistry
 	subtreeCounter   store.SubtreeCounterStore
 	dataHubClient    *datahub.Client
+	regCache         RegCache
+	batchSem         chan struct{}
 }
 
 func NewSubtreeWorkerService(
@@ -65,7 +78,26 @@ func NewSubtreeWorkerService(
 func (s *SubtreeWorkerService) Init(_ interface{}) error {
 	s.dataHubClient = datahub.NewClient(s.datahubCfg.TimeoutSec, s.datahubCfg.MaxRetries, s.Logger)
 
-	// Create callback producer for STUMP callbacks.
+	// Initialize block-time registration cache. A miss falls through to
+	// Aerospike, so a cache failure is not fatal — log and proceed.
+	if s.blockCfg.RegCacheMaxMB > 0 {
+		regCache, err := cache.NewRegistrationCache(s.blockCfg.RegCacheMaxMB, s.Logger)
+		if err != nil {
+			s.Logger.Warn("failed to create block registration cache, proceeding without",
+				"error", err,
+				"maxMB", s.blockCfg.RegCacheMaxMB,
+			)
+		} else {
+			s.regCache = regCache
+		}
+	}
+
+	// Bound concurrent BatchGets so a single block fanning out 14+ subtrees
+	// can't exhaust the Aerospike connection pool. <=0 disables the gate.
+	if s.blockCfg.BatchGetConcurrency > 0 {
+		s.batchSem = make(chan struct{}, s.blockCfg.BatchGetConcurrency)
+	}
+
 	callbackProducer, err := kafka.NewProducer(
 		s.kafkaCfg.Brokers,
 		s.kafkaCfg.CallbackTopic,
@@ -76,7 +108,30 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 	}
 	s.callbackProducer = callbackProducer
 
-	// Create consumer for the subtree-work topic.
+	retryProducer, err := kafka.NewProducer(
+		s.kafkaCfg.Brokers,
+		s.kafkaCfg.SubtreeWorkTopic,
+		s.Logger,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create subtree-work retry producer: %w", err)
+	}
+	s.retryProducer = retryProducer
+
+	dlqTopic := s.kafkaCfg.SubtreeWorkDLQTopic
+	if dlqTopic == "" {
+		dlqTopic = "subtree-work-dlq"
+	}
+	dlqProducer, err := kafka.NewProducer(
+		s.kafkaCfg.Brokers,
+		dlqTopic,
+		s.Logger,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create subtree-work DLQ producer: %w", err)
+	}
+	s.dlqProducer = dlqProducer
+
 	consumer, err := kafka.NewConsumer(
 		s.kafkaCfg.Brokers,
 		s.kafkaCfg.ConsumerGroup+"-subtree-worker",
@@ -91,6 +146,11 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 
 	s.Logger.Info("subtree worker service initialized",
 		"subtreeWorkTopic", s.kafkaCfg.SubtreeWorkTopic,
+		"subtreeWorkDLQTopic", dlqTopic,
+		"maxAttempts", s.maxAttempts(),
+		"regCacheEnabled", s.regCache != nil,
+		"regCacheMaxMB", s.blockCfg.RegCacheMaxMB,
+		"batchGetConcurrency", s.blockCfg.BatchGetConcurrency,
 	)
 	return nil
 }
@@ -115,6 +175,16 @@ func (s *SubtreeWorkerService) Stop() error {
 			firstErr = err
 		}
 	}
+	if s.retryProducer != nil {
+		if err := s.retryProducer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.dlqProducer != nil {
+		if err := s.dlqProducer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
 }
 
@@ -129,20 +199,33 @@ func (s *SubtreeWorkerService) Health() service.HealthStatus {
 	}
 }
 
+func (s *SubtreeWorkerService) maxAttempts() int {
+	if s.blockCfg.MaxAttempts > 0 {
+		return s.blockCfg.MaxAttempts
+	}
+	return 10
+}
+
 func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
 	workMsg, err := kafka.DecodeSubtreeWorkMessage(msg.Value)
 	if err != nil {
-		s.Logger.Error("failed to decode subtree work message", "error", err)
-		return fmt.Errorf("failed to decode subtree work message: %w", err)
+		s.Logger.Error("failed to decode subtree work message, dropping",
+			"offset", msg.Offset,
+			"partition", msg.Partition,
+			"error", err,
+		)
+		// Return nil so the consumer marks the offset; a malformed payload at
+		// the head of the partition cannot be recovered by re-driving.
+		return nil
 	}
 
 	s.Logger.Debug("processing subtree work item",
 		"subtreeHash", workMsg.SubtreeHash,
 		"blockHash", workMsg.BlockHash,
 		"blockHeight", workMsg.BlockHeight,
+		"attemptCount", workMsg.AttemptCount,
 	)
 
-	// Process the subtree: registration lookup, STUMP build, callback grouping.
 	result, err := ProcessBlockSubtree(
 		ctx,
 		workMsg.SubtreeHash,
@@ -152,17 +235,16 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.Co
 		s.dataHubClient,
 		s.subtreeStore,
 		s.regStore,
+		s.regCache,
+		s.batchSem,
 		s.blockCfg.PostMineTTLSec,
 		s.Logger,
 	)
 	if err != nil {
-		s.Logger.Error("failed to process subtree work item",
-			"subtreeHash", workMsg.SubtreeHash,
-			"blockHash", workMsg.BlockHash,
-			"error", err,
-		)
-		// Don't return error — continue to decrement counter so BLOCK_PROCESSED
-		// can still fire. The subtree processing failure is logged.
+		// Transient processing failure: re-drive instead of silently dropping
+		// the STUMP. Counter is decremented only on DLQ (terminal) — for
+		// retries, the next successful attempt will decrement.
+		return s.handleTransientFailure(workMsg, err)
 	}
 
 	// Publish one STUMP callback per (callbackURL, subtree) combination.
@@ -170,20 +252,83 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.Co
 		s.publishSubtreeCallbacks(workMsg, result)
 	}
 
-	// Decrement the subtree counter. If it reaches zero, emit BLOCK_PROCESSED.
-	if s.subtreeCounter != nil {
-		remaining, err := s.subtreeCounter.Decrement(workMsg.BlockHash)
-		if err != nil {
-			s.Logger.Error("failed to decrement subtree counter",
-				"blockHash", workMsg.BlockHash,
-				"error", err,
-			)
-		} else if remaining == 0 {
-			s.emitBlockProcessed(workMsg.BlockHash)
+	// Successful processing — decrement the per-block counter.
+	s.decrementCounterAndMaybeEmit(workMsg.BlockHash)
+	return nil
+}
+
+// handleTransientFailure either re-publishes the work item to subtree-work for
+// retry or, once max attempts is reached, parks it on subtree-work-dlq and
+// decrements the counter so BLOCK_PROCESSED can still fire (with a missing
+// STUMP that arcade will surface as a BUMP build error rather than silent loss).
+func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWorkMessage, cause error) error {
+	nextAttempt := workMsg.AttemptCount + 1
+	maxAttempts := s.maxAttempts()
+
+	if nextAttempt >= maxAttempts {
+		s.Logger.Error("subtree work item exceeded max attempts, routing to DLQ",
+			"subtreeHash", workMsg.SubtreeHash,
+			"blockHash", workMsg.BlockHash,
+			"subtreeIndex", workMsg.SubtreeIndex,
+			"attemptCount", workMsg.AttemptCount,
+			"maxAttempts", maxAttempts,
+			"error", cause,
+		)
+		workMsg.AttemptCount = nextAttempt
+		data, encErr := workMsg.Encode()
+		if encErr != nil {
+			// Encoding our own struct really shouldn't fail — return the
+			// error so the consumer doesn't ack and we get a chance on the
+			// next session.
+			return fmt.Errorf("encoding subtree work message for DLQ: %w", encErr)
 		}
+		if pubErr := s.dlqProducer.Publish(workMsg.SubtreeHash, data); pubErr != nil {
+			return fmt.Errorf("publishing subtree work message to DLQ: %w", pubErr)
+		}
+		// Counter decrement is required here: the work item is terminally
+		// failed but we still need BLOCK_PROCESSED to fire so arcade isn't
+		// stuck waiting for a STUMP that will never arrive.
+		s.decrementCounterAndMaybeEmit(workMsg.BlockHash)
+		return nil
 	}
 
+	s.Logger.Warn("subtree work item transient failure, re-publishing for retry",
+		"subtreeHash", workMsg.SubtreeHash,
+		"blockHash", workMsg.BlockHash,
+		"subtreeIndex", workMsg.SubtreeIndex,
+		"attemptCount", workMsg.AttemptCount,
+		"nextAttempt", nextAttempt,
+		"error", cause,
+	)
+	workMsg.AttemptCount = nextAttempt
+	data, encErr := workMsg.Encode()
+	if encErr != nil {
+		return fmt.Errorf("encoding subtree work message for retry: %w", encErr)
+	}
+	if pubErr := s.retryProducer.Publish(workMsg.SubtreeHash, data); pubErr != nil {
+		return fmt.Errorf("re-publishing subtree work message for retry: %w", pubErr)
+	}
+	// Intentionally do NOT decrement on retry — only success or DLQ counts.
 	return nil
+}
+
+// decrementCounterAndMaybeEmit drives the per-block subtree counter and emits
+// BLOCK_PROCESSED when the last subtree finishes.
+func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash string) {
+	if s.subtreeCounter == nil {
+		return
+	}
+	remaining, err := s.subtreeCounter.Decrement(blockHash)
+	if err != nil {
+		s.Logger.Error("failed to decrement subtree counter",
+			"blockHash", blockHash,
+			"error", err,
+		)
+		return
+	}
+	if remaining == 0 {
+		s.emitBlockProcessed(blockHash)
+	}
 }
 
 // publishSubtreeCallbacks publishes one CallbackTopicMessage per callbackURL per subtree.

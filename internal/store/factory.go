@@ -48,14 +48,7 @@ func NewFromConfig(ctx context.Context, cfg *config.Config, logger *slog.Logger)
 // BlobStore-backed stump/subtree stores using cfg, wires them into a Registry,
 // and registers a closer for the Aerospike client.
 func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Logger) (*Registry, error) {
-	asClient, err := NewAerospikeClient(
-		cfg.Aerospike.Host,
-		cfg.Aerospike.Port,
-		cfg.Aerospike.Namespace,
-		cfg.Aerospike.MaxRetries,
-		cfg.Aerospike.RetryBaseMs,
-		logger,
-	)
+	asClient, err := NewAerospikeClientFromConfig(cfg.Aerospike, logger)
 	if err != nil {
 		return nil, fmt.Errorf("aerospike client: %w", err)
 	}

@@ -14,6 +14,15 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/stump"
 )
 
+// RegCache is the registration deduplication cache abstraction used by
+// block-time subtree processing. Mirrors the shape used by the subtree-fetcher
+// so a future cross-process cache implementation can be substituted.
+type RegCache interface {
+	FilterUncached(txids []string) (uncached []string, cachedRegistered []string)
+	SetMultiRegistered(txids []string) error
+	SetMultiNotRegistered(txids []string) error
+}
+
 // SubtreeResult holds the callback groups produced by processing a subtree.
 // The caller uses this to publish STUMP callback messages.
 type SubtreeResult struct {
@@ -28,6 +37,14 @@ type SubtreeResult struct {
 // ProcessBlockSubtree processes a single subtree within a block: retrieves the
 // subtree data, checks registrations, builds a STUMP, and returns callback groups.
 // Returns (result, error) where result is nil if no registered txids were found.
+//
+// regCache, when non-nil, is consulted before hitting Aerospike — txids known
+// to be unregistered (typically the bulk of mempool, populated during the
+// SEEN_ON_NETWORK pass in subtree-fetcher) skip the BatchGet entirely.
+//
+// batchSem, when non-nil, gates the registration BatchGet so only N calls are
+// in flight per process (avoids exhausting the Aerospike connection pool when
+// a block fans out 14+ subtrees in parallel).
 func ProcessBlockSubtree(
 	ctx context.Context,
 	subtreeHash string,
@@ -37,6 +54,8 @@ func ProcessBlockSubtree(
 	dhClient *datahub.Client,
 	subtreeStore store.SubtreeStore,
 	regStore store.RegistrationStore,
+	regCache RegCache,
+	batchSem chan struct{},
 	postMineTTLSec int,
 	logger *slog.Logger,
 ) (*SubtreeResult, error) {
@@ -77,7 +96,7 @@ func ProcessBlockSubtree(
 		txidToIndex[txid] = i
 	}
 
-	registrations, err := regStore.BatchGet(txids)
+	registrations, err := lookupRegistrations(ctx, txids, regStore, regCache, batchSem)
 	if err != nil {
 		return nil, fmt.Errorf("batch get registrations for subtree %s: %w", subtreeHash, err)
 	}
@@ -151,4 +170,86 @@ func ProcessBlockSubtree(
 		SubtreeHash:    subtreeHash,
 		StumpData:      stumpData,
 	}, nil
+}
+
+// lookupRegistrations resolves txid → callbackURLs using the in-process
+// registration cache (when set) to filter out the unregistered majority before
+// issuing a single bounded BatchGet against Aerospike. The semaphore caps the
+// number of concurrent BatchGets across all callers in the process.
+func lookupRegistrations(
+	ctx context.Context,
+	txids []string,
+	regStore store.RegistrationStore,
+	regCache RegCache,
+	batchSem chan struct{},
+) (map[string][]string, error) {
+	if len(txids) == 0 {
+		return map[string][]string{}, nil
+	}
+
+	uncached := txids
+	var cachedRegistered []string
+	if regCache != nil {
+		uncached, cachedRegistered = regCache.FilterUncached(txids)
+	}
+
+	// Build the union of txids we need URLs for: uncached (need to discover
+	// registration status) + cachedRegistered (status known, but URL list still
+	// lives in Aerospike). Combining into one BatchGet is cheaper than two.
+	lookup := uncached
+	if len(cachedRegistered) > 0 {
+		lookup = make([]string, 0, len(uncached)+len(cachedRegistered))
+		lookup = append(lookup, uncached...)
+		lookup = append(lookup, cachedRegistered...)
+	}
+
+	if len(lookup) == 0 {
+		return map[string][]string{}, nil
+	}
+
+	registered, err := batchGetWithSem(ctx, lookup, regStore, batchSem)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update cache with discoveries from the uncached portion only — we don't
+	// re-record cachedRegistered txids because they're already in the cache.
+	if regCache != nil && len(uncached) > 0 {
+		foundTxids := make([]string, 0, len(registered))
+		notFoundTxids := make([]string, 0, len(uncached))
+		for _, txid := range uncached {
+			if _, found := registered[txid]; found {
+				foundTxids = append(foundTxids, txid)
+			} else {
+				notFoundTxids = append(notFoundTxids, txid)
+			}
+		}
+		if len(foundTxids) > 0 {
+			_ = regCache.SetMultiRegistered(foundTxids)
+		}
+		if len(notFoundTxids) > 0 {
+			_ = regCache.SetMultiNotRegistered(notFoundTxids)
+		}
+	}
+
+	return registered, nil
+}
+
+// batchGetWithSem runs RegistrationStore.BatchGet under the optional semaphore.
+// Returns ctx.Err() if the context is cancelled while waiting for a slot.
+func batchGetWithSem(
+	ctx context.Context,
+	txids []string,
+	regStore store.RegistrationStore,
+	batchSem chan struct{},
+) (map[string][]string, error) {
+	if batchSem != nil {
+		select {
+		case batchSem <- struct{}{}:
+			defer func() { <-batchSem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return regStore.BatchGet(txids)
 }
