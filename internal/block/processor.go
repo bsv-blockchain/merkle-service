@@ -57,11 +57,12 @@ func NewProcessor(
 }
 
 func (p *Processor) Init(cfg interface{}) error {
-	p.dataHubClient = datahub.NewClientWithCaps(
+	p.dataHubClient = datahub.NewClientWithSSRFGuard(
 		p.datahubCfg.TimeoutSec,
 		p.datahubCfg.MaxRetries,
 		p.datahubCfg.MaxBlockBytes,
 		p.datahubCfg.MaxSubtreeBytes,
+		p.datahubCfg.AllowPrivateIPs,
 		p.Logger,
 	)
 

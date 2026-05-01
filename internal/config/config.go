@@ -267,6 +267,18 @@ type DataHubConfig struct {
 	// Operators with a smaller subtree size limit should tune this down.
 	// A value <= 0 selects the default.
 	MaxSubtreeBytes int64 `yaml:"maxSubtreeBytes" mapstructure:"maxsubtreebytes"`
+
+	// AllowPrivateIPs disables the SSRF guard that normally rejects
+	// DataHub URLs (or dial addresses) pointing at loopback,
+	// link-local, or RFC1918 destinations. Default false. Because the
+	// dataHubURL flows from peer-controlled P2P announcements, by
+	// default a forged announcement cannot turn the block/subtree
+	// processors into an SSRF primitive against cluster-internal
+	// services or cloud metadata endpoints. Operators running an
+	// in-cluster Teranode peer (testing, sidecar topologies) can set
+	// this to true. The guard against 0.0.0.0/multicast destinations
+	// remains in force regardless. See finding F-028.
+	AllowPrivateIPs bool `yaml:"allowPrivateIPs" mapstructure:"allowprivateips"`
 }
 
 // registerDefaults sets all default values in the Viper instance.
@@ -377,6 +389,8 @@ func registerDefaults(v *viper.Viper) {
 	// 1 GiB — accommodates Teranode subtrees up to ~33.5M txids; operators
 	// running with smaller per-subtree limits should tune this down.
 	v.SetDefault("datahub.maxsubtreebytes", int64(1*1024*1024*1024))
+	// SSRF guard default: deny private/loopback/link-local destinations.
+	v.SetDefault("datahub.allowprivateips", false)
 
 	// Registry
 	v.SetDefault("registry.maxcallbackspertxid", 10)
@@ -494,6 +508,7 @@ func bindEnvVars(v *viper.Viper) {
 		"datahub.maxretries":      "DATAHUB_MAX_RETRIES",
 		"datahub.maxblockbytes":   "DATAHUB_MAX_BLOCK_BYTES",
 		"datahub.maxsubtreebytes": "DATAHUB_MAX_SUBTREE_BYTES",
+		"datahub.allowprivateips": "DATAHUB_ALLOW_PRIVATE_IPS",
 
 		// Registry
 		"registry.maxcallbackspertxid": "REGISTRY_MAX_CALLBACKS_PER_TXID",
