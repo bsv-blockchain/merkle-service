@@ -130,7 +130,7 @@ func determineNamespace(t *testing.T) string {
 			continue
 		}
 		// Try a write to verify the namespace is usable.
-		regStore := store.NewRegistrationStore(client, "ns_probe", 1, 50, testLogger())
+		regStore := store.NewRegistrationStore(client, "ns_probe", 1, 50, 0, testLogger())
 		if err := regStore.Add("probe_txid", "http://probe"); err != nil {
 			client.Close()
 			continue
@@ -215,7 +215,7 @@ func TestSeenOnNetworkCallback(t *testing.T) {
 	// 1. Register a txid with a callback URL in Aerospike.
 	txid := randomTxID()
 	setName := uniqueSetName("reg")
-	regStore := store.NewRegistrationStore(asClient, setName, 3, 100, logger)
+	regStore := store.NewRegistrationStore(asClient, setName, 3, 100, 0, logger)
 
 	collector := newCallbackCollector()
 	mockServer := httptest.NewServer(collector.handler())
@@ -279,7 +279,7 @@ func TestMinedCallbackWithSTUMP(t *testing.T) {
 	// 1. Register a txid.
 	txid := randomTxID()
 	setName := uniqueSetName("reg")
-	regStore := store.NewRegistrationStore(asClient, setName, 3, 100, logger)
+	regStore := store.NewRegistrationStore(asClient, setName, 3, 100, 0, logger)
 
 	collector := newCallbackCollector()
 	mockServer := httptest.NewServer(collector.handler())
@@ -348,7 +348,7 @@ func TestMultipleCallbacks(t *testing.T) {
 	// 1. Register a txid with 2 different callback URLs.
 	txid := randomTxID()
 	setName := uniqueSetName("reg")
-	regStore := store.NewRegistrationStore(asClient, setName, 3, 100, logger)
+	regStore := store.NewRegistrationStore(asClient, setName, 3, 100, 0, logger)
 
 	collector1 := newCallbackCollector()
 	mockServer1 := httptest.NewServer(collector1.handler())
@@ -432,7 +432,7 @@ func TestSeenMultipleNodes(t *testing.T) {
 	// 1. Register a txid.
 	txid := randomTxID()
 	regSetName := uniqueSetName("reg")
-	regStore := store.NewRegistrationStore(asClient, regSetName, 3, 100, logger)
+	regStore := store.NewRegistrationStore(asClient, regSetName, 3, 100, 0, logger)
 
 	collector := newCallbackCollector()
 	mockServer := httptest.NewServer(collector.handler())

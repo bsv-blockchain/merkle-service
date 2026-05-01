@@ -9,8 +9,44 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
+	"github.com/bsv-blockchain/merkle-service/internal/store"
 	"github.com/go-chi/chi/v5"
 )
+
+// fakeRegStore is a minimal RegistrationStore stub used by tests. When
+// addErr is non-nil, Add returns it (so error-mapping behavior can be
+// exercised). Otherwise Add records each (txid, url) pair in `added`.
+type fakeRegStore struct {
+	addErr error
+	added  []struct{ txid, url string }
+}
+
+func (f *fakeRegStore) Add(txid, url string) error {
+	if f.addErr != nil {
+		return f.addErr
+	}
+	f.added = append(f.added, struct{ txid, url string }{txid, url})
+	return nil
+}
+func (f *fakeRegStore) Get(string) ([]string, error) {
+	return nil, nil
+}
+func (f *fakeRegStore) BatchGet([]string) (map[string][]string, error) {
+	return nil, nil
+}
+func (f *fakeRegStore) UpdateTTL(string, time.Duration) error        { return nil }
+func (f *fakeRegStore) BatchUpdateTTL([]string, time.Duration) error { return nil }
+
+func newTestRouterWithRegStore(rs store.RegistrationStore) (*chi.Mux, *Server) {
+	router := chi.NewRouter()
+	s := &Server{regStore: rs}
+	s.InitBase("test")
+	router.Get("/", handleDashboard)
+	router.Post("/watch", s.handleWatch)
+	router.Get("/health", s.handleHealth)
+	router.Get("/api/lookup/{txid}", s.handleLookup)
+	return router, s
+}
 
 func newTestRouter() (*chi.Mux, *Server) {
 	router := chi.NewRouter()
@@ -119,6 +155,24 @@ func TestHandleDashboard(t *testing.T) {
 	}
 }
 
+// TestHandleWatch_MaxCallbacksReturns429 verifies that the /watch endpoint
+// translates store.ErrMaxCallbacksPerTxIDExceeded to HTTP 429 with a clear
+// JSON error body. F-050 / issue #27.
+func TestHandleWatch_MaxCallbacksReturns429(t *testing.T) {
+	router, _ := newTestRouterWithRegStore(&fakeRegStore{addErr: store.ErrMaxCallbacksPerTxIDExceeded})
+	w := postWatch(router, `{"txid":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","callbackUrl":"https://example.com/cb"}`)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", w.Code)
+	}
+	var resp ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp.Error == "" {
+		t.Fatal("expected non-empty error message in 429 body")
+	}
+}
+
 // TestServerHasURLRegistryField verifies the Server struct holds a urlRegistry
 // field and that NewServer wires it correctly.
 func TestServerHasURLRegistryField(t *testing.T) {
@@ -189,22 +243,6 @@ func TestHandleWatch_RejectsBadScheme(t *testing.T) {
 		})
 	}
 }
-
-// fakeRegStore is a minimal in-memory RegistrationStore used by tests
-// that need /watch to make it past validation without standing up
-// Aerospike or SQL.
-type fakeRegStore struct {
-	added []struct{ txid, url string }
-}
-
-func (f *fakeRegStore) Add(txid, url string) error {
-	f.added = append(f.added, struct{ txid, url string }{txid, url})
-	return nil
-}
-func (f *fakeRegStore) Get(string) ([]string, error)                  { return nil, nil }
-func (f *fakeRegStore) BatchGet([]string) (map[string][]string, error) { return nil, nil }
-func (f *fakeRegStore) UpdateTTL(string, time.Duration) error          { return nil }
-func (f *fakeRegStore) BatchUpdateTTL([]string, time.Duration) error   { return nil }
 
 // TestHandleWatch_AllowPrivateIPs verifies the operator escape hatch:
 // when SetAllowPrivateCallbackIPs(true) is set, private/loopback URLs

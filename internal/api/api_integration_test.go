@@ -29,7 +29,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *store.RegistrationStore, 
 	t.Cleanup(func() { asClient.Close() })
 
 	setName := fmt.Sprintf("api_integ_%d", time.Now().UnixNano())
-	regStore := store.NewRegistrationStore(asClient, setName, 3, 100, slog.Default())
+	regStore := store.NewRegistrationStore(asClient, setName, 3, 100, 0, slog.Default())
 
 	srv := api.NewServer(config.APIConfig{Port: 0}, regStore, asClient, slog.Default())
 

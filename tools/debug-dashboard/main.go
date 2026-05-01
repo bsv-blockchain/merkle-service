@@ -52,6 +52,7 @@ func main() {
 		cfg.Aerospike.SetName,
 		cfg.Aerospike.MaxRetries,
 		cfg.Aerospike.RetryBaseMs,
+		cfg.Registry.MaxCallbacksPerTxID,
 		logger,
 	)
 
