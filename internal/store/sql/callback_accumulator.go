@@ -56,6 +56,24 @@ func (s *callbackAccumulator) Append(blockHash, callbackURL string, txids []stri
 
 // ReadAndDelete reads every entry for blockHash, deletes them atomically,
 // and groups them by callback URL. Safe to call once per block.
+//
+// Concurrency: under PostgreSQL's default READ COMMITTED isolation a naive
+// SELECT-then-DELETE leaves a window in which a concurrent Append may insert
+// an entries row that gets deleted by our DELETE but was never returned by
+// our SELECT — silently dropping a callback batch (F-046).
+//
+// To close that window we:
+//  1. Acquire a row lock on the parent callback_accumulator row with
+//     SELECT ... FOR UPDATE (Postgres only). Append's
+//     INSERT ... ON CONFLICT (block_hash) DO UPDATE on the same parent row
+//     blocks until our transaction commits, so no Append for this block can
+//     interleave between our read and delete.
+//  2. Use DELETE ... RETURNING on the entries rows so the read and the
+//     delete are a single statement; nothing can be inserted between them.
+//
+// On SQLite the database serializes writers globally (BEGIN IMMEDIATE
+// semantics under WAL with a single connection in tests), so a separate
+// FOR UPDATE is unnecessary; the transaction itself blocks Append.
 func (s *callbackAccumulator) ReadAndDelete(blockHash string) (map[string]*storepkg.AccumulatedCallback, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -66,9 +84,34 @@ func (s *callbackAccumulator) ReadAndDelete(blockHash string) (map[string]*store
 	}
 	defer tx.Rollback()
 
-	qSel := fmt.Sprintf(`SELECT callback_url, subtree_index, txids_json, stump_data
-        FROM callback_accumulator_entries WHERE block_hash = %s`, s.d.placeholder(1))
-	rows, err := tx.QueryContext(ctx, qSel, blockHash)
+	// On Postgres, take a row-level lock on the parent first so any
+	// concurrent Append for this block has to wait for us to commit before
+	// it can upsert the parent row (and therefore before it can insert into
+	// callback_accumulator_entries). If the parent row doesn't exist there
+	// is nothing accumulated and no entries can exist either (Append always
+	// upserts the parent before inserting an entry within the same txn).
+	if isPostgres(s.d) {
+		qLock := fmt.Sprintf("SELECT 1 FROM callback_accumulator WHERE block_hash = %s FOR UPDATE", s.d.placeholder(1))
+		var dummy int
+		err := tx.QueryRowContext(ctx, qLock, blockHash).Scan(&dummy)
+		switch {
+		case err == sql.ErrNoRows:
+			// No accumulator for this block: nothing to read or delete.
+			// Commit the (empty) txn so the deferred Rollback is a no-op.
+			if cerr := tx.Commit(); cerr != nil {
+				return nil, cerr
+			}
+			return nil, nil
+		case err != nil:
+			return nil, fmt.Errorf("lock accumulator: %w", err)
+		}
+	}
+
+	// Single-statement read+delete: DELETE ... RETURNING is supported by
+	// PostgreSQL and SQLite >= 3.35 (modernc.org/sqlite is well past that).
+	qDelEntries := fmt.Sprintf(`DELETE FROM callback_accumulator_entries WHERE block_hash = %s
+        RETURNING callback_url, subtree_index, txids_json, stump_data`, s.d.placeholder(1))
+	rows, err := tx.QueryContext(ctx, qDelEntries, blockHash)
 	if err != nil {
 		return nil, err
 	}
@@ -103,10 +146,6 @@ func (s *callbackAccumulator) ReadAndDelete(blockHash string) (map[string]*store
 	}
 	rows.Close()
 
-	qDelEntries := fmt.Sprintf("DELETE FROM callback_accumulator_entries WHERE block_hash = %s", s.d.placeholder(1))
-	if _, err := tx.ExecContext(ctx, qDelEntries, blockHash); err != nil {
-		return nil, err
-	}
 	qDelParent := fmt.Sprintf("DELETE FROM callback_accumulator WHERE block_hash = %s", s.d.placeholder(1))
 	if _, err := tx.ExecContext(ctx, qDelParent, blockHash); err != nil {
 		return nil, err
