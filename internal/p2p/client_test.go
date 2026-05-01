@@ -1,10 +1,13 @@
 package p2p
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/IBM/sarama"
 	teranode "github.com/bsv-blockchain/teranode/services/p2p"
@@ -96,7 +99,9 @@ func TestHandleSubtreeMessage_ValidMessage(t *testing.T) {
 		ClientName: "teranode-v1",
 	}
 
-	client.handleSubtreeMessage(msg)
+	if err := client.handleSubtreeMessage(context.Background(), msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	published := mockProducer.getMessages()
 	if len(published) != 1 {
@@ -140,7 +145,9 @@ func TestHandleSubtreeMessage_EmptyHash(t *testing.T) {
 		DataHubURL: "https://datahub.example.com/subtree/empty",
 	}
 
-	client.handleSubtreeMessage(msg)
+	if err := client.handleSubtreeMessage(context.Background(), msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	// Should still publish (empty hash is valid from the P2P layer perspective).
 	published := mockProducer.getMessages()
@@ -164,7 +171,9 @@ func TestHandleBlockMessage_ValidMessage(t *testing.T) {
 		ClientName: "teranode-v1",
 	}
 
-	client.handleBlockMessage(msg)
+	if err := client.handleBlockMessage(context.Background(), msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	published := mockProducer.getMessages()
 	if len(published) != 1 {
@@ -214,7 +223,9 @@ func TestHandleBlockMessage_ZeroHeight(t *testing.T) {
 		Height: 0,
 	}
 
-	client.handleBlockMessage(msg)
+	if err := client.handleBlockMessage(context.Background(), msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	published := mockProducer.getMessages()
 	if len(published) != 1 {
@@ -367,7 +378,9 @@ func TestHandleSubtreeMessage_MultipleMessages(t *testing.T) {
 			Hash:       hash,
 			DataHubURL: "https://datahub.example.com/subtree/" + hash,
 		}
-		client.handleSubtreeMessage(msg)
+		if err := client.handleSubtreeMessage(context.Background(), msg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 	}
 
 	published := mockProducer.getMessages()
@@ -395,11 +408,199 @@ func TestHandleBlockMessage_MultipleMessages(t *testing.T) {
 			Hash:   hash,
 			Height: uint32(i + 100),
 		}
-		client.handleBlockMessage(msg)
+		if err := client.handleBlockMessage(context.Background(), msg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 	}
 
 	published := mockProducer.getMessages()
 	if len(published) != 2 {
 		t.Fatalf("expected 2 published messages, got %d", len(published))
 	}
+}
+
+// --- Publish-exhaustion / fatal-propagation tests (issue #7) ---
+
+// withFastRetries swaps the package-level baseRetryDelay to something tiny so
+// publish-failure paths complete quickly under -race. The original value is
+// restored when the test ends.
+func withFastRetries(t *testing.T) {
+	t.Helper()
+	prev := baseRetryDelay
+	baseRetryDelay = time.Millisecond
+	t.Cleanup(func() { baseRetryDelay = prev })
+}
+
+// TestPublishWithRetry_ExhaustionReturnsTerminalError verifies F-033: when the
+// Kafka producer returns an error on every attempt, publishWithRetry must
+// return ErrPublishExhausted instead of silently dropping the announcement.
+func TestPublishWithRetry_ExhaustionReturnsTerminalError(t *testing.T) {
+	withFastRetries(t)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mockProducer := &mockSyncProducer{failErr: errors.New("simulated kafka outage")}
+	producer := kafka.NewTestProducer(mockProducer, "subtree", logger)
+
+	client := NewClient(config.P2PConfig{}, producer, producer, logger)
+
+	err := client.publishWithRetry(context.Background(), producer, "hash-x", []byte("payload"), "subtree")
+	if err == nil {
+		t.Fatal("expected an error after exhausting retries, got nil")
+	}
+	if !errors.Is(err, ErrPublishExhausted) {
+		t.Fatalf("expected ErrPublishExhausted, got %v", err)
+	}
+}
+
+// TestPublishWithRetry_SucceedsBeforeExhaustion verifies that a transient
+// failure followed by success still returns nil (no terminal error) and
+// continues processing.
+func TestPublishWithRetry_SucceedsBeforeExhaustion(t *testing.T) {
+	withFastRetries(t)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Producer that fails the first two attempts, then succeeds.
+	flaky := &flakyProducer{failuresRemaining: 2}
+	producer := kafka.NewTestProducer(flaky, "subtree", logger)
+	client := NewClient(config.P2PConfig{}, producer, producer, logger)
+
+	err := client.publishWithRetry(context.Background(), producer, "hash-y", []byte("payload"), "subtree")
+	if err != nil {
+		t.Fatalf("expected nil error after eventual success, got %v", err)
+	}
+	if flaky.attempts != 3 {
+		t.Errorf("expected 3 attempts (2 failures + success), got %d", flaky.attempts)
+	}
+}
+
+// TestHandleSubtreeMessage_PropagatesTerminalError verifies that the message
+// handler bubbles ErrPublishExhausted up so the run-loop can shut down.
+func TestHandleSubtreeMessage_PropagatesTerminalError(t *testing.T) {
+	withFastRetries(t)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mockProducer := &mockSyncProducer{failErr: errors.New("kafka down")}
+	producer := kafka.NewTestProducer(mockProducer, "subtree", logger)
+
+	client := NewClient(config.P2PConfig{}, producer, producer, logger)
+
+	err := client.handleSubtreeMessage(context.Background(), teranode.SubtreeMessage{Hash: "h"})
+	if !errors.Is(err, ErrPublishExhausted) {
+		t.Fatalf("expected ErrPublishExhausted, got %v", err)
+	}
+}
+
+// TestHandleBlockMessage_PropagatesTerminalError verifies the block handler
+// bubbles ErrPublishExhausted up.
+func TestHandleBlockMessage_PropagatesTerminalError(t *testing.T) {
+	withFastRetries(t)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mockProducer := &mockSyncProducer{failErr: errors.New("kafka down")}
+	producer := kafka.NewTestProducer(mockProducer, "block", logger)
+
+	client := NewClient(config.P2PConfig{}, producer, producer, logger)
+
+	err := client.handleBlockMessage(context.Background(), teranode.BlockMessage{Hash: "b", Height: 1})
+	if !errors.Is(err, ErrPublishExhausted) {
+		t.Fatalf("expected ErrPublishExhausted, got %v", err)
+	}
+}
+
+// TestSignalFatal_PropagatesToRun verifies that a fatal error signalled from
+// any publish path bubbles up out of Run so the entrypoint can exit non-zero.
+func TestSignalFatal_PropagatesToRun(t *testing.T) {
+	client, _, _ := newTestClient(t)
+
+	// Pretend Start has run (so Run does not try to spin up a real libp2p host).
+	client.SetStarted(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Also wire a cancel function so signalFatal's cancel call is a no-op-safe.
+	client.cancel = cancel
+
+	go func() {
+		// Simulate a publish loop hitting exhaustion.
+		client.signalFatal(ErrPublishExhausted)
+	}()
+
+	err := client.Run(ctx)
+	if !errors.Is(err, ErrPublishExhausted) {
+		t.Fatalf("expected Run to return ErrPublishExhausted, got %v", err)
+	}
+}
+
+// TestRun_ContextCancellationReturnsNil verifies that a clean shutdown via
+// context cancellation returns a nil error (i.e., the entry point exits 0).
+func TestRun_ContextCancellationReturnsNil(t *testing.T) {
+	client, _, _ := newTestClient(t)
+	client.SetStarted(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client.cancel = cancel
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	if err := client.Run(ctx); err != nil {
+		t.Fatalf("expected nil on clean shutdown, got %v", err)
+	}
+}
+
+// TestPublishWithRetry_ContextCancelledDuringBackoffIsNotFatal verifies that
+// shutting down mid-retry does not produce a spurious fatal error.
+func TestPublishWithRetry_ContextCancelledDuringBackoffIsNotFatal(t *testing.T) {
+	// Use the default retry delay so we have time to cancel mid-backoff.
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mockProducer := &mockSyncProducer{failErr: errors.New("kafka down")}
+	producer := kafka.NewTestProducer(mockProducer, "subtree", logger)
+	client := NewClient(config.P2PConfig{}, producer, producer, logger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	err := client.publishWithRetry(ctx, producer, "hash-z", []byte("payload"), "subtree")
+	if err != nil {
+		t.Fatalf("expected nil on context cancellation, got %v", err)
+	}
+}
+
+// flakyProducer fails the first failuresRemaining SendMessage calls, then succeeds.
+type flakyProducer struct {
+	mu                sync.Mutex
+	failuresRemaining int
+	attempts          int
+}
+
+func (f *flakyProducer) SendMessage(_ *sarama.ProducerMessage) (int32, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.attempts++
+	if f.failuresRemaining > 0 {
+		f.failuresRemaining--
+		return 0, 0, errors.New("transient kafka failure")
+	}
+	return 0, int64(f.attempts), nil
+}
+
+func (f *flakyProducer) SendMessages(_ []*sarama.ProducerMessage) error { return nil }
+func (f *flakyProducer) Close() error                                    { return nil }
+func (f *flakyProducer) IsTransactional() bool                           { return false }
+func (f *flakyProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
+	return sarama.ProducerTxnFlagReady
+}
+func (f *flakyProducer) BeginTxn() error  { return nil }
+func (f *flakyProducer) CommitTxn() error { return nil }
+func (f *flakyProducer) AbortTxn() error  { return nil }
+func (f *flakyProducer) AddOffsetsToTxn(_ map[string][]*sarama.PartitionOffsetMetadata, _ string) error {
+	return nil
+}
+func (f *flakyProducer) AddMessageToTxn(_ *sarama.ConsumerMessage, _ string, _ *string) error {
+	return nil
 }
