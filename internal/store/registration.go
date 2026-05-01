@@ -67,7 +67,7 @@ func (s *aerospikeRegistration) Get(txid string) ([]string, error) {
 		return nil, fmt.Errorf("failed to create key: %w", err)
 	}
 
-	record, err := s.client.Client().Get(nil, key, callbacksBin)
+	record, err := s.client.Client().Get(s.client.ReadPolicy(), key, callbacksBin)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get registration: %w", err)
 	}

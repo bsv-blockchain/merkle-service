@@ -51,7 +51,7 @@ func (s *aerospikeCallbackDedup) Exists(txid, callbackURL, statusType string) (b
 		return false, fmt.Errorf("failed to create dedup key: %w", err)
 	}
 
-	exists, err := s.client.Client().Exists(nil, key)
+	exists, err := s.client.Client().Exists(s.client.ReadPolicy(), key)
 	if err != nil {
 		return false, fmt.Errorf("failed to check dedup record: %w", err)
 	}

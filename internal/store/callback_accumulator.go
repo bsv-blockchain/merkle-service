@@ -76,7 +76,7 @@ func (s *aerospikeCallbackAccumulator) ReadAndDelete(blockHash string) (map[stri
 	}
 
 	// Read the record first.
-	record, err := s.client.Client().Get(nil, key, accumEntriesBin)
+	record, err := s.client.Client().Get(s.client.ReadPolicy(), key, accumEntriesBin)
 	if err != nil {
 		var asErr *as.AerospikeError
 		if errors.As(err, &asErr) && asErr.Matches(astypes.KEY_NOT_FOUND_ERROR) {

@@ -65,7 +65,7 @@ func (r *aerospikeCallbackURLRegistry) GetAll() ([]string, error) {
 		return nil, fmt.Errorf("failed to create key: %w", err)
 	}
 
-	record, err := r.client.Client().Get(nil, key, callbackURLsBin)
+	record, err := r.client.Client().Get(r.client.ReadPolicy(), key, callbackURLsBin)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get callback URLs: %w", err)
 	}

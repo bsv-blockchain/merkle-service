@@ -90,9 +90,25 @@ type AerospikeConfig struct {
 	// SocketTimeoutMs caps the time spent on a single transport-level
 	// read/write attempt before retrying. 0 = client default.
 	SocketTimeoutMs int `yaml:"socketTimeoutMs" mapstructure:"sockettimeoutms"`
-	// TotalTimeoutMs is the overall deadline for a batch operation across all
-	// retries. 0 = client default (no overall cap).
+	// TotalTimeoutMs is retained for back-compat; new code should set the
+	// per-operation timeouts below. When the more specific timeouts are zero,
+	// this value is no longer used.
 	TotalTimeoutMs int `yaml:"totalTimeoutMs" mapstructure:"totaltimeoutms"`
+	// ReadTimeoutMs is the TotalTimeout applied to single-record Get/Exists.
+	// Single-record reads should be sub-second under healthy load; default
+	// 3000 ms.
+	ReadTimeoutMs int `yaml:"readTimeoutMs" mapstructure:"readtimeoutms"`
+	// WriteTimeoutMs is the TotalTimeout applied to Put/Operate. Default 5000.
+	WriteTimeoutMs int `yaml:"writeTimeoutMs" mapstructure:"writetimeoutms"`
+	// BatchTimeoutMs is the TotalTimeout applied to BatchGet/BatchOperate.
+	// Default 15000.
+	BatchTimeoutMs int `yaml:"batchTimeoutMs" mapstructure:"batchtimeoutms"`
+	// IdleTimeoutSec is the client-side connection idle reap. Set a few
+	// seconds below the server's proto-fd-idle-ms so the client closes idle
+	// sockets before the server reaps them. Mandatory when the server runs
+	// with proto-fd-idle-ms=0 (otherwise idle conns accumulate forever and
+	// starve the pool). Default 55.
+	IdleTimeoutSec int `yaml:"idleTimeoutSec" mapstructure:"idletimeoutsec"`
 }
 
 // SeedHosts returns the list of seed hosts to use when constructing the
@@ -235,6 +251,10 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.limitconnectionstoqueuesize", false)
 	v.SetDefault("aerospike.sockettimeoutms", 5000)
 	v.SetDefault("aerospike.totaltimeoutms", 15000)
+	v.SetDefault("aerospike.readtimeoutms", 3000)
+	v.SetDefault("aerospike.writetimeoutms", 5000)
+	v.SetDefault("aerospike.batchtimeoutms", 15000)
+	v.SetDefault("aerospike.idletimeoutsec", 55)
 
 	// Kafka
 	v.SetDefault("kafka.brokers", []string{"localhost:9092"})
@@ -334,6 +354,10 @@ func bindEnvVars(v *viper.Viper) {
 		"aerospike.limitconnectionstoqueuesize": "AEROSPIKE_LIMIT_CONNECTIONS_TO_QUEUE_SIZE",
 		"aerospike.sockettimeoutms":             "AEROSPIKE_SOCKET_TIMEOUT_MS",
 		"aerospike.totaltimeoutms":              "AEROSPIKE_TOTAL_TIMEOUT_MS",
+		"aerospike.readtimeoutms":               "AEROSPIKE_READ_TIMEOUT_MS",
+		"aerospike.writetimeoutms":              "AEROSPIKE_WRITE_TIMEOUT_MS",
+		"aerospike.batchtimeoutms":              "AEROSPIKE_BATCH_TIMEOUT_MS",
+		"aerospike.idletimeoutsec":              "AEROSPIKE_IDLE_TIMEOUT_SEC",
 
 		// Kafka
 		"kafka.brokers":        "KAFKA_BROKERS",
