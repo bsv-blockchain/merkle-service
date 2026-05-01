@@ -121,6 +121,14 @@ func (p *Processor) Health() service.HealthStatus {
 	}
 }
 
+// handleMessage processes a single block announcement.
+//
+// Correctness contract: the block is added to the dedup cache (and the Kafka
+// message is ack'd by returning nil) ONLY after every subtree work message
+// for the block has been durably published to the subtree-work topic. Any
+// encode or publish failure returns a non-nil error so the consumer does not
+// mark the offset, which surfaces the failure for retry on the next session
+// and prevents silent data loss (F-011).
 func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
 	blockMsg, err := kafka.DecodeBlockMessage(msg.Value)
 	if err != nil {
@@ -156,23 +164,26 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	)
 
 	if len(subtreeHashes) == 0 {
+		// No subtree work to fan out, but the block has been observed and
+		// metadata fetched — record it in dedup so a redelivery is skipped.
+		if p.dedupCache != nil {
+			p.dedupCache.Add(blockMsg.Hash)
+		}
 		return nil
 	}
 
-	// Initialize the subtree counter BEFORE publishing work messages to avoid
-	// a race where workers decrement a counter that doesn't exist yet.
-	if p.subtreeCounter != nil {
-		if err := p.subtreeCounter.Init(blockMsg.Hash, len(subtreeHashes)); err != nil {
-			p.Logger.Error("failed to init subtree counter",
-				"blockHash", blockMsg.Hash,
-				"count", len(subtreeHashes),
-				"error", err,
-			)
-			return fmt.Errorf("failed to init subtree counter for block %s: %w", blockMsg.Hash, err)
-		}
+	// Pre-encode every SubtreeWorkMessage before initializing the counter or
+	// publishing anything. Encoding is deterministic; failing now means the
+	// payload is malformed and would fail again on retry, but we must not have
+	// already initialised the counter (which would leave it pointing at work
+	// that will never arrive). Returning an error keeps the offset un-acked so
+	// Kafka redelivers; persistent failure should be caught by an upstream DLQ
+	// policy on the block topic.
+	type encodedWork struct {
+		subtreeHash string
+		payload     []byte
 	}
-
-	// Publish one SubtreeWorkMessage per subtree to the subtree-work topic.
+	encoded := make([]encodedWork, 0, len(subtreeHashes))
 	for i, stHash := range subtreeHashes {
 		workMsg := &kafka.SubtreeWorkMessage{
 			BlockHash:    blockMsg.Hash,
@@ -181,33 +192,69 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 			SubtreeIndex: i,
 			DataHubURL:   blockMsg.DataHubURL,
 		}
-		data, err := workMsg.Encode()
-		if err != nil {
+		data, encErr := workMsg.Encode()
+		if encErr != nil {
 			p.Logger.Error("failed to encode subtree work message",
 				"subtreeHash", stHash,
 				"blockHash", blockMsg.Hash,
-				"error", err,
+				"subtreeIndex", i,
+				"error", encErr,
 			)
-			continue
+			return fmt.Errorf("encoding subtree work message for block %s subtree %s: %w", blockMsg.Hash, stHash, encErr)
 		}
-		if err := p.subtreeWorkProducer.PublishWithHashKey(stHash, data); err != nil {
-			p.Logger.Error("failed to publish subtree work message",
-				"subtreeHash", stHash,
+		encoded = append(encoded, encodedWork{subtreeHash: stHash, payload: data})
+	}
+
+	// Initialize the subtree counter BEFORE publishing work messages so that
+	// workers cannot decrement a missing counter. The Aerospike-backed Init
+	// uses RecordExistsAction=UPDATE (upsert), so on a redelivery this safely
+	// overwrites any stale value left by a previous partial-publish attempt.
+	if p.subtreeCounter != nil {
+		if err := p.subtreeCounter.Init(blockMsg.Hash, len(encoded)); err != nil {
+			p.Logger.Error("failed to init subtree counter",
 				"blockHash", blockMsg.Hash,
+				"count", len(encoded),
 				"error", err,
 			)
+			return fmt.Errorf("failed to init subtree counter for block %s: %w", blockMsg.Hash, err)
+		}
+	}
+
+	// Publish each pre-encoded SubtreeWorkMessage. On the first publish
+	// failure we stop and return an error so the block message is NOT ack'd
+	// and NOT added to the dedup cache. On redelivery the counter is
+	// re-initialised (overwriting whatever the previous attempt left); some
+	// subtree work may be re-published, but the SubtreeWorkMessage retry
+	// pipeline (AttemptCount + subtree-work-dlq) is already idempotent, so
+	// duplicate fan-out is safe.
+	for i, ew := range encoded {
+		if err := p.subtreeWorkProducer.PublishWithHashKey(ew.subtreeHash, ew.payload); err != nil {
+			p.Logger.Error("failed to publish subtree work message",
+				"subtreeHash", ew.subtreeHash,
+				"blockHash", blockMsg.Hash,
+				"subtreeIndex", i,
+				"published", i,
+				"total", len(encoded),
+				"error", err,
+			)
+			return fmt.Errorf("publishing subtree work for block %s subtree %s (%d/%d): %w",
+				blockMsg.Hash, ew.subtreeHash, i, len(encoded), err)
 		}
 	}
 
 	p.Logger.Info("dispatched subtree work items",
 		"blockHash", blockMsg.Hash,
-		"subtreeCount", len(subtreeHashes),
+		"subtreeCount", len(encoded),
 	)
 
-	// Update subtree store block height for DAH pruning.
+	// Update subtree store block height for DAH pruning. Only safe to do once
+	// every subtree work message for this block has been successfully
+	// published — otherwise an unpublished subtree could be pruned.
 	p.subtreeStore.SetCurrentBlockHeight(uint64(meta.Height))
 
-	// Mark block as successfully processed for dedup.
+	// Mark block as successfully processed for dedup. This must be the last
+	// step: anything that returned an error above leaves the cache untouched
+	// so the block is retried on redelivery.
 	if p.dedupCache != nil {
 		p.dedupCache.Add(blockMsg.Hash)
 	}
