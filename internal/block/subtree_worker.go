@@ -206,6 +206,17 @@ func (s *SubtreeWorkerService) maxAttempts() int {
 	return 10
 }
 
+// handleMessage consumes a single SubtreeWorkMessage.
+//
+// Correctness contract: the work item is ack'd (return nil) and the per-block
+// subtree counter is decremented ONLY after either (a) processing succeeded
+// with no callbacks to publish, or (b) every STUMP callback has been durably
+// stored and published to Kafka. A failure during processing OR during
+// callback publishing routes the work back through handleTransientFailure,
+// which re-publishes for retry (preserving the counter) or routes to DLQ at
+// max attempts (decrementing the counter so BLOCK_PROCESSED can still fire).
+// This prevents the silent drop where a Kafka/blob-store hiccup left the
+// downstream consumer waiting for STUMPs that never arrive (F-012).
 func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
 	workMsg, err := kafka.DecodeSubtreeWorkMessage(msg.Value)
 	if err != nil {
@@ -248,8 +259,15 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.Co
 	}
 
 	// Publish one STUMP callback per (callbackURL, subtree) combination.
+	// A failure here (blob-store write, encode, or Kafka publish) must NOT be
+	// silently swallowed: route through the same retry/DLQ pipeline as a
+	// processing failure so the work item is either retried or terminally
+	// DLQ'd. Otherwise downstream consumers stall waiting for STUMPs that
+	// were dropped on the floor.
 	if result != nil && len(result.CallbackGroups) > 0 {
-		s.publishSubtreeCallbacks(workMsg, result)
+		if pubErr := s.publishSubtreeCallbacks(workMsg, result); pubErr != nil {
+			return s.handleTransientFailure(workMsg, pubErr)
+		}
 	}
 
 	// Successful processing — decrement the per-block counter.
@@ -335,13 +353,21 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash string) {
 // The STUMP bytes are written once to the blob store (content-addressed, so the
 // same blob is reused across every callback URL for this subtree), and each
 // Kafka message carries only the reference.
-func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWorkMessage, result *SubtreeResult) {
+//
+// Returns a non-nil error if the blob-store write fails OR if any per-URL
+// encode/publish fails. The loop continues past a single per-URL failure so
+// independent callbacks still go out (partial-success), but the first error
+// encountered is returned to the caller so handleMessage can re-drive the
+// work item through handleTransientFailure rather than silently acking and
+// decrementing the counter — see F-012.
+func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWorkMessage, result *SubtreeResult) error {
 	if s.stumpStore == nil {
 		s.Logger.Error("stump store not configured; cannot publish STUMP callbacks",
 			"blockHash", workMsg.BlockHash,
 			"subtreeIndex", workMsg.SubtreeIndex,
 		)
-		return
+		return fmt.Errorf("stump store not configured for block %s subtree %d",
+			workMsg.BlockHash, workMsg.SubtreeIndex)
 	}
 
 	stumpRef, err := s.stumpStore.Put(result.StumpData, uint64(workMsg.BlockHeight))
@@ -354,9 +380,15 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 			"callbackURLs", len(result.CallbackGroups),
 			"error", err,
 		)
-		return
+		return fmt.Errorf("storing STUMP blob for block %s subtree %d: %w",
+			workMsg.BlockHash, workMsg.SubtreeIndex, err)
 	}
 
+	// Track the first error so the caller can re-drive the whole work item,
+	// while still attempting the remaining URLs (each callback target is
+	// independent — a hiccup on one shouldn't deny delivery to the others on
+	// this attempt).
+	var firstErr error
 	for callbackURL := range result.CallbackGroups {
 		msg := &kafka.CallbackTopicMessage{
 			CallbackURL:  callbackURL,
@@ -365,17 +397,24 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 			SubtreeIndex: workMsg.SubtreeIndex,
 			StumpRef:     stumpRef,
 		}
-		data, err := msg.Encode()
-		if err != nil {
+		data, encErr := msg.Encode()
+		if encErr != nil {
 			s.Logger.Error("failed to encode STUMP callback message",
-				"callbackURL", callbackURL, "error", err)
+				"callbackURL", callbackURL, "error", encErr)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("encoding STUMP callback for %s: %w", callbackURL, encErr)
+			}
 			continue
 		}
-		if err := s.callbackProducer.PublishWithHashKey(callbackURL, data); err != nil {
+		if pubErr := s.callbackProducer.PublishWithHashKey(callbackURL, data); pubErr != nil {
 			s.Logger.Error("failed to publish STUMP callback",
-				"callbackURL", callbackURL, "error", err)
+				"callbackURL", callbackURL, "error", pubErr)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("publishing STUMP callback for %s: %w", callbackURL, pubErr)
+			}
 		}
 	}
+	return firstErr
 }
 
 // emitBlockProcessed publishes a BLOCK_PROCESSED message to every registered callback URL.
