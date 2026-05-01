@@ -24,9 +24,17 @@ func newSeenCounter(db *sql.DB, d *dialect, threshold int) *seenCounter {
 func (s *seenCounter) Threshold() int { return s.threshold }
 
 // Increment inserts (txid, subtreeID) into seen_counter_subtrees (idempotent
-// via the compound PK), counts distinct subtrees for the txid, and flips the
-// threshold_fired flag atomically on the first call that reaches the threshold.
-// The caller observes ThresholdReached=true on exactly one call.
+// via the compound PK), counts distinct subtrees for the txid, and atomically
+// transitions threshold_fired from 0 to 1 on the first call that reaches the
+// threshold. Exactly one caller observes ThresholdReached=true.
+//
+// F-045: previously the read-then-update of threshold_fired could race when
+// two concurrent callers both saw fired=0 with count >= threshold and each
+// independently set fired=1, both reporting ThresholdReached=true. The fix
+// flips the flag with a single conditional `UPDATE … RETURNING`-style
+// statement (or, on SQLite, an UPDATE that filters on the prior value and
+// then inspects RowsAffected) so the transition is observed by exactly one
+// caller.
 func (s *seenCounter) Increment(txid, subtreeID string) (*storepkg.IncrementResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -58,29 +66,62 @@ func (s *seenCounter) Increment(txid, subtreeID string) (*storepkg.IncrementResu
 		return nil, fmt.Errorf("count subtrees: %w", err)
 	}
 
-	// Lock the counter row and check/flip the fired flag atomically.
-	var lockQuery string
-	if isPostgres(s.d) {
-		lockQuery = fmt.Sprintf("SELECT threshold_fired FROM seen_counters WHERE txid = %s FOR UPDATE", s.d.placeholder(1))
-	} else {
-		lockQuery = fmt.Sprintf("SELECT threshold_fired FROM seen_counters WHERE txid = %s", s.d.placeholder(1))
-	}
-	var fired int
-	if err := tx.QueryRowContext(ctx, lockQuery, txid).Scan(&fired); err != nil {
-		return nil, fmt.Errorf("read fired flag: %w", err)
-	}
-
+	// Atomically attempt the 0 -> 1 transition. The WHERE clause guarantees
+	// only one writer succeeds: any concurrent attempt sees threshold_fired
+	// already set to 1 and matches zero rows.
 	thresholdReached := false
-	if fired == 0 && count >= s.threshold {
-		qFire := fmt.Sprintf("UPDATE seen_counters SET threshold_fired = 1 WHERE txid = %s", s.d.placeholder(1))
-		if _, err := tx.ExecContext(ctx, qFire, txid); err != nil {
-			return nil, fmt.Errorf("set fired: %w", err)
+	if count >= s.threshold {
+		thresholdReached, err = s.tryFireThreshold(ctx, tx, txid)
+		if err != nil {
+			return nil, err
 		}
-		thresholdReached = true
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("commit seen counter tx: %w", err)
 	}
 	return &storepkg.IncrementResult{NewCount: count, ThresholdReached: thresholdReached}, nil
+}
+
+// tryFireThreshold flips threshold_fired from 0 to 1 atomically. Returns true
+// if THIS caller performed the transition; false if a concurrent caller had
+// already fired (the row's prior value was already 1). Errors are surfaced —
+// the previous implementation swallowed marker-write failures, masking real
+// faults like a row-level lock timeout.
+func (s *seenCounter) tryFireThreshold(ctx context.Context, tx *sql.Tx, txid string) (bool, error) {
+	if isPostgres(s.d) {
+		// Postgres: UPDATE … RETURNING. RETURNING emits a row only when the
+		// WHERE matches, so the presence of a result row IS the false->true
+		// transition signal.
+		q := fmt.Sprintf(`UPDATE seen_counters
+            SET threshold_fired = 1
+            WHERE txid = %s AND threshold_fired = 0
+            RETURNING 1`, s.d.placeholder(1))
+		var one int
+		err := tx.QueryRowContext(ctx, q, txid).Scan(&one)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return false, nil
+			}
+			return false, fmt.Errorf("fire threshold (postgres): %w", err)
+		}
+		return true, nil
+	}
+
+	// SQLite path. Modern SQLite (>= 3.35) supports RETURNING, but we keep
+	// portability with older builds by inspecting RowsAffected: the WHERE
+	// filter on threshold_fired = 0 makes the UPDATE itself the CAS, and
+	// RowsAffected > 0 means we won the race.
+	q := fmt.Sprintf(`UPDATE seen_counters
+        SET threshold_fired = 1
+        WHERE txid = %s AND threshold_fired = 0`, s.d.placeholder(1))
+	res, err := tx.ExecContext(ctx, q, txid)
+	if err != nil {
+		return false, fmt.Errorf("fire threshold (sqlite): %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected after fire threshold: %w", err)
+	}
+	return n > 0, nil
 }
