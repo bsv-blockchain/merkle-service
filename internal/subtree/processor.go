@@ -429,14 +429,22 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]string, er
 	}
 
 	// For cached-registered txids, fetch callbackURLs via BatchGet.
+	//
+	// A failure here MUST surface as an error (F-056). The cache told us these
+	// txids are registered; if the backing store lookup fails we cannot
+	// construct an accurate registeredTxids map. Returning a partial map and
+	// letting the caller proceed would mark the subtree processed in the dedup
+	// cache and permanently drop SEEN_ON_NETWORK and threshold callbacks for
+	// the affected txids on redelivery. Propagate the error so handleMessage
+	// re-drives via handleTransientFailure (which leaves the dedup cache
+	// untouched).
 	if len(cachedRegistered) > 0 {
 		cachedURLs, err := p.registrationStore.BatchGet(cachedRegistered)
 		if err != nil {
-			p.Logger.Warn("failed to fetch callbackURLs for cached txids", "error", err)
-		} else {
-			for txid, urls := range cachedURLs {
-				allRegistered[txid] = urls
-			}
+			return nil, fmt.Errorf("batch get callbackURLs for cached txids: %w", err)
+		}
+		for txid, urls := range cachedURLs {
+			allRegistered[txid] = urls
 		}
 	}
 
