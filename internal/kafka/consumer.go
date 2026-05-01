@@ -12,6 +12,21 @@ import (
 // MessageHandler is called for each consumed message.
 type MessageHandler func(ctx context.Context, msg *sarama.ConsumerMessage) error
 
+// newConsumerConfig returns the sarama configuration used by every consumer
+// group created by this package. It is extracted so unit tests can verify the
+// invariants we care about (notably the F-031 initial-offset policy) without
+// having to stand up a real Kafka broker.
+func newConsumerConfig() *sarama.Config {
+	config := sarama.NewConfig()
+	config.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategyRoundRobin()}
+	// F-031: start new consumer groups at the OLDEST available offset so a
+	// group with no committed offsets (renamed group, lost offsets, fresh
+	// environment) still processes the durable backlog instead of silently
+	// jumping to the topic head and dropping queued work.
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest
+	return config
+}
+
 // Consumer wraps a Sarama consumer group.
 type Consumer struct {
 	group   sarama.ConsumerGroup
@@ -24,10 +39,18 @@ type Consumer struct {
 }
 
 // NewConsumer creates a new Kafka consumer group wrapper.
+//
+// Initial offset policy (F-031): a consumer group with no committed offsets
+// starts at sarama.OffsetOldest so it processes every message already queued
+// on the topic. The previous default of sarama.OffsetNewest silently skipped
+// work whenever a group was renamed, its committed offsets were lost, or the
+// service was deployed into a fresh environment with topics that already had
+// durable backlogs (subtree, subtree-worker, block, callback). For the work
+// topics this service consumes, replaying from the earliest available offset
+// is always correct: the handlers are idempotent and the backlog must be
+// processed, never dropped.
 func NewConsumer(brokers []string, groupID string, topics []string, handler MessageHandler, logger *slog.Logger) (*Consumer, error) {
-	config := sarama.NewConfig()
-	config.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategyRoundRobin()}
-	config.Consumer.Offsets.Initial = sarama.OffsetNewest
+	config := newConsumerConfig()
 
 	group, err := sarama.NewConsumerGroup(brokers, groupID, config)
 	if err != nil {
