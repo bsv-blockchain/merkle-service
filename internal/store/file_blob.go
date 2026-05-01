@@ -12,11 +12,35 @@ import (
 )
 
 // NewBlobStoreFromURL creates a BlobStore from a URL string.
-// Supports "file://" for local filesystem storage.
-// Falls back to in-memory store for unrecognized schemes.
+//
+// Exactly two forms are accepted:
+//
+//   - "file://<path>" — durable on-disk store rooted at <path>. The path is
+//     created if it does not exist. This is the only durable backend.
+//   - "memory:" or "memory://" — in-memory store. Suitable for tests and
+//     ephemeral single-process deployments only; blobs are lost on restart
+//     and are not visible to other replicas.
+//
+// Any other scheme (including object-store URLs such as s3://, gs://, or
+// azure://, and typos such as "flie://") returns an error so that operator
+// misconfiguration fails loudly at startup instead of silently degrading to
+// an in-memory store that loses subtree/STUMP blobs and breaks inter-replica
+// sharing. An empty URL is also rejected for the same reason — callers who
+// want an in-memory store must request it explicitly via "memory:".
 func NewBlobStoreFromURL(rawURL string) (BlobStore, error) {
-	if strings.HasPrefix(rawURL, "file://") {
-		u, err := url.Parse(rawURL)
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return nil, fmt.Errorf(`blob-store URL is empty (expected "file://<path>" or "memory:")`)
+	}
+
+	// Accept the explicit in-memory form. Both "memory:" (opaque URI) and
+	// "memory://" (authority form) are accepted for operator convenience.
+	if trimmed == "memory:" || trimmed == "memory://" {
+		return NewMemoryBlobStore(), nil
+	}
+
+	if strings.HasPrefix(trimmed, "file://") {
+		u, err := url.Parse(trimmed)
 		if err != nil {
 			return nil, fmt.Errorf("parsing blob store URL: %w", err)
 		}
@@ -26,8 +50,29 @@ func NewBlobStoreFromURL(rawURL string) (BlobStore, error) {
 		}
 		return NewFileBlobStore(dir)
 	}
-	// Default to memory store for unknown/empty URLs.
-	return NewMemoryBlobStore(), nil
+
+	// Anything else — including s3://, gs://, azure://, http://, and typos
+	// like "flie://" — is rejected. We surface the scheme but not the full
+	// URL to avoid logging credentials embedded in the userinfo component.
+	scheme := schemeOf(trimmed)
+	return nil, fmt.Errorf(`unsupported blob-store scheme %q (expected "file" or "memory")`, scheme)
+}
+
+// schemeOf returns the URL scheme for rawURL, or the raw value (truncated)
+// when the input does not look like a URL. Used purely for error messages,
+// so it never returns userinfo or path components.
+func schemeOf(rawURL string) string {
+	if i := strings.Index(rawURL, ":"); i > 0 {
+		return rawURL[:i]
+	}
+	// No scheme delimiter — the operator passed something that is not a URL
+	// at all. Echo back a short prefix so the error is actionable without
+	// risking secret leakage.
+	const maxLen = 16
+	if len(rawURL) > maxLen {
+		return rawURL[:maxLen] + "..."
+	}
+	return rawURL
 }
 
 // FileBlobStore implements BlobStore using the local filesystem.
