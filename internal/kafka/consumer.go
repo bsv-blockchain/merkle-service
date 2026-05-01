@@ -96,6 +96,23 @@ func (h *consumerGroupHandler) Cleanup(sarama.ConsumerGroupSession) error {
 	return nil
 }
 
+// ConsumeClaim drives the per-partition message loop. On handler error we
+// return the error WITHOUT calling MarkMessage, which:
+//
+//  1. Leaves the failed offset uncommitted so sarama re-delivers it in the
+//     next session. Per-handler retry/DLQ logic (subtree-fetcher,
+//     subtree-worker, block-processor, callback-delivery) classifies the
+//     failure and either re-publishes for retry, routes to a DLQ, or returns
+//     an error to deliberately stall the partition until the underlying
+//     Kafka/storage problem is resolved.
+//  2. Stops processing later messages in the same claim. The previous
+//     implementation logged the error and continued; a later successful
+//     message's MarkMessage call would then advance the committed offset
+//     past the failed one, permanently dropping the failed work (F-030).
+//
+// Sarama treats a non-nil ConsumeClaim return as a session-level error and
+// triggers a rebalance; the next session will resume from the last committed
+// offset, which is the failed message's offset.
 func (h *consumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	for {
 		select {
@@ -104,13 +121,13 @@ func (h *consumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession,
 				return nil
 			}
 			if err := h.handler(session.Context(), msg); err != nil {
-				h.logger.Error("failed to handle message",
+				h.logger.Error("failed to handle message, stopping claim to preserve offset",
 					"topic", msg.Topic,
 					"partition", msg.Partition,
 					"offset", msg.Offset,
 					"error", err,
 				)
-				continue
+				return err
 			}
 			session.MarkMessage(msg, "")
 		case <-session.Context().Done():
