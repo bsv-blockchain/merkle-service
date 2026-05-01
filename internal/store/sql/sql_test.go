@@ -136,7 +136,7 @@ func TestCallbackDedup_TTLExpiry(t *testing.T) {
 
 func TestCallbackURLRegistry_AddGetAll(t *testing.T) {
 	db, d := newTestDB(t)
-	r := newCallbackURLRegistry(db, d)
+	r := newCallbackURLRegistry(db, d, time.Hour)
 
 	if err := r.Add("http://one"); err != nil {
 		t.Fatal(err)
@@ -154,6 +154,88 @@ func TestCallbackURLRegistry_AddGetAll(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("got %v, want 2 URLs", all)
+	}
+}
+
+// TestCallbackURLRegistry_RetentionWindow is the regression test for F-037 /
+// issue #23. Pre-fix the SQL registry stored every URL forever; post-fix
+// `last_seen_at` is refreshed by Add and rows older than the retention window
+// no longer appear in GetAll (and the sweeper deletes them).
+func TestCallbackURLRegistry_RetentionWindow(t *testing.T) {
+	db, d := newTestDB(t)
+	r := newCallbackURLRegistry(db, d, time.Hour)
+
+	if err := r.Add("http://recent"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert a stale row by hand — simulates a URL whose last Add was far
+	// outside the retention window.
+	stale := "http://stale"
+	q := fmt.Sprintf(
+		"INSERT INTO callback_urls (callback_url, last_seen_at) VALUES (%s, %s)",
+		d.placeholder(1), d.intervalSeconds(-2*int(time.Hour/time.Second)))
+	if _, err := db.Exec(q, stale); err != nil {
+		t.Fatalf("seed stale row: %v", err)
+	}
+
+	all, err := r.GetAll()
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	for _, u := range all {
+		if u == stale {
+			t.Fatalf("GetAll returned stale URL %q (retention window not enforced)", u)
+		}
+	}
+	if len(all) != 1 || all[0] != "http://recent" {
+		t.Fatalf("expected only http://recent, got %v", all)
+	}
+
+	// Re-Add the stale URL: that should refresh last_seen_at and bring it
+	// back into the active window.
+	if err := r.Add(stale); err != nil {
+		t.Fatalf("re-Add stale: %v", err)
+	}
+	all, err = r.GetAll()
+	if err != nil {
+		t.Fatalf("GetAll after refresh: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 URLs after refresh, got %v", all)
+	}
+}
+
+// TestCallbackURLRegistry_SweeperEvicts confirms the sweeper deletes stale
+// URLs (issue #23). Without this, the table would grow unboundedly even
+// though GetAll filters — and a long-running deployment would still pay the
+// row-count cost for every Add (full-table scan on the unique index).
+func TestCallbackURLRegistry_SweeperEvicts(t *testing.T) {
+	db, d := newTestDB(t)
+	r := newCallbackURLRegistry(db, d, time.Hour)
+
+	if err := r.Add("http://recent"); err != nil {
+		t.Fatal(err)
+	}
+	stale := "http://ancient"
+	q := fmt.Sprintf(
+		"INSERT INTO callback_urls (callback_url, last_seen_at) VALUES (%s, %s)",
+		d.placeholder(1), d.intervalSeconds(-2*int(time.Hour/time.Second)))
+	if _, err := db.Exec(q, stale); err != nil {
+		t.Fatalf("seed stale row: %v", err)
+	}
+
+	// Use a sweeper interval that won't tick during the test — we drive it
+	// directly via sweepOnce so the test is deterministic.
+	sw := newSweeper(db, d, time.Hour, time.Hour, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
+	sw.sweepOnce(context.Background())
+
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM callback_urls").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("after sweep expected 1 row in callback_urls, got %d", n)
 	}
 }
 
@@ -296,7 +378,7 @@ func TestSweeper_DeletesExpiredRows(t *testing.T) {
 
 	// Wait for the first entry to expire, then sweep.
 	time.Sleep(2100 * time.Millisecond)
-	sw := newSweeper(db, d, 10*time.Millisecond, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
+	sw := newSweeper(db, d, 10*time.Millisecond, time.Hour, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
 	sw.sweepOnce(context.Background())
 
 	// Verify the expired row is gone at the row level (not just filtered by
@@ -323,7 +405,7 @@ func TestSweeper_DeletesExpiredRows(t *testing.T) {
 
 func TestSweeper_StopsOnClose(t *testing.T) {
 	db, d := newTestDB(t)
-	sw := newSweeper(db, d, 5*time.Millisecond, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
+	sw := newSweeper(db, d, 5*time.Millisecond, time.Hour, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var started atomic.Bool
@@ -353,7 +435,7 @@ func TestSQLBackend_InterfaceSatisfaction(t *testing.T) {
 	var (
 		_ storepkg.RegistrationStore        = newRegistrationStore(db, d)
 		_ storepkg.CallbackDedupStore       = newCallbackDedup(db, d)
-		_ storepkg.CallbackURLRegistry      = newCallbackURLRegistry(db, d)
+		_ storepkg.CallbackURLRegistry      = newCallbackURLRegistry(db, d, time.Hour)
 		_ storepkg.CallbackAccumulatorStore = newCallbackAccumulator(db, d, 60)
 		_ storepkg.SeenCounterStore         = newSeenCounter(db, d, 3)
 		_ storepkg.SubtreeCounterStore      = newSubtreeCounter(db, d, 60)

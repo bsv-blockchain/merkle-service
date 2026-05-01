@@ -64,8 +64,9 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 	}
 
 	sweepInterval := parseDuration(cfg.Store.SQL.SweeperInterval, 60*time.Second)
+	urlRetention := parseDuration(cfg.Store.SQL.CallbackURLRegistryRetention, defaultCallbackURLRetention)
 	sweeperCtx, cancelSweeper := context.WithCancel(context.Background())
-	sw := newSweeper(db, d, sweepInterval, logger)
+	sw := newSweeper(db, d, sweepInterval, urlRetention, logger)
 	go sw.run(sweeperCtx)
 
 	r := &storepkg.Registry{
@@ -73,7 +74,7 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 		Subtree:             storepkg.NewSubtreeStore(blob, uint64(cfg.Subtree.DAHOffset), logger),
 		Stump:               storepkg.NewStumpStore(blob, uint64(cfg.Subtree.StumpDAHOffset), logger),
 		CallbackDedup:       newCallbackDedup(db, d),
-		CallbackURLRegistry: newCallbackURLRegistry(db, d),
+		CallbackURLRegistry: newCallbackURLRegistry(db, d, urlRetention),
 		CallbackAccumulator: newCallbackAccumulator(db, d, cfg.Aerospike.CallbackAccumulatorTTLSec),
 		SeenCounter:         newSeenCounter(db, d, cfg.Callback.SeenThreshold),
 		SubtreeCounter:      newSubtreeCounter(db, d, cfg.Aerospike.SubtreeCounterTTLSec),

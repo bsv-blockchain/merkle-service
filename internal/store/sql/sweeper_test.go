@@ -35,7 +35,7 @@ func TestSweeper_CascadesRegistrationChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sw := newSweeper(db, d, time.Hour, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
+	sw := newSweeper(db, d, time.Hour, time.Hour, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
 	sw.sweepOnce(context.Background())
 
 	// Parent row should be gone.
@@ -97,7 +97,7 @@ func TestSweeper_CascadesAccumulatorChildren(t *testing.T) {
 		}
 	}
 
-	sw := newSweeper(db, d, time.Hour, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
+	sw := newSweeper(db, d, time.Hour, time.Hour, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
 	sw.sweepOnce(context.Background())
 
 	// Parent gone.
