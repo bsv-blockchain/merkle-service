@@ -76,11 +76,12 @@ func NewSubtreeWorkerService(
 }
 
 func (s *SubtreeWorkerService) Init(_ interface{}) error {
-	s.dataHubClient = datahub.NewClientWithCaps(
+	s.dataHubClient = datahub.NewClientWithSSRFGuard(
 		s.datahubCfg.TimeoutSec,
 		s.datahubCfg.MaxRetries,
 		s.datahubCfg.MaxBlockBytes,
 		s.datahubCfg.MaxSubtreeBytes,
+		s.datahubCfg.AllowPrivateIPs,
 		s.Logger,
 	)
 
