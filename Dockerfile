@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 go build -o /bin/p2p-client ./cmd/p2p-client
 RUN CGO_ENABLED=0 go build -o /bin/watch ./cmd/watch
 
 # Runtime image with all binaries.
-FROM alpine:3.19
+FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /bin/ /usr/local/bin/
