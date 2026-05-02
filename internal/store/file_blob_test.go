@@ -2,6 +2,8 @@ package store
 
 import (
 	"bytes"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -139,6 +141,133 @@ func TestNewBlobStoreFromURL(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), "shouldnotleak") {
 			t.Errorf("error %q leaked the trailing portion of the input", err.Error())
+		}
+	})
+}
+
+// TestFileBlobStore_RejectsPathTraversalKeys pins F-038 (issue #24): blob keys
+// must not be able to read, write, or delete files outside the configured
+// root directory. Each operation (Set, Get, GetIoReader, Del) is checked
+// against the same set of attacker-controlled keys to ensure the validation
+// runs at every entry point — a one-sided fix that only guards Set would
+// still leak filesystem reads/deletes.
+func TestFileBlobStore_RejectsPathTraversalKeys(t *testing.T) {
+	root := t.TempDir()
+	bs, err := NewFileBlobStore(root)
+	if err != nil {
+		t.Fatalf("NewFileBlobStore: %v", err)
+	}
+
+	// Pre-create a sentinel file outside the root that, if traversal worked,
+	// the store would happily read or delete. The test asserts the file is
+	// untouched after every malicious operation.
+	outside := t.TempDir()
+	sentinelPath := filepath.Join(outside, "secret")
+	sentinelData := []byte("DO NOT TOUCH")
+	if err := os.WriteFile(sentinelPath, sentinelData, 0o600); err != nil {
+		t.Fatalf("seeding sentinel: %v", err)
+	}
+
+	traversalCases := []struct {
+		name string
+		key  string
+	}{
+		{"parent traversal", "../../etc/passwd"},
+		{"absolute path", "/etc/passwd"},
+		{"nested traversal escapes", "foo/../../../bar"},
+		{"relative escape via outside root", "../" + filepath.Base(outside) + "/secret"},
+		{"empty key", ""},
+		{"backslash-prefixed absolute", "\\etc\\passwd"},
+		{"single dot-dot", ".."},
+	}
+
+	for _, tc := range traversalCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if err := bs.Set(tc.key, []byte("pwn")); err == nil {
+				t.Errorf("Set(%q) accepted; want rejection", tc.key)
+			} else if !errors.Is(err, ErrBlobKeyEscapesRoot) {
+				t.Errorf("Set(%q) error = %v; want ErrBlobKeyEscapesRoot", tc.key, err)
+			}
+			if _, err := bs.Get(tc.key); err == nil {
+				t.Errorf("Get(%q) accepted; want rejection", tc.key)
+			} else if !errors.Is(err, ErrBlobKeyEscapesRoot) {
+				t.Errorf("Get(%q) error = %v; want ErrBlobKeyEscapesRoot", tc.key, err)
+			}
+			if _, err := bs.GetIoReader(tc.key); err == nil {
+				t.Errorf("GetIoReader(%q) accepted; want rejection", tc.key)
+			} else if !errors.Is(err, ErrBlobKeyEscapesRoot) {
+				t.Errorf("GetIoReader(%q) error = %v; want ErrBlobKeyEscapesRoot", tc.key, err)
+			}
+			if err := bs.Del(tc.key); err == nil {
+				t.Errorf("Del(%q) accepted; want rejection", tc.key)
+			} else if !errors.Is(err, ErrBlobKeyEscapesRoot) {
+				t.Errorf("Del(%q) error = %v; want ErrBlobKeyEscapesRoot", tc.key, err)
+			}
+		})
+	}
+
+	// The sentinel must still exist with original contents — a single
+	// traversal that snuck through would either delete it or rewrite it.
+	got, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("sentinel disappeared: %v", err)
+	}
+	if !bytes.Equal(got, sentinelData) {
+		t.Fatalf("sentinel rewritten: got %q want %q", got, sentinelData)
+	}
+}
+
+// TestFileBlobStore_AcceptsValidKeys keeps the legitimate key shapes — bare
+// hex hashes and slash-namespaced "<bucket>/<hash>" keys — working after the
+// traversal guard. A regression here would silently break STUMP storage,
+// which uses "stump/<sha256>" via stumpKeyPrefix.
+func TestFileBlobStore_AcceptsValidKeys(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := NewFileBlobStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileBlobStore: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{"hex hash", "abc123def4567890abcdef1234567890abcdef1234567890abcdef1234567890"},
+		{"slash-namespaced (stump)", "stump/3292be80a8cd32bc53582b666a1f13564259281a256a6b40aae0bc83c4d50a4d"},
+		{"bucket/hash", "bucket/abc123"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte("payload-" + tc.name)
+			if err := bs.Set(tc.key, payload); err != nil {
+				t.Fatalf("Set(%q): %v", tc.key, err)
+			}
+			got, err := bs.Get(tc.key)
+			if err != nil {
+				t.Fatalf("Get(%q): %v", tc.key, err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Errorf("round-trip mismatch for %q: got %q want %q", tc.key, got, payload)
+			}
+			if err := bs.Del(tc.key); err != nil {
+				t.Errorf("Del(%q): %v", tc.key, err)
+			}
+		})
+	}
+
+	// Boundary case: "foo/bar/../baz" cleans to "foo/baz" which stays inside
+	// f.dir, so a Rel-only check would let it through. We reject it anyway
+	// because no legitimate producer (subtree hashes, STUMP refs) ever emits
+	// ".." segments — accepting them would only matter to someone trying to
+	// probe the validator. Document the rejection so a future refactor can't
+	// loosen this without weighing the trade-off.
+	t.Run("interior dot-dot segment rejected even though it stays in root", func(t *testing.T) {
+		err := bs.Set("foo/bar/../baz", []byte("x"))
+		if err == nil || !errors.Is(err, ErrBlobKeyEscapesRoot) {
+			t.Errorf("Set(\"foo/bar/../baz\") = %v; want ErrBlobKeyEscapesRoot", err)
 		}
 	})
 }

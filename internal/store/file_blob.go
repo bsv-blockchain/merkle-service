@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -77,11 +78,18 @@ func schemeOf(rawURL string) string {
 
 // FileBlobStore implements BlobStore using the local filesystem.
 type FileBlobStore struct {
-	dir    string
-	mu     sync.RWMutex
-	dah    map[string]uint64 // delete-at-height per key
-	height uint64
+	dir     string
+	rootAbs string // absolute, cleaned form of dir for traversal checks
+	mu      sync.RWMutex
+	dah     map[string]uint64 // delete-at-height per key
+	height  uint64
 }
+
+// ErrBlobKeyEscapesRoot is returned when a blob key resolves to a filesystem
+// path outside the configured root directory. F-038 (issue #24): an
+// attacker-controlled subtree/STUMP key could otherwise read, write, or
+// delete files anywhere the service has filesystem permission.
+var ErrBlobKeyEscapesRoot = errors.New("blob key escapes root directory")
 
 // NewFileBlobStore creates a new file-based blob store rooted at dir.
 // The directory is created if it doesn't exist.
@@ -89,14 +97,66 @@ func NewFileBlobStore(dir string) (*FileBlobStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating blob store directory %s: %w", dir, err)
 	}
+	rootAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving blob store directory %s: %w", dir, err)
+	}
 	return &FileBlobStore{
-		dir: dir,
-		dah: make(map[string]uint64),
+		dir:     dir,
+		rootAbs: rootAbs,
+		dah:     make(map[string]uint64),
 	}, nil
 }
 
-func (f *FileBlobStore) path(key string) string {
-	return filepath.Join(f.dir, key)
+// resolvePath validates key and returns the absolute path it maps to inside
+// f.dir. F-038: keys arrive from network-facing producers (subtree hashes,
+// STUMP refs) so we must reject any shape that could escape f.dir before
+// calling into the filesystem.
+//
+// The validation is layered:
+//  1. Reject the obviously-malicious shapes at entry — empty, absolute,
+//     leading slash, OS-specific separators (Windows '\\'), and any segment
+//     equal to ".." — so the error message names the offending key without
+//     leaking the resolved root.
+//  2. Re-check after filepath.Clean+Join via filepath.Rel so we also catch
+//     anything sneakier that happens to clean to a sibling directory (for
+//     example via OS-specific path quirks or future refactors that change
+//     how keys are composed).
+func (f *FileBlobStore) resolvePath(key string) (string, error) {
+	if key == "" {
+		return "", fmt.Errorf("%w: empty key", ErrBlobKeyEscapesRoot)
+	}
+	if filepath.IsAbs(key) || strings.HasPrefix(key, "/") {
+		return "", fmt.Errorf("%w: %q is absolute", ErrBlobKeyEscapesRoot, key)
+	}
+	// Reject Windows-style separators on every platform: blob keys are
+	// produced by content addressing (sha256 hex) plus optional "<bucket>/"
+	// prefixes, so a backslash is always anomalous and might bypass
+	// filepath.Clean on non-Windows hosts.
+	if strings.ContainsRune(key, '\\') {
+		return "", fmt.Errorf("%w: %q contains backslash", ErrBlobKeyEscapesRoot, key)
+	}
+	// Walk segments and reject any "..". Splitting by "/" works for the
+	// forward-slash-namespaced keys this store accepts; the IsAbs check
+	// above already rejects anything starting at root.
+	for _, seg := range strings.Split(key, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("%w: %q contains parent segment", ErrBlobKeyEscapesRoot, key)
+		}
+	}
+
+	cleaned := filepath.Clean(key)
+	joined := filepath.Join(f.dir, cleaned)
+
+	abs, err := filepath.Abs(joined)
+	if err != nil {
+		return "", fmt.Errorf("resolving blob path %q: %w", key, err)
+	}
+	rel, err := filepath.Rel(f.rootAbs, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%w: %q", ErrBlobKeyEscapesRoot, key)
+	}
+	return abs, nil
 }
 
 func (f *FileBlobStore) Set(key string, data []byte, opts ...BlobOption) error {
@@ -105,11 +165,14 @@ func (f *FileBlobStore) Set(key string, data []byte, opts ...BlobOption) error {
 		opt(o)
 	}
 
-	path := f.path(key)
+	path, err := f.resolvePath(key)
+	if err != nil {
+		return err
+	}
 	// Keys may contain path separators (e.g. "stump/<sha256>") to namespace
 	// different blob categories. os.WriteFile does not create parents, so
 	// ensure the containing directory exists before writing.
-	if parent := filepath.Dir(path); parent != "" && parent != f.dir {
+	if parent := filepath.Dir(path); parent != "" && parent != f.rootAbs {
 		if err := os.MkdirAll(parent, 0o755); err != nil {
 			return fmt.Errorf("creating blob parent dir %s: %w", parent, err)
 		}
@@ -136,7 +199,11 @@ func (f *FileBlobStore) SetFromReader(key string, r io.Reader, size int64, opts 
 }
 
 func (f *FileBlobStore) Get(key string) ([]byte, error) {
-	data, err := os.ReadFile(f.path(key))
+	path, err := f.resolvePath(key)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: %s", ErrBlobNotFound, key)
@@ -155,11 +222,16 @@ func (f *FileBlobStore) GetIoReader(key string) (io.ReadCloser, error) {
 }
 
 func (f *FileBlobStore) Del(key string) error {
+	path, err := f.resolvePath(key)
+	if err != nil {
+		return err
+	}
+
 	f.mu.Lock()
 	delete(f.dah, key)
 	f.mu.Unlock()
 
-	err := os.Remove(f.path(key))
+	err = os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("deleting blob %s: %w", key, err)
 	}
@@ -171,10 +243,14 @@ func (f *FileBlobStore) SetCurrentBlockHeight(height uint64) {
 	defer f.mu.Unlock()
 	f.height = height
 
-	// Prune entries whose DAH has been reached.
+	// Prune entries whose DAH has been reached. Keys in f.dah were already
+	// validated by Set, but re-validate defensively so a future bug that
+	// writes to f.dah outside Set can't trigger a traversal during pruning.
 	for key, dah := range f.dah {
 		if height >= dah {
-			_ = os.Remove(f.path(key))
+			if path, err := f.resolvePath(key); err == nil {
+				_ = os.Remove(path)
+			}
 			delete(f.dah, key)
 		}
 	}
