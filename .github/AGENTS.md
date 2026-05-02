@@ -36,6 +36,39 @@ Our technical standards are organized into focused, portable documents in the `.
 
 <br><br>
 
+## 🛠️ Build & Task Automation
+
+### Makefile (primary)
+
+The project provides a [`Makefile`](../Makefile) at the repository root as the **primary interface** for common development tasks. Prefer `make <target>` over running raw commands directly.
+
+| Target | Description |
+|---|---|
+| `make build` | Compile all packages (`go build ./...`) |
+| `make test` | Run the full unit-test suite |
+| `make test-e2e-postgres` | Run PostgreSQL-backed end-to-end tests (requires Docker/Podman) |
+| `make lint` | Run `golangci-lint` |
+| `make lint-store-imports` | Verify `cmd/` binaries do not import backend packages directly |
+| `make docker-up` / `docker-down` | Start / stop local services via `podman-compose` |
+| `make run` | Run the merkle-service binary |
+| `make debug-dashboard` | Start the debug dashboard |
+| `make scale-test` | Run the scale test suite (10 min timeout) |
+| `make mega-scale-test` | Run the mega-scale suite (15 min timeout) |
+| `make generate-mega-fixtures` | Generate large fixture data for mega-scale tests |
+
+### magex (CI fallback)
+
+For CI environments or platforms where `make` is unavailable, [**magex**](https://github.com/magefile/mage) provides a portable Go-native task runner equivalent. Mage targets mirror the Makefile and are resolved automatically when `magex` is present on `PATH`.
+
+```sh
+go install github.com/magefile/mage/magex@latest
+magex <target>   # same targets as make
+```
+
+> Prefer `make` for local development. `magex` is intended as a fallback for environments that cannot rely on GNU Make (some Windows CI runners, hermetic sandboxes, etc.).
+
+<br><br>
+
 ## 📁 Directory Structure
 
 | Directory                   | Description                                             |
