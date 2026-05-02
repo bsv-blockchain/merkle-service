@@ -1736,7 +1736,7 @@ type failingSeenCounter struct {
 	attempts []string // txids passed to Increment, in call order
 }
 
-func (f *failingSeenCounter) Increment(txid string, subtreeID string) (*store.IncrementResult, error) {
+func (f *failingSeenCounter) Increment(txid, subtreeID string) (*store.IncrementResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempts = append(f.attempts, txid)

@@ -44,12 +44,12 @@ func nameMmapRegion(addr unsafe.Pointer, length uintptr, chunkNum uint64) error 
 		PR_SET_VMA_ANON_NAME,
 		uintptr(addr),
 		length,
-		uintptr(unsafe.Pointer(&nameBytes[0])),
+		uintptr(unsafe.Pointer(&nameBytes[0])), //#nosec G103 -- required to pass null-terminated name pointer to prctl syscall
 		0,
 	)
 
 	if errno != 0 {
-		return fmt.Errorf("prctl PR_SET_VMA_ANON_NAME failed for %s: %v", name, errno)
+		return fmt.Errorf("prctl PR_SET_VMA_ANON_NAME failed for %s: %w", name, errno)
 	}
 
 	return nil
@@ -75,7 +75,7 @@ func allocateNamedMmap(size int) ([]byte, error) {
 	if len(data) > 0 {
 		// Naming failures are logged but don't fail the allocation.
 		// This ensures the cache still works on older kernels without PR_SET_VMA_ANON_NAME.
-		_ = nameMmapRegion(unsafe.Pointer(&data[0]), uintptr(len(data)), chunkNum)
+		_ = nameMmapRegion(unsafe.Pointer(&data[0]), uintptr(len(data)), chunkNum) //#nosec G103 -- required to pass mmap region address to prctl syscall
 	}
 
 	return data, nil
