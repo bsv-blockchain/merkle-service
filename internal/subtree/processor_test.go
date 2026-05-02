@@ -1714,3 +1714,241 @@ func TestHandleMessage_CachedLookupFailure_RoutesToRetryAndSkipsDedup(t *testing
 		t.Errorf("expected 0 callback publishes after cached-lookup failure, got %d", got)
 	}
 }
+
+// --- F-058: Seen-counter increment failure propagation tests ---
+//
+// Pre-fix, when seenCounterStore.Increment returned a transient error the
+// emitBatchedSeenCallbacks loop logged a warning and continued, while
+// handleMessage still added the subtree's hash to the dedup cache. Any
+// redelivery was then silently skipped — permanently undercounting network
+// observations and suppressing SEEN_MULTIPLE_NODES callbacks for affected
+// txids. The fix returns the first error from emitBatchedSeenCallbacks so
+// handleMessage routes the work through handleTransientFailure (which
+// leaves the dedup cache untouched).
+
+// failingSeenCounter returns a configured error from every Increment call.
+// Used to drive the seen-counter failure path for F-058. Reuses the same
+// pattern as the existing mockSeenCounter / mockIdempotentSeenCounter fakes.
+type failingSeenCounter struct {
+	mu       sync.Mutex
+	err      error
+	failed   int
+	attempts []string // txids passed to Increment, in call order
+}
+
+func (f *failingSeenCounter) Increment(txid string, subtreeID string) (*store.IncrementResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.attempts = append(f.attempts, txid)
+	f.failed++
+	return nil, f.err
+}
+
+// TestEmitBatchedSeenCallbacks_IncrementFailureReturnsError verifies that a
+// seenCounterStore.Increment error surfaces to the caller — the F-058 fix.
+// The publish path for SEEN_ON_NETWORK still succeeds (Increment failure must
+// not suppress the per-txid SEEN_ON_NETWORK callback), but the function
+// returns a non-nil error so handleMessage redelivers.
+func TestEmitBatchedSeenCallbacks_IncrementFailureReturnsError(t *testing.T) {
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	sc := &failingSeenCounter{err: errors.New("aerospike counter outage")}
+	p, mockProd := newTestProcessor(t, regStore, sc)
+
+	registered := map[string][]string{
+		"tx1": {"http://url-A/cb"},
+		"tx2": {"http://url-B/cb"},
+	}
+
+	err := p.emitBatchedSeenCallbacks(registered, "subtree-counter-fail")
+	if err == nil {
+		t.Fatalf("expected non-nil error when seen-counter Increment fails")
+	}
+	if !strings.Contains(err.Error(), "incrementing seen counter") {
+		t.Errorf("expected error to wrap increment context, got: %v", err)
+	}
+
+	// Both txids should have been attempted (best-effort iteration past
+	// the first failure mirrors PR #81's per-URL partial-success contract).
+	if sc.failed != 2 {
+		t.Errorf("expected 2 Increment attempts (one per txid), got %d", sc.failed)
+	}
+
+	// SEEN_ON_NETWORK publishes for both URLs must still have happened —
+	// the increment failure must not suppress already-batched per-URL
+	// SEEN_ON_NETWORK delivery on this attempt.
+	msgs := mockProd.getMessages()
+	if len(msgs) != 2 {
+		t.Errorf("expected 2 SEEN_ON_NETWORK publishes despite increment failure, got %d", len(msgs))
+	}
+	for _, pm := range msgs {
+		cb := decodeCallbackMsg(t, pm)
+		if cb.Type != kafka.CallbackSeenOnNetwork {
+			t.Errorf("expected SEEN_ON_NETWORK only (no SEEN_MULTIPLE_NODES on failure), got %s", cb.Type)
+		}
+	}
+}
+
+// TestHandleMessage_SeenCounterIncrementFailure_RoutesToRetryAndSkipsDedup is
+// the end-to-end F-058 contract test: when seenCounterStore.Increment fails
+// for a registered txid, handleMessage must route the subtree message
+// through the retry pipeline AND must NOT add the subtree hash to the dedup
+// cache (otherwise redelivery is silently skipped and SEEN_MULTIPLE_NODES
+// callbacks are permanently lost).
+func TestHandleMessage_SeenCounterIncrementFailure_RoutesToRetryAndSkipsDedup(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	registeredTxid := "9602604163d73e2ab424bad28b1363694c397512dfa883ec1ee90cc92f847359"
+
+	regStore := &mockRegStore{
+		registrations: map[string][]string{
+			registeredTxid: {"http://callback.example.com/notify"},
+		},
+	}
+
+	rawBytes := hashFromHex(t, registeredTxid)
+	dataHubServer := startRawSubtreeServer(rawBytes)
+	defer dataHubServer.Close()
+
+	cbMock := &mockSyncProducer{}
+	retryMock := &mockSyncProducer{}
+	dlqMock := &mockSyncProducer{}
+	dedup := cache.NewDedupCache(100)
+	sc := &failingSeenCounter{err: errors.New("aerospike counter outage")}
+
+	p := &Processor{
+		cfg: &config.Config{
+			Subtree: config.SubtreeConfig{
+				MaxAttempts: 5,
+				StorageMode: "stream", // skip blob store
+			},
+		},
+		registrationStore: regStore,
+		seenCounterStore:  sc,
+		callbackProducer:  kafka.NewTestProducer(cbMock, "callback-test", logger),
+		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		dataHubClient:     datahub.NewClient(5, 0, logger),
+		dedupCache:        dedup,
+	}
+	p.InitBase("subtree-counter-fail-test")
+	p.Logger = logger
+
+	subtreeMsg := &kafka.SubtreeMessage{
+		Hash:         "subtree-counter-fail",
+		DataHubURL:   dataHubServer.URL,
+		AttemptCount: 0,
+	}
+	value, err := subtreeMsg.Encode()
+	if err != nil {
+		t.Fatalf("encode subtree msg: %v", err)
+	}
+
+	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage: expected nil error (retry path returns nil after re-publishing), got: %v", err)
+	}
+
+	// Critical: dedup cache MUST NOT contain this subtree's hash. If it did,
+	// the consumer's redelivery would be silently dropped and the
+	// SEEN_MULTIPLE_NODES callback for this txid would be permanently lost.
+	if dedup.Contains(subtreeMsg.Hash) {
+		t.Errorf("dedup cache must NOT contain %q after a seen-counter Increment failure", subtreeMsg.Hash)
+	}
+
+	// Retry producer received the re-published subtree message.
+	if got := len(retryMock.getMessages()); got != 1 {
+		t.Errorf("expected exactly 1 retry publish, got %d", got)
+	}
+	if got := len(dlqMock.getMessages()); got != 0 {
+		t.Errorf("expected zero DLQ publishes, got %d", got)
+	}
+	if got := p.messagesProcessed.Load(); got != 0 {
+		t.Errorf("expected messagesProcessed=0 after seen-counter failure, got %d", got)
+	}
+	if got := p.messagesRetried.Load(); got != 1 {
+		t.Errorf("expected messagesRetried=1 after seen-counter failure, got %d", got)
+	}
+
+	// Increment was attempted at least once for the registered txid.
+	if sc.failed < 1 {
+		t.Errorf("expected at least 1 Increment attempt, got %d", sc.failed)
+	}
+}
+
+// TestHandleMessage_SeenCounterSuccess_UpdatesDedup is the success companion
+// to TestHandleMessage_SeenCounterIncrementFailure: when Increment succeeds,
+// handleMessage returns nil, the dedup cache is updated, and the retry path
+// is NOT exercised.
+func TestHandleMessage_SeenCounterSuccess_UpdatesDedup(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	registeredTxid := "9602604163d73e2ab424bad28b1363694c397512dfa883ec1ee90cc92f847359"
+
+	regStore := &mockRegStore{
+		registrations: map[string][]string{
+			registeredTxid: {"http://callback.example.com/notify"},
+		},
+	}
+
+	rawBytes := hashFromHex(t, registeredTxid)
+	dataHubServer := startRawSubtreeServer(rawBytes)
+	defer dataHubServer.Close()
+
+	cbMock := &mockSyncProducer{}
+	retryMock := &mockSyncProducer{}
+	dlqMock := &mockSyncProducer{}
+	dedup := cache.NewDedupCache(100)
+
+	p := &Processor{
+		cfg: &config.Config{
+			Subtree: config.SubtreeConfig{
+				MaxAttempts: 5,
+				StorageMode: "stream",
+			},
+		},
+		registrationStore: regStore,
+		seenCounterStore:  &mockSeenCounter{}, // succeeds, ThresholdReached=false
+		callbackProducer:  kafka.NewTestProducer(cbMock, "callback-test", logger),
+		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		dataHubClient:     datahub.NewClient(5, 0, logger),
+		dedupCache:        dedup,
+	}
+	p.InitBase("subtree-counter-ok-test")
+	p.Logger = logger
+
+	subtreeMsg := &kafka.SubtreeMessage{
+		Hash:         "subtree-counter-ok",
+		DataHubURL:   dataHubServer.URL,
+		AttemptCount: 0,
+	}
+	value, err := subtreeMsg.Encode()
+	if err != nil {
+		t.Fatalf("encode subtree msg: %v", err)
+	}
+
+	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage: expected nil error on success path, got: %v", err)
+	}
+
+	if !dedup.Contains(subtreeMsg.Hash) {
+		t.Errorf("dedup cache MUST contain %q after a successful processing pass", subtreeMsg.Hash)
+	}
+
+	if got := len(retryMock.getMessages()); got != 0 {
+		t.Errorf("expected 0 retry publishes on success, got %d", got)
+	}
+	if got := len(dlqMock.getMessages()); got != 0 {
+		t.Errorf("expected 0 DLQ publishes on success, got %d", got)
+	}
+	if got := p.messagesProcessed.Load(); got != 1 {
+		t.Errorf("expected messagesProcessed=1 on success, got %d", got)
+	}
+	if got := p.messagesRetried.Load(); got != 0 {
+		t.Errorf("expected messagesRetried=0 on success, got %d", got)
+	}
+	// SEEN_ON_NETWORK should have been published (no SEEN_MULTIPLE_NODES
+	// since mockSeenCounter never fires the threshold).
+	if got := len(cbMock.getMessages()); got != 1 {
+		t.Errorf("expected 1 SEEN_ON_NETWORK callback publish, got %d", got)
+	}
+}
