@@ -243,12 +243,16 @@ func (p *Processor) Health() service.HealthStatus {
 
 // handleMessage processes a single subtree announcement message from Kafka.
 //
-// On transient failure (DataHub/blob store/parse/registration lookup, or any
-// SEEN callback encode/publish failure) the message is re-published to the
-// subtree topic with AttemptCount+1 and nil is returned so the consumer
-// MarkMessage's and the partition advances. Once AttemptCount reaches
-// SubtreeConfig.MaxAttempts the message is routed to the subtree-dlq topic
-// instead of being re-driven again.
+// On transient failure (DataHub/blob store/parse/registration lookup, any
+// SEEN callback encode/publish failure, or a seen-counter increment failure)
+// the message is re-published to the subtree topic with AttemptCount+1 and
+// nil is returned so the consumer MarkMessage's and the partition advances.
+// Once AttemptCount reaches SubtreeConfig.MaxAttempts the message is routed
+// to the subtree-dlq topic instead of being re-driven again.
+//
+// The dedup cache is updated only on full success — any transient failure
+// path returns before p.dedupCache.Add, so a redelivery from the retry
+// pipeline is reprocessed rather than being silently skipped (F-057, F-058).
 //
 // The only errors returned upward are producer-level failures that prevent us
 // from either acking or requeueing — those still stall the partition so we
@@ -456,12 +460,22 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]string, er
 // emitBatchedSeenCallbacks emits batched SEEN_ON_NETWORK and SEEN_MULTIPLE_NODES callbacks.
 // Groups txids by callbackURL and publishes one message per callbackURL.
 //
-// Returns a non-nil error if any per-URL encode or publish fails. The loop
-// continues past a single per-URL failure so independent callback targets
-// still receive their best-effort delivery on this attempt (partial success),
-// but the first error encountered is returned to the caller so handleMessage
-// can re-drive the subtree message through handleTransientFailure rather than
-// silently acking and dropping SEEN notifications — see F-057.
+// Returns a non-nil error if any per-URL encode or publish fails, or if any
+// seenCounterStore.Increment call fails. The loop continues past a single
+// per-txid/per-URL failure so independent callback targets still receive
+// their best-effort delivery on this attempt (partial success), but the
+// first error encountered is returned to the caller so handleMessage can
+// re-drive the subtree message through handleTransientFailure rather than
+// silently acking and dropping SEEN notifications.
+//
+// F-057 made publish failures bubble up. F-058 extends the same contract to
+// seen-counter increment failures: previously, a transient
+// seenCounterStore.Increment error was logged and skipped while
+// handleMessage still added the subtree hash to the dedup cache, permanently
+// undercounting network observations and suppressing SEEN_MULTIPLE_NODES
+// callbacks for the affected txids. Returning the error keeps the dedup
+// cache untouched (handleMessage gates that add on success) and routes the
+// work through handleTransientFailure for redelivery.
 func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string, subtreeID string) error {
 	if len(registeredTxids) == 0 {
 		return nil
@@ -508,11 +522,23 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string
 	}
 
 	// 4.6: Increment seen counters and collect threshold-reached txids.
+	//
+	// A failure here MUST surface as an error (F-058). Pre-fix this path
+	// logged a warning and continued, while handleMessage still added the
+	// subtree hash to the dedup cache — permanently dropping
+	// SEEN_MULTIPLE_NODES callbacks for the affected txids on redelivery.
+	// Capture the first error and return it so handleMessage re-drives via
+	// handleTransientFailure (which leaves the dedup cache untouched), but
+	// keep iterating remaining txids so independent counters still get their
+	// best-effort increment + threshold callback on this attempt.
 	thresholdGroups := make(map[string][]string) // callbackURL → threshold-reached txids
 	for txid, callbackURLs := range registeredTxids {
 		result, err := p.seenCounterStore.Increment(txid, subtreeID)
 		if err != nil {
-			p.Logger.Warn("failed to increment seen counter", "txid", txid, "error", err)
+			p.Logger.Error("failed to increment seen counter", "txid", txid, "subtreeID", subtreeID, "error", err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("incrementing seen counter for %s: %w", txid, err)
+			}
 			continue
 		}
 		if result.ThresholdReached {
