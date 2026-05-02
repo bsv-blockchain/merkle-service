@@ -2,15 +2,19 @@ package datahub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
+	"syscall"
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
+	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/teranode/model"
 )
 
@@ -44,6 +48,14 @@ const (
 // Response bodies are read through an io.LimitReader and Content-Length is
 // checked before reading, so a hostile or malfunctioning DataHub cannot
 // exhaust process memory by returning an unbounded response.
+//
+// Because dataHubURL is sourced from peer-controlled P2P announcements, the
+// client also gates outbound requests through the shared ssrfguard predicate
+// at two layers: a URL/DNS check at request time and a Dialer.Control hook at
+// connect time. A malicious peer cannot redirect block/subtree fetches at
+// loopback, link-local, RFC1918 or cloud-metadata IPs unless the operator
+// has explicitly opted in via DataHubConfig.AllowPrivateIPs. See finding
+// F-028.
 type Client struct {
 	httpClient *http.Client
 	maxRetries int
@@ -54,20 +66,41 @@ type Client struct {
 	maxBlockBytes   int64
 	maxSubtreeBytes int64
 	maxGenericBytes int64
+
+	// allowPrivateIPs disables the SSRF predicate's private/loopback
+	// /link-local check. The unspecified/multicast checks remain in
+	// force regardless. Mirrors CallbackConfig.AllowPrivateIPs.
+	allowPrivateIPs bool
 }
 
 // NewClient creates a new DataHub client with the default per-endpoint
-// response body caps. Use NewClientWithCaps to override the caps from
-// configuration.
+// response body caps. The SSRF guard is enabled with allowPrivateIPs=true
+// for parity with this constructor's historical test-friendly behaviour
+// (httptest binds to 127.0.0.1). Production code MUST use
+// NewClientWithSSRFGuard so private destinations are blocked by default.
 func NewClient(timeoutSec int, maxRetries int, logger *slog.Logger) *Client {
-	return NewClientWithCaps(timeoutSec, maxRetries, 0, 0, logger)
+	return NewClientWithSSRFGuard(timeoutSec, maxRetries, 0, 0, true, logger)
 }
 
 // NewClientWithCaps creates a new DataHub client with explicit per-endpoint
 // response body caps. A cap of 0 selects the corresponding Default* value.
 // Negative caps are clamped to 0 (i.e. fall back to the default) to avoid
-// silently disabling the protection.
+// silently disabling the protection. The SSRF guard is enabled but with
+// allowPrivateIPs=true so existing tests using httptest (127.0.0.1) keep
+// working. Production code paths should call NewClientWithSSRFGuard with
+// the operator's AllowPrivateIPs setting.
 func NewClientWithCaps(timeoutSec int, maxRetries int, maxBlockBytes int64, maxSubtreeBytes int64, logger *slog.Logger) *Client {
+	return NewClientWithSSRFGuard(timeoutSec, maxRetries, maxBlockBytes, maxSubtreeBytes, true, logger)
+}
+
+// NewClientWithSSRFGuard creates a new DataHub client with explicit
+// per-endpoint response body caps and an SSRF predicate applied at both
+// request time (URL/DNS validation) and dial time (Dialer.Control). A cap
+// of 0 selects the corresponding Default*; negative caps are clamped to
+// 0. allowPrivateIPs=false (the production default) blocks
+// loopback/link-local/RFC1918/cloud-metadata destinations even if a
+// peer-supplied dataHubURL points there. Mitigates F-028.
+func NewClientWithSSRFGuard(timeoutSec int, maxRetries int, maxBlockBytes int64, maxSubtreeBytes int64, allowPrivateIPs bool, logger *slog.Logger) *Client {
 	if maxBlockBytes <= 0 {
 		maxBlockBytes = DefaultMaxBlockBytes
 	}
@@ -75,14 +108,41 @@ func NewClientWithCaps(timeoutSec int, maxRetries int, maxBlockBytes int64, maxS
 		maxSubtreeBytes = DefaultMaxSubtreeBytes
 	}
 	return &Client{
-		httpClient: &http.Client{
-			Timeout: time.Duration(timeoutSec) * time.Second,
-		},
+		httpClient:      newSSRFAwareHTTPClient(timeoutSec, allowPrivateIPs),
 		maxRetries:      maxRetries,
 		logger:          logger,
 		maxBlockBytes:   maxBlockBytes,
 		maxSubtreeBytes: maxSubtreeBytes,
 		maxGenericBytes: DefaultMaxGenericBytes,
+		allowPrivateIPs: allowPrivateIPs,
+	}
+}
+
+// newSSRFAwareHTTPClient builds the underlying http.Client used by the
+// DataHub client. A net.Dialer.Control hook calls
+// ssrfguard.CheckDialAddress on every TCP dial so a peer that bypasses
+// the request-time URL check (e.g. via DNS rebinding) is still rejected
+// at connection time. The Control hook receives the resolved
+// "ip:port" address from Go's resolver — there is no opportunity for a
+// hostname to be substituted between resolution and dial.
+func newSSRFAwareHTTPClient(timeoutSec int, allowPrivateIPs bool) *http.Client {
+	transport := &http.Transport{
+		IdleConnTimeout:    90 * time.Second,
+		DisableCompression: false,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+			Control: func(network, address string, _ syscall.RawConn) error {
+				if network != "tcp" && network != "tcp4" && network != "tcp6" {
+					return nil
+				}
+				return ssrfguard.CheckDialAddress(address, allowPrivateIPs)
+			},
+		}).DialContext,
+	}
+	return &http.Client{
+		Timeout:   time.Duration(timeoutSec) * time.Second,
+		Transport: transport,
 	}
 }
 
@@ -105,7 +165,13 @@ type BlockMetadata struct {
 }
 
 // FetchSubtreeRaw fetches raw binary subtree data from a DataHub endpoint.
+// dataHubURL is treated as untrusted (it flows from peer-controlled P2P
+// announcements) and is validated against the SSRF predicate before any
+// network I/O happens.
 func (c *Client) FetchSubtreeRaw(ctx context.Context, dataHubURL string, hash string) ([]byte, error) {
+	if err := c.validateDataHubURL(dataHubURL); err != nil {
+		return nil, err
+	}
 	url := fmt.Sprintf("%s/subtree/%s", dataHubURL, hash)
 	return c.doGetWithRetry(ctx, url, c.maxSubtreeBytes)
 }
@@ -183,7 +249,13 @@ func ParseBinaryBlockMetadata(data []byte) (*BlockMetadata, error) {
 }
 
 // FetchBlockMetadata fetches block metadata (binary) from a DataHub endpoint.
+// dataHubURL is treated as untrusted (it flows from peer-controlled P2P
+// announcements) and is validated against the SSRF predicate before any
+// network I/O happens.
 func (c *Client) FetchBlockMetadata(ctx context.Context, dataHubURL string, hash string) (*BlockMetadata, error) {
+	if err := c.validateDataHubURL(dataHubURL); err != nil {
+		return nil, err
+	}
 	url := fmt.Sprintf("%s/block/%s", dataHubURL, hash)
 	data, err := c.doGetWithRetry(ctx, url, c.maxBlockBytes)
 	if err != nil {
@@ -196,6 +268,30 @@ func (c *Client) FetchBlockMetadata(ctx context.Context, dataHubURL string, hash
 	}
 
 	return meta, nil
+}
+
+// validateDataHubURL applies the shared SSRF predicate to a peer-supplied
+// DataHub base URL. It runs at request time (so the offending URL never
+// reaches Go's HTTP client) and is reinforced by the Dialer.Control hook
+// installed on the client transport. Errors are wrapped so callers can
+// distinguish SSRF rejection from transport failures.
+func (c *Client) validateDataHubURL(rawURL string) error {
+	if err := ssrfguard.ValidateURL(rawURL, c.allowPrivateIPs, nil); err != nil {
+		c.logger.Warn("rejecting DataHub URL by SSRF policy",
+			"url", rawURL,
+			"allowPrivateIPs", c.allowPrivateIPs,
+			"error", err,
+		)
+		switch {
+		case errors.Is(err, ssrfguard.ErrBlockedAddress):
+			return fmt.Errorf("DataHub URL rejected by SSRF policy: %w", err)
+		case errors.Is(err, ssrfguard.ErrInvalidURL):
+			return fmt.Errorf("invalid DataHub URL: %w", err)
+		default:
+			return fmt.Errorf("DataHub URL validation failed: %w", err)
+		}
+	}
+	return nil
 }
 
 // readCapped reads up to maxBytes from r and returns an error if the body is
