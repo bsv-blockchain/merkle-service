@@ -68,7 +68,7 @@ func TestSubtreeStore_StreamingIO(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get reader failed: %v", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	got, _ := io.ReadAll(reader)
 	if !bytes.Equal(got, data) {

@@ -40,13 +40,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer subtreeProducer.Close()
+	defer func() { _ = subtreeProducer.Close() }()
 
 	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, logger)
 	if err != nil {
 		return err
 	}
-	defer blockProducer.Close()
+	defer func() { _ = blockProducer.Close() }()
 
 	// Create, init, and start the P2P client.
 	client := p2p.NewClient(cfg.P2P, subtreeProducer, blockProducer, logger)

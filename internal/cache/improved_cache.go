@@ -81,7 +81,7 @@ const (
 	minSlabBytesPerMmap = minSlabChunks * ChunkSize // keep in sync with minSlabChunks
 )
 
-func calcMaxSlabChunks(maxBucketBytes uint64, maxChunks uint64) uint64 {
+func calcMaxSlabChunks(maxBucketBytes, maxChunks uint64) uint64 {
 	// Target slab size:
 	// - at most 4MB to avoid huge single mmaps per bucket
 	// - about 1/16 of the bucket size, so small buckets don't keep large idle freeChunks
@@ -116,7 +116,7 @@ func calcMaxSlabChunks(maxBucketBytes uint64, maxChunks uint64) uint64 {
 // based on its maximum slab size and total capacity. For small buckets, it allocates
 // the full size upfront to minimize syscall overhead. For large buckets, it starts at
 // 25% capacity to enable exponential growth and memory efficiency for lightly-used buckets.
-func calcInitialAllocChunks(maxSlabChunks uint64, maxChunks uint64) uint64 {
+func calcInitialAllocChunks(maxSlabChunks, maxChunks uint64) uint64 {
 	// If the bucket's total capacity is small (<=128KB), allocate everything upfront
 	// regardless of maxSlabChunks limit. This avoids multiple mmaps for tiny buckets.
 	if maxChunks <= 32 {
@@ -212,7 +212,7 @@ type bucketInterface interface {
 	Reset()
 	Set(k, v []byte, h uint64, skipLocking ...bool) error
 	SetMultiKeysSingleValue(keys [][]byte, value []byte)
-	SetMulti(keys [][]byte, values [][]byte)
+	SetMulti(keys, values [][]byte)
 	Get(*[]byte, []byte, uint64, bool, ...bool) bool
 	Del(k uint64)
 	UpdateStats(s *Stats)
@@ -275,7 +275,7 @@ func New(maxBytes int, bucketType BucketType) (*ImprovedCache, error) {
 	if maxBytes/BucketsCount < 0 {
 		return nil, fmt.Errorf("failed to convert maxBytes: negative value")
 	}
-	maxBucketBytes := uint64(maxBytes / BucketsCount) //nolint:gosec
+	maxBucketBytes := uint64(maxBytes / BucketsCount)
 
 	if maxBucketBytes < ChunkSize {
 		maxBucketBytes = ChunkSize * 8
@@ -300,7 +300,7 @@ func New(maxBytes int, bucketType BucketType) (*ImprovedCache, error) {
 				return nil, fmt.Errorf("error creating preallocated cache: %w", err)
 			}
 		}
-	default: // trimmed cache
+	case Trimmed:
 		for i := 0; i < BucketsCount; i++ {
 			c.buckets[i] = &bucketTrimmed{}
 			if err := c.buckets[i].Init(maxBucketBytes, 0); err != nil {
@@ -379,8 +379,6 @@ func (c *ImprovedCache) SetMultiKeysSingleValue(keys [][]byte, value []byte, key
 			continue
 		}
 
-		bucketIdx := bucketIdx
-
 		g.Go(func() error {
 			c.buckets[bucketIdx].SetMultiKeysSingleValue(batchedKeys[bucketIdx], value)
 			return nil
@@ -400,7 +398,7 @@ func (c *ImprovedCache) SetMultiKeysSingleValue(keys [][]byte, value []byte, key
 // Keys: a single byte slice containing many appended keys.
 // Value: single value is sent for all keys.
 // Value bytes are appended to the end of the previous value bytes.
-func (c *ImprovedCache) SetMultiKeysSingleValueAppended(keys []byte, value []byte, keySize int) error {
+func (c *ImprovedCache) SetMultiKeysSingleValueAppended(keys, value []byte, keySize int) error {
 	if len(keys)%keySize != 0 {
 		return fmt.Errorf("keys length must be a multiple of keySize; got %d; want %d", len(keys), keySize)
 	}
@@ -429,8 +427,6 @@ func (c *ImprovedCache) SetMultiKeysSingleValueAppended(keys []byte, value []byt
 			continue
 		}
 
-		bucketIdx := bucketIdx
-
 		g.Go(func() error {
 			c.buckets[bucketIdx].SetMultiKeysSingleValue(batchedKeys[bucketIdx], value)
 			return nil
@@ -445,7 +441,7 @@ func (c *ImprovedCache) SetMultiKeysSingleValueAppended(keys []byte, value []byt
 }
 
 // SetMulti stores multiple (k, v) entries in the cache, for different values.
-func (c *ImprovedCache) SetMulti(keys [][]byte, values [][]byte) error {
+func (c *ImprovedCache) SetMulti(keys, values [][]byte) error {
 	batchedKeys := make([][][]byte, BucketsCount)
 	batchedValues := make([][][]byte, BucketsCount)
 
@@ -469,8 +465,6 @@ func (c *ImprovedCache) SetMulti(keys [][]byte, values [][]byte) error {
 		if len(batchedKeys[bucketIdx]) == 0 {
 			continue
 		}
-
-		bucketIdx := bucketIdx
 
 		g.Go(func() error {
 			c.buckets[bucketIdx].SetMulti(batchedKeys[bucketIdx], batchedValues[bucketIdx])
@@ -643,7 +637,7 @@ func (b *bucketTrimmed) Init(maxBytes uint64, _ int) error {
 	if maxChunks > math.MaxInt {
 		return fmt.Errorf("failed converting maxChunks: overflow")
 	}
-	maxChunksInt := int(maxChunks) //nolint:gosec
+	maxChunksInt := int(maxChunks)
 	b.chunks = make([][]byte, maxChunksInt)
 	b.m = make(map[uint64]uint64, 1024)
 	b.overWriting = false
@@ -726,7 +720,7 @@ func (b *bucketTrimmed) UpdateStats(s *Stats) {
 	s.PreviousGenEntries += validPreviousGenCount
 	s.ValidEntriesCount += currentGen + validPreviousGenCount
 
-	s.TotalElementsAdded += uint64(b.elementsAdded) //nolint:gosec
+	s.TotalElementsAdded += uint64(b.elementsAdded) //nolint:gosec // elementsAdded is always non-negative
 	s.TotalMapSize += b.getMapSize()
 
 	b.mu.RUnlock()
@@ -736,7 +730,7 @@ func (b *bucketTrimmed) listChunks() {
 	fmt.Println("chunks: ", b.chunks)
 }
 
-func (b *bucketTrimmed) SetMulti(keys [][]byte, values [][]byte) {
+func (b *bucketTrimmed) SetMulti(keys, values [][]byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -759,11 +753,11 @@ func (b *bucketTrimmed) Set(k, v []byte, h uint64, skipLocking ...bool) error {
 	var kvLenBuf [4]byte
 
 	kvLenBuf[0] = byte(uint16(len(k)) >> 8) //nolint:gosec // higher order 8 bits of key's length
-	kvLenBuf[1] = byte(len(k))              // lower order 8 bits of key's length
+	kvLenBuf[1] = byte(len(k))              //nolint:gosec // lower order 8 bits of key's length; length is validated above
 	kvLenBuf[2] = byte(uint16(len(v)) >> 8) //nolint:gosec // higher order 8 bits of value's length
-	kvLenBuf[3] = byte(len(v))              // lower order 8 bits of value's length
+	kvLenBuf[3] = byte(len(v))              //nolint:gosec // lower order 8 bits of value's length; length is validated above
 
-	kvLen := uint64(len(kvLenBuf) + len(k) + len(v)) //nolint:gosec
+	kvLen := uint64(len(kvLenBuf) + len(k) + len(v))
 	if kvLen >= ChunkSize {
 		// Do not store too big keys and values, since they do not
 		// fit a chunk.
@@ -822,7 +816,6 @@ func (b *bucketTrimmed) Set(k, v []byte, h uint64, skipLocking ...bool) error {
 	if chunk == nil {
 		var err error
 		chunk, err = b.getChunk()
-
 		if err != nil {
 			return fmt.Errorf("cannot allocate chunk: %w", err)
 		}
@@ -982,7 +975,7 @@ func (b *bucketTrimmed) getChunk() ([]byte, error) {
 		}
 
 		for len(data) > 0 {
-			p := (*[ChunkSize]byte)(unsafe.Pointer(&data[0]))
+			p := (*[ChunkSize]byte)(unsafe.Pointer(&data[0])) //nolint:gosec // intentional unsafe cast for zero-copy chunk management
 			b.freeChunks = append(b.freeChunks, p)
 			data = data[ChunkSize:]
 		}
@@ -1002,7 +995,7 @@ func (b *bucketTrimmed) putChunk(chunk []byte) {
 	}
 
 	chunk = chunk[:ChunkSize]
-	p := (*[ChunkSize]byte)(unsafe.Pointer(&chunk[0]))
+	p := (*[ChunkSize]byte)(unsafe.Pointer(&chunk[0])) //nolint:gosec // intentional unsafe cast for zero-copy chunk management
 
 	b.freeChunks = append(b.freeChunks, p)
 }
@@ -1014,7 +1007,7 @@ func (b *bucketTrimmed) Del(h uint64) {
 }
 
 func (b *bucketTrimmed) getMapSize() uint64 {
-	return uint64(len(b.m)) //nolint:gosec
+	return uint64(len(b.m))
 }
 
 // ============================================================================
@@ -1078,7 +1071,7 @@ func (b *bucketPreallocated) Init(maxBytes uint64, trimRatio int) error {
 	}
 
 	for len(data) > 0 {
-		p := (*[ChunkSize]byte)(unsafe.Pointer(&data[0]))
+		p := (*[ChunkSize]byte)(unsafe.Pointer(&data[0])) //nolint:gosec // intentional unsafe cast for zero-copy chunk management
 		b.chunks = append(b.chunks, p[:])
 		data = data[ChunkSize:]
 	}
@@ -1115,9 +1108,9 @@ func (b *bucketPreallocated) cleanLockedMap(startingOffset int) {
 
 		// adjust the idx for each item, since we removed the first half of the chunks.
 		// we only take items in the second half of the chunks, i.e. after the byteOffsetRemoved
-		if int(idx) >= startingOffset { //nolint:gosec
+		if int(idx) >= startingOffset {
 			// calculate the adjusted index. We move old indexes of the items to the left by byteOffsetRemoved
-			adjustedIdx := idx - uint64(startingOffset) //nolint:gosec
+			adjustedIdx := idx - uint64(startingOffset) //nolint:gosec // startingOffset is always non-negative
 			bmNew[k] = adjustedIdx | (b.gen << bucketSizeBits)
 		}
 	}
@@ -1153,7 +1146,7 @@ func (b *bucketPreallocated) listChunks() {
 }
 
 // SetMulti stores multiple (k, v) entries with 1-1 mapping for the same bucket. OVERWRITES.
-func (b *bucketPreallocated) SetMulti(keys [][]byte, values [][]byte) {
+func (b *bucketPreallocated) SetMulti(keys, values [][]byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -1189,11 +1182,11 @@ func (b *bucketPreallocated) Set(k, v []byte, h uint64, skipLocking ...bool) err
 	var kvLenBuf [4]byte
 
 	kvLenBuf[0] = byte(uint16(len(k)) >> 8) //nolint:gosec // higher order 8 bits of key's length
-	kvLenBuf[1] = byte(len(k))              // lower order 8 bits of key's length
+	kvLenBuf[1] = byte(len(k))              //nolint:gosec // lower order 8 bits of key's length; length is validated above
 	kvLenBuf[2] = byte(uint16(len(v)) >> 8) //nolint:gosec // higher order 8 bits of value's length
-	kvLenBuf[3] = byte(len(v))              // lower order 8 bits of value's length
+	kvLenBuf[3] = byte(len(v))              //nolint:gosec // lower order 8 bits of value's length; length is validated above
 
-	kvLen := uint64(len(kvLenBuf) + len(k) + len(v)) //nolint:gosec
+	kvLen := uint64(len(kvLenBuf) + len(k) + len(v))
 	if kvLen >= ChunkSize {
 		// Do not store too big keys and values, since they do not
 		// fit a chunk.
@@ -1233,7 +1226,7 @@ func (b *bucketPreallocated) Set(k, v []byte, h uint64, skipLocking ...bool) err
 			}
 
 			// writing needs to start from the end of the kept chunks.
-			idx = ChunkSize * uint64(numOfChunksToKeep) //nolint:gosec
+			idx = ChunkSize * uint64(numOfChunksToKeep) //nolint:gosec // numOfChunksToKeep is always non-negative
 			idxNew = idx + kvLen
 			// calculate where the next write should occur based on new index
 			chunkIdx = idx / ChunkSize
@@ -1402,7 +1395,7 @@ func (b *bucketUnallocated) Init(maxBytes uint64, _ int) error {
 	if maxChunks > math.MaxInt {
 		return fmt.Errorf("failed converting maxChunks: overflow")
 	}
-	maxChunksInt := int(maxChunks) //nolint:gosec
+	maxChunksInt := int(maxChunks)
 
 	b.chunks = make([][]byte, maxChunksInt)
 	b.m = make(map[uint64]uint64)
@@ -1493,7 +1486,7 @@ func (b *bucketUnallocated) listChunks() {
 	fmt.Println("chunks: ", b.chunks)
 }
 
-func (b *bucketUnallocated) SetMulti(keys [][]byte, values [][]byte) {
+func (b *bucketUnallocated) SetMulti(keys, values [][]byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -1516,11 +1509,11 @@ func (b *bucketUnallocated) Set(k, v []byte, h uint64, skipLocking ...bool) erro
 	var kvLenBuf [4]byte
 
 	kvLenBuf[0] = byte(uint16(len(k)) >> 8) //nolint:gosec // higher order 8 bits of key's length
-	kvLenBuf[1] = byte(len(k))              // lower order 8 bits of key's length
+	kvLenBuf[1] = byte(len(k))              //nolint:gosec // lower order 8 bits of key's length; length is validated above
 	kvLenBuf[2] = byte(uint16(len(v)) >> 8) //nolint:gosec // higher order 8 bits of value's length
-	kvLenBuf[3] = byte(len(v))              // lower order 8 bits of value's length
+	kvLenBuf[3] = byte(len(v))              //nolint:gosec // lower order 8 bits of value's length; length is validated above
 
-	kvLen := uint64(len(kvLenBuf) + len(k) + len(v)) //nolint:gosec
+	kvLen := uint64(len(kvLenBuf) + len(k) + len(v))
 	if kvLen >= ChunkSize {
 		// Do not store too big keys and values, since they do not
 		// fit a chunk.
@@ -1577,7 +1570,6 @@ func (b *bucketUnallocated) Set(k, v []byte, h uint64, skipLocking ...bool) erro
 	if chunk == nil {
 		var err error
 		chunk, err = b.getChunk()
-
 		if err != nil {
 			return fmt.Errorf("cannot allocate chunk: %w", err)
 		}
@@ -1735,7 +1727,7 @@ func (b *bucketUnallocated) getChunk() ([]byte, error) {
 		}
 
 		for len(data) > 0 {
-			p := (*[ChunkSize]byte)(unsafe.Pointer(&data[0]))
+			p := (*[ChunkSize]byte)(unsafe.Pointer(&data[0])) //nolint:gosec // intentional unsafe cast for zero-copy chunk management
 			b.freeChunks = append(b.freeChunks, p)
 			data = data[ChunkSize:]
 		}
@@ -1755,7 +1747,7 @@ func (b *bucketUnallocated) putChunk(chunk []byte) {
 	}
 
 	chunk = chunk[:ChunkSize]
-	p := (*[ChunkSize]byte)(unsafe.Pointer(&chunk[0]))
+	p := (*[ChunkSize]byte)(unsafe.Pointer(&chunk[0])) //nolint:gosec // intentional unsafe cast for zero-copy chunk management
 	b.freeChunks = append(b.freeChunks, p)
 }
 

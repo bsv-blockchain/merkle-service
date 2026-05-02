@@ -20,12 +20,13 @@ func (m *mockSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int6
 	m.messages = append(m.messages, msg)
 	return 0, int64(len(m.messages)), nil
 }
+
 func (m *mockSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
 	m.messages = append(m.messages, msgs...)
 	return nil
 }
-func (m *mockSyncProducer) Close() error                { return nil }
-func (m *mockSyncProducer) IsTransactional() bool       { return false }
+func (m *mockSyncProducer) Close() error          { return nil }
+func (m *mockSyncProducer) IsTransactional() bool { return false }
 func (m *mockSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
 	return sarama.ProducerTxnFlagReady
 }
@@ -35,6 +36,7 @@ func (m *mockSyncProducer) AbortTxn() error  { return nil }
 func (m *mockSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
 	return nil
 }
+
 func (m *mockSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
 	return nil
 }

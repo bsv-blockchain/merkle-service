@@ -25,9 +25,9 @@ type callbackPayload struct {
 
 // CallbackServer is an HTTP server that collects callback payloads for one Arcade instance.
 type CallbackServer struct {
-	port       int
-	server     *http.Server
-	listener   net.Listener
+	port     int
+	server   *http.Server
+	listener net.Listener
 
 	mu             sync.Mutex
 	minedPayloads  []callbackPayload
@@ -121,14 +121,14 @@ func (cs *CallbackServer) Stats() ServerStats {
 	defer cs.mu.Unlock()
 	totalTxids := len(cs.minedPayloads) // one txid per STUMP callback
 	return ServerStats{
-		Port:            cs.port,
-		MinedCallbacks:  len(cs.minedPayloads),
-		BlockProcessed:  len(cs.blockProcessed),
-		TotalTxids:      totalTxids,
-		TotalBytes:      cs.rawBytes,
-		FirstCallback:   cs.firstCallback,
-		LastCallback:    cs.lastCallback,
-		TotalCallbacks:  cs.totalCallbacks.Load(),
+		Port:           cs.port,
+		MinedCallbacks: len(cs.minedPayloads),
+		BlockProcessed: len(cs.blockProcessed),
+		TotalTxids:     totalTxids,
+		TotalBytes:     cs.rawBytes,
+		FirstCallback:  cs.firstCallback,
+		LastCallback:   cs.lastCallback,
+		TotalCallbacks: cs.totalCallbacks.Load(),
 	}
 }
 

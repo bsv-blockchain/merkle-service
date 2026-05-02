@@ -46,12 +46,12 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 		db.SetMaxIdleConns(n)
 	}
 
-	if err := db.PingContext(ctx); err != nil {
+	if err = db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping %s: %w", driverName, err)
 	}
 
-	if err := runMigrations(ctx, db, d, logger); err != nil {
+	if err = runMigrations(ctx, db, d, logger); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("run migrations: %w", err)
 	}
@@ -71,8 +71,8 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 
 	r := &storepkg.Registry{
 		Registration:        newRegistrationStore(db, d, cfg.Registry.MaxCallbacksPerTxID),
-		Subtree:             storepkg.NewSubtreeStore(blob, uint64(cfg.Subtree.DAHOffset), logger),
-		Stump:               storepkg.NewStumpStore(blob, uint64(cfg.Subtree.StumpDAHOffset), logger),
+		Subtree:             storepkg.NewSubtreeStore(blob, uint64(cfg.Subtree.DAHOffset), logger),    //nolint:gosec // config-validated int
+		Stump:               storepkg.NewStumpStore(blob, uint64(cfg.Subtree.StumpDAHOffset), logger), //nolint:gosec // config-validated int
 		CallbackDedup:       newCallbackDedup(db, d),
 		CallbackURLRegistry: newCallbackURLRegistry(db, d, urlRetention),
 		CallbackAccumulator: newCallbackAccumulator(db, d, cfg.Aerospike.CallbackAccumulatorTTLSec),
@@ -91,9 +91,6 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 func resolveDriver(name string) (*dialect, string, error) {
 	switch name {
 	case "postgres", "pgx", "":
-		if name == "" {
-			name = "postgres"
-		}
 		return postgresDialect(), "pgx", nil
 	case "sqlite", "sqlite3":
 		return sqliteDialect(), "sqlite", nil

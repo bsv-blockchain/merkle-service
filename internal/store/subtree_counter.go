@@ -25,7 +25,7 @@ type aerospikeSubtreeCounter struct {
 
 var _ SubtreeCounterStore = (*aerospikeSubtreeCounter)(nil)
 
-func NewSubtreeCounterStore(client *AerospikeClient, setName string, ttlSec int, maxRetries int, retryBaseMs int, logger *slog.Logger) SubtreeCounterStore {
+func NewSubtreeCounterStore(client *AerospikeClient, setName string, ttlSec, maxRetries, retryBaseMs int, logger *slog.Logger) SubtreeCounterStore {
 	return &aerospikeSubtreeCounter{
 		client:      client,
 		setName:     setName,
@@ -45,7 +45,7 @@ func (s *aerospikeSubtreeCounter) Init(blockHash string, count int) error {
 
 	wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
 	wp.RecordExistsAction = as.UPDATE
-	wp.Expiration = uint32(s.ttlSec)
+	wp.Expiration = uint32(s.ttlSec) //nolint:gosec // ttlSec is config-validated and fits uint32
 
 	err = s.client.Client().Put(wp, key, as.BinMap{subtreeCounterBin: count})
 	if err != nil {

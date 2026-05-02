@@ -88,7 +88,7 @@ func TestStumpStore_DeleteAtHeight(t *testing.T) {
 	}
 
 	// Before reaching DAH, the blob is readable.
-	if _, err := ss.Get(ref); err != nil {
+	if _, err = ss.Get(ref); err != nil {
 		t.Fatalf("unexpected error before DAH: %v", err)
 	}
 

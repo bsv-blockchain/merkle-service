@@ -24,7 +24,7 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to build store registry: ", err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }()
 
 	server := api.NewServer(cfg.API, registry.Registration, registry.CallbackURLRegistry, registry.Health, logger)
 	server.SetAllowPrivateCallbackIPs(cfg.Callback.AllowPrivateIPs)

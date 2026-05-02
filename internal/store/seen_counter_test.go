@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func newSeenCounterTestStore(t *testing.T, threshold int) (SeenCounterStore, *AerospikeClient, string) {
+func newSeenCounterTestStore(t *testing.T, threshold int) SeenCounterStore {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
@@ -20,11 +20,11 @@ func newSeenCounterTestStore(t *testing.T, threshold int) (SeenCounterStore, *Ae
 	t.Cleanup(func() { client.Close() })
 
 	setName := fmt.Sprintf("test_seen_%d", os.Getpid())
-	return NewSeenCounterStore(client, setName, threshold, 2, 50, logger), client, setName
+	return NewSeenCounterStore(client, setName, threshold, 2, 50, logger)
 }
 
 func TestSeenCounter_BasicIncrement(t *testing.T) {
-	store, _, _ := newSeenCounterTestStore(t, 3)
+	store := newSeenCounterTestStore(t, 3)
 
 	txid := fmt.Sprintf("tx-basic-%d", os.Getpid())
 	for i := 1; i <= 5; i++ {
@@ -39,7 +39,7 @@ func TestSeenCounter_BasicIncrement(t *testing.T) {
 }
 
 func TestSeenCounter_DuplicateSubtreeIsIdempotent(t *testing.T) {
-	store, _, _ := newSeenCounterTestStore(t, 3)
+	store := newSeenCounterTestStore(t, 3)
 
 	txid := fmt.Sprintf("tx-dup-%d", os.Getpid())
 	for i := 0; i < 4; i++ {
@@ -57,7 +57,7 @@ func TestSeenCounter_DuplicateSubtreeIsIdempotent(t *testing.T) {
 }
 
 func TestSeenCounter_ThresholdFiresExactlyOnce(t *testing.T) {
-	store, _, _ := newSeenCounterTestStore(t, 3)
+	store := newSeenCounterTestStore(t, 3)
 
 	txid := fmt.Sprintf("tx-thresh-%d", os.Getpid())
 	fired := 0
@@ -88,7 +88,7 @@ func TestSeenCounter_ConcurrentThresholdFiresOnce(t *testing.T) {
 		threshold = 5
 		workers   = 32
 	)
-	store, _, _ := newSeenCounterTestStore(t, threshold)
+	store := newSeenCounterTestStore(t, threshold)
 
 	txid := fmt.Sprintf("tx-race-%d", os.Getpid())
 
@@ -128,7 +128,7 @@ func TestSeenCounter_ConcurrentDistinctTxidsAllFire(t *testing.T) {
 		txids     = 8
 		perTxid   = 5
 	)
-	store, _, _ := newSeenCounterTestStore(t, threshold)
+	store := newSeenCounterTestStore(t, threshold)
 
 	pid := os.Getpid()
 	firedPerTxid := make([]int64, txids)

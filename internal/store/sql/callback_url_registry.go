@@ -41,7 +41,7 @@ func (r *callbackURLRegistry) Add(callbackURL string) error {
 	// would expire even though it is being actively re-registered. We use a
 	// dialect-portable UPSERT shape (ON CONFLICT ... DO UPDATE) which both
 	// PostgreSQL and SQLite (>= 3.24) support.
-	q := fmt.Sprintf(
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO callback_urls (callback_url, last_seen_at) VALUES (%s, %s) "+
 			"ON CONFLICT (callback_url) DO UPDATE SET last_seen_at = %s",
 		r.d.placeholder(1), r.d.now, r.d.now)
@@ -57,7 +57,7 @@ func (r *callbackURLRegistry) GetAll() ([]string, error) {
 	// are treated as fresh until the next Add() (which stamps last_seen_at)
 	// or the next sweeper tick (which uses the same NULL-tolerant predicate).
 	cutoff := -int(r.retention / time.Second)
-	q := fmt.Sprintf(
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"SELECT callback_url FROM callback_urls "+
 			"WHERE last_seen_at IS NULL OR last_seen_at >= %s "+
 			"ORDER BY callback_url",

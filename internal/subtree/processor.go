@@ -23,7 +23,7 @@ type RegistrationGetter interface {
 
 // SeenCounter abstracts seen-count tracking for testability.
 type SeenCounter interface {
-	Increment(txid string, subtreeID string) (*store.IncrementResult, error)
+	Increment(txid, subtreeID string) (*store.IncrementResult, error)
 }
 
 // RegCache abstracts the registration deduplication cache for testability.
@@ -32,7 +32,7 @@ type SeenCounter interface {
 // lookups are intentionally not cached so that a /watch arriving after
 // an early negative lookup is not hidden until cache eviction (F-020).
 type RegCache interface {
-	FilterUncached(txids []string) (uncached []string, cachedRegistered []string)
+	FilterUncached(txids []string) (uncached, cachedRegistered []string)
 	SetMultiRegistered(txids []string) error
 }
 
@@ -289,7 +289,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 
 	// 3.3: Store raw binary data in the subtree blob store.
 	if p.cfg.Subtree.StorageMode == "realtime" {
-		if err := p.subtreeStore.StoreSubtree(subtreeMsg.Hash, rawData, 0); err != nil {
+		if err = p.subtreeStore.StoreSubtree(subtreeMsg.Hash, rawData, 0); err != nil {
 			return p.handleTransientFailure(subtreeMsg, "storing subtree", err)
 		}
 	}

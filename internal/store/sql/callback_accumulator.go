@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -36,16 +37,18 @@ func (s *callbackAccumulator) Append(blockHash, callbackURL string, txids []stri
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
-	qParent := fmt.Sprintf(`INSERT INTO callback_accumulator (block_hash, expires_at) VALUES (%s, %s)
+	qParent := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		`INSERT INTO callback_accumulator (block_hash, expires_at) VALUES (%s, %s)
         ON CONFLICT (block_hash) DO UPDATE SET expires_at = EXCLUDED.expires_at`,
 		s.d.placeholder(1), s.d.intervalSeconds(s.ttlSec))
 	if _, err := tx.ExecContext(ctx, qParent, blockHash); err != nil {
 		return fmt.Errorf("upsert accumulator: %w", err)
 	}
 
-	qEntry := fmt.Sprintf(`INSERT INTO callback_accumulator_entries (block_hash, callback_url, subtree_index, txids_json, stump_data)
+	qEntry := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		`INSERT INTO callback_accumulator_entries (block_hash, callback_url, subtree_index, txids_json, stump_data)
         VALUES (%s, %s, %s, %s, %s)`,
 		s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3), s.d.placeholder(4), s.d.placeholder(5))
 	if _, err := tx.ExecContext(ctx, qEntry, blockHash, callbackURL, subtreeIndex, string(txidsJSON), stumpData); err != nil {
@@ -82,7 +85,7 @@ func (s *callbackAccumulator) ReadAndDelete(blockHash string) (map[string]*store
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// On Postgres, take a row-level lock on the parent first so any
 	// concurrent Append for this block has to wait for us to commit before
@@ -91,11 +94,11 @@ func (s *callbackAccumulator) ReadAndDelete(blockHash string) (map[string]*store
 	// is nothing accumulated and no entries can exist either (Append always
 	// upserts the parent before inserting an entry within the same txn).
 	if isPostgres(s.d) {
-		qLock := fmt.Sprintf("SELECT 1 FROM callback_accumulator WHERE block_hash = %s FOR UPDATE", s.d.placeholder(1))
+		qLock := fmt.Sprintf("SELECT 1 FROM callback_accumulator WHERE block_hash = %s FOR UPDATE", s.d.placeholder(1)) //nolint:gosec // placeholder is from internal function
 		var dummy int
-		err := tx.QueryRowContext(ctx, qLock, blockHash).Scan(&dummy)
+		err = tx.QueryRowContext(ctx, qLock, blockHash).Scan(&dummy)
 		switch {
-		case err == sql.ErrNoRows:
+		case errors.Is(err, sql.ErrNoRows):
 			// No accumulator for this block: nothing to read or delete.
 			// Commit the (empty) txn so the deferred Rollback is a no-op.
 			if cerr := tx.Commit(); cerr != nil {
@@ -109,24 +112,24 @@ func (s *callbackAccumulator) ReadAndDelete(blockHash string) (map[string]*store
 
 	// Single-statement read+delete: DELETE ... RETURNING is supported by
 	// PostgreSQL and SQLite >= 3.35 (modernc.org/sqlite is well past that).
-	qDelEntries := fmt.Sprintf(`DELETE FROM callback_accumulator_entries WHERE block_hash = %s
+	qDelEntries := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		`DELETE FROM callback_accumulator_entries WHERE block_hash = %s
         RETURNING callback_url, subtree_index, txids_json, stump_data`, s.d.placeholder(1))
 	rows, err := tx.QueryContext(ctx, qDelEntries, blockHash)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	result := map[string]*storepkg.AccumulatedCallback{}
 	for rows.Next() {
 		var url, txidsJSON string
 		var subtreeIndex int
 		var stumpData []byte
 		if err := rows.Scan(&url, &subtreeIndex, &txidsJSON, &stumpData); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		var txids []string
 		if err := json.Unmarshal([]byte(txidsJSON), &txids); err != nil {
-			rows.Close()
 			return nil, fmt.Errorf("unmarshal txids: %w", err)
 		}
 		acc, ok := result[url]
@@ -141,12 +144,10 @@ func (s *callbackAccumulator) ReadAndDelete(blockHash string) (map[string]*store
 		})
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
 		return nil, err
 	}
-	rows.Close()
 
-	qDelParent := fmt.Sprintf("DELETE FROM callback_accumulator WHERE block_hash = %s", s.d.placeholder(1))
+	qDelParent := fmt.Sprintf("DELETE FROM callback_accumulator WHERE block_hash = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
 	if _, err := tx.ExecContext(ctx, qDelParent, blockHash); err != nil {
 		return nil, err
 	}

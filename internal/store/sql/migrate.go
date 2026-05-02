@@ -76,7 +76,7 @@ func runMigrations(ctx context.Context, db *sql.DB, d *dialect, logger *slog.Log
 	// Ensure schema_migrations exists. It is the first statement of 0001_init.
 	// We execute 0001 wholesale below so this is just a safety net for partial
 	// previous runs.
-	if _, err := db.ExecContext(ctx, d.rewrite(`CREATE TABLE IF NOT EXISTS schema_migrations (
+	if _, err = db.ExecContext(ctx, d.rewrite(`CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY, applied_at ${TIMESTAMPTZ} NOT NULL)`)); err != nil {
 		return fmt.Errorf("bootstrap schema_migrations: %w", err)
 	}
@@ -161,7 +161,8 @@ func applyMigration(ctx context.Context, db *sql.DB, d *dialect, m migration) er
 			return fmt.Errorf("exec stmt: %w\n---\n%s", err, stmt)
 		}
 	}
-	q := fmt.Sprintf("INSERT INTO schema_migrations (version, applied_at) VALUES (%s, %s)",
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"INSERT INTO schema_migrations (version, applied_at) VALUES (%s, %s)",
 		d.placeholder(1), d.now)
 	if _, err := tx.ExecContext(ctx, q, m.version); err != nil {
 		_ = tx.Rollback()
@@ -196,5 +197,7 @@ func isMissingTable(err error) bool {
 
 // Sentinel for callers that want to distinguish migration errors — currently
 // unused but kept so future work can wrap richer error types.
-var errMigrationFailed = errors.New("migration failed")
-var _ = errMigrationFailed
+var (
+	errMigrationFailed = errors.New("migration failed")
+	_                  = errMigrationFailed
+)

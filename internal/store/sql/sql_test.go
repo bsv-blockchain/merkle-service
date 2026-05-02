@@ -29,7 +29,7 @@ func newTestDB(t *testing.T) (*sql.DB, *dialect) {
 	}
 	// Single connection keeps BEGIN IMMEDIATE behavior predictable in tests.
 	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	d := sqliteDialect()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -109,7 +109,7 @@ func TestRegistrationStore_MaxCallbacksPerTxID(t *testing.T) {
 
 	// DB count is exactly `max` — the rejected insert did not slip through.
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM registration_urls WHERE txid = ?", "tx1").Scan(&count); err != nil {
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM registration_urls WHERE txid = ?", "tx1").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != max {
@@ -151,7 +151,7 @@ func TestRegistrationStore_MaxCallbacksIdempotent(t *testing.T) {
 
 	// Count should still be exactly `max`.
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM registration_urls WHERE txid = ?", "tx1").Scan(&count); err != nil {
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM registration_urls WHERE txid = ?", "tx1").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != max {
@@ -192,7 +192,7 @@ func TestCallbackDedup_RecordAndExists(t *testing.T) {
 		t.Fatal("Exists=true before Record")
 	}
 
-	if err := s.Record("tx", "url", "MINED", 1*time.Hour); err != nil {
+	if err = s.Record("tx", "url", "MINED", 1*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	ok, err = s.Exists("tx", "url", "MINED")
@@ -268,10 +268,10 @@ func TestCallbackURLRegistry_RetentionWindow(t *testing.T) {
 	// Insert a stale row by hand — simulates a URL whose last Add was far
 	// outside the retention window.
 	stale := "http://stale"
-	q := fmt.Sprintf(
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO callback_urls (callback_url, last_seen_at) VALUES (%s, %s)",
 		d.placeholder(1), d.intervalSeconds(-2*int(time.Hour/time.Second)))
-	if _, err := db.Exec(q, stale); err != nil {
+	if _, err := db.ExecContext(context.Background(), q, stale); err != nil {
 		t.Fatalf("seed stale row: %v", err)
 	}
 
@@ -290,7 +290,7 @@ func TestCallbackURLRegistry_RetentionWindow(t *testing.T) {
 
 	// Re-Add the stale URL: that should refresh last_seen_at and bring it
 	// back into the active window.
-	if err := r.Add(stale); err != nil {
+	if err = r.Add(stale); err != nil {
 		t.Fatalf("re-Add stale: %v", err)
 	}
 	all, err = r.GetAll()
@@ -314,10 +314,10 @@ func TestCallbackURLRegistry_SweeperEvicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := "http://ancient"
-	q := fmt.Sprintf(
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO callback_urls (callback_url, last_seen_at) VALUES (%s, %s)",
 		d.placeholder(1), d.intervalSeconds(-2*int(time.Hour/time.Second)))
-	if _, err := db.Exec(q, stale); err != nil {
+	if _, err := db.ExecContext(context.Background(), q, stale); err != nil {
 		t.Fatalf("seed stale row: %v", err)
 	}
 
@@ -327,7 +327,7 @@ func TestCallbackURLRegistry_SweeperEvicts(t *testing.T) {
 	sw.sweepOnce(context.Background())
 
 	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM callback_urls").Scan(&n); err != nil {
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM callback_urls").Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if n != 1 {
@@ -382,7 +382,7 @@ func TestSeenCounter_ConcurrentThresholdFiresOnce(t *testing.T) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	db.SetMaxOpenConns(8)
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	d := sqliteDialect()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -539,7 +539,7 @@ func TestSweeper_DeletesExpiredRows(t *testing.T) {
 	// the expires_at check). Count via SELECT so we don't rely on Exists'
 	// own expiry filter.
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM callback_dedup WHERE dedup_key = ?",
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM callback_dedup WHERE dedup_key = ?",
 		dedupKey("tx-expired", "u", "MINED")).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +603,7 @@ func TestMigrations_Idempotent(t *testing.T) {
 		t.Fatalf("second migration run failed: %v", err)
 	}
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count == 0 {

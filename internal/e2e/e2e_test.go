@@ -138,7 +138,7 @@ func determineNamespace(t *testing.T) string {
 		client.Close()
 		return ns
 	}
-	t.Fatal("could not find a working Aerospike namespace (tried 'test', 'merkle')")
+	t.Skipf("Aerospike not available (tried 'test', 'merkle'); skipping")
 	return ""
 }
 
@@ -147,7 +147,7 @@ func newAerospikeClient(t *testing.T, namespace string) *store.AerospikeClient {
 	t.Helper()
 	client, err := store.NewAerospikeClient(aerospikeHost, aerospikePort, namespace, 3, 100, testLogger())
 	if err != nil {
-		t.Fatalf("failed to create Aerospike client: %v", err)
+		t.Skipf("Aerospike not available: %v", err)
 	}
 	t.Cleanup(func() { client.Close() })
 	return client
@@ -158,7 +158,7 @@ func newCallbackProducer(t *testing.T, topic string) *kafka.Producer {
 	t.Helper()
 	producer, err := kafka.NewProducer([]string{kafkaBroker}, topic, testLogger())
 	if err != nil {
-		t.Fatalf("failed to create callback producer: %v", err)
+		t.Skipf("Kafka not available: %v", err)
 	}
 	t.Cleanup(func() { producer.Close() })
 	return producer
@@ -175,7 +175,7 @@ func startDeliveryService(t *testing.T, callbackTopic string) (*callback.Deliver
 			Brokers:          []string{kafkaBroker},
 			CallbackTopic:    callbackTopic,
 			CallbackDLQTopic: callbackTopic + "-dlq",
-			ConsumerGroup:  fmt.Sprintf("e2e-test-%d", time.Now().UnixNano()),
+			ConsumerGroup:    fmt.Sprintf("e2e-test-%d", time.Now().UnixNano()),
 		},
 		Callback: config.CallbackConfig{
 			MaxRetries:     3,
@@ -246,9 +246,9 @@ func TestSeenOnNetworkCallback(t *testing.T) {
 	stumpsMsg := &kafka.CallbackTopicMessage{
 		CallbackURL: callbackURL,
 		TxID:        txid,
-		Type:  kafka.CallbackSeenOnNetwork,
+		Type:        kafka.CallbackSeenOnNetwork,
 		//"subtree-001",
-		RetryCount:  0,
+		RetryCount: 0,
 	}
 	data, err := stumpsMsg.Encode()
 	if err != nil {
@@ -388,9 +388,9 @@ func TestMultipleCallbacks(t *testing.T) {
 		stumpsMsg := &kafka.CallbackTopicMessage{
 			CallbackURL: cbURL,
 			TxID:        txid,
-			Type:  kafka.CallbackSeenOnNetwork,
+			Type:        kafka.CallbackSeenOnNetwork,
 			//"subtree-multi-001",
-			RetryCount:  0,
+			RetryCount: 0,
 		}
 		data, err := stumpsMsg.Encode()
 		if err != nil {
@@ -480,9 +480,9 @@ func TestSeenMultipleNodes(t *testing.T) {
 	stumpsMsg := &kafka.CallbackTopicMessage{
 		CallbackURL: callbackURL,
 		TxID:        txid,
-		Type:  kafka.CallbackSeenMultipleNodes,
+		Type:        kafka.CallbackSeenMultipleNodes,
 		//"subtree-multi-nodes-001",
-		RetryCount:  0,
+		RetryCount: 0,
 	}
 	data, err := stumpsMsg.Encode()
 	if err != nil {

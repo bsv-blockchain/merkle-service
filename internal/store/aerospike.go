@@ -45,7 +45,7 @@ const (
 // Prefer NewAerospikeClientFromConfig for production: it picks up the connection
 // pool sizing and per-operation timeouts that prevent the
 // "connection pool is empty" failure mode under bursty load.
-func NewAerospikeClient(host string, port int, namespace string, maxRetries int, retryBaseMs int, logger *slog.Logger) (*AerospikeClient, error) {
+func NewAerospikeClient(host string, port int, namespace string, maxRetries, retryBaseMs int, logger *slog.Logger) (*AerospikeClient, error) {
 	policy := as.NewClientPolicy()
 	policy.IdleTimeout = defaultIdleTimeoutSec * time.Second
 
@@ -174,7 +174,7 @@ func (c *AerospikeClient) ReadPolicy() *as.BasePolicy {
 }
 
 // WritePolicy returns a write policy with retry + timeout settings.
-func (c *AerospikeClient) WritePolicy(maxRetries int, retryBaseMs int) *as.WritePolicy {
+func (c *AerospikeClient) WritePolicy(maxRetries, retryBaseMs int) *as.WritePolicy {
 	wp := as.NewWritePolicy(0, 0)
 	wp.MaxRetries = maxRetries
 	wp.SleepBetweenRetries = time.Duration(retryBaseMs) * time.Millisecond
@@ -190,7 +190,7 @@ func (c *AerospikeClient) WritePolicy(maxRetries int, retryBaseMs int) *as.Write
 // for the full timeout × retry count. The application handles retries via
 // Kafka (subtree-work / subtree topic) which is rate-limited, idempotent,
 // and doesn't pile up on the unhealthy node.
-func (c *AerospikeClient) BatchPolicy(maxRetries int, retryBaseMs int) *as.BatchPolicy {
+func (c *AerospikeClient) BatchPolicy(maxRetries, retryBaseMs int) *as.BatchPolicy {
 	bp := as.NewBatchPolicy()
 	bp.MaxRetries = 0
 	bp.SleepBetweenRetries = time.Duration(retryBaseMs) * time.Millisecond

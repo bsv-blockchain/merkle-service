@@ -26,7 +26,7 @@ type aerospikeCallbackAccumulator struct {
 
 var _ CallbackAccumulatorStore = (*aerospikeCallbackAccumulator)(nil)
 
-func NewCallbackAccumulatorStore(client *AerospikeClient, setName string, ttlSec int, maxRetries int, retryBaseMs int, logger *slog.Logger) CallbackAccumulatorStore {
+func NewCallbackAccumulatorStore(client *AerospikeClient, setName string, ttlSec, maxRetries, retryBaseMs int, logger *slog.Logger) CallbackAccumulatorStore {
 	return &aerospikeCallbackAccumulator{
 		client:      client,
 		setName:     setName,
@@ -56,7 +56,7 @@ func (s *aerospikeCallbackAccumulator) Append(blockHash, callbackURL string, txi
 
 	wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
 	wp.RecordExistsAction = as.UPDATE
-	wp.Expiration = uint32(s.ttlSec)
+	wp.Expiration = uint32(s.ttlSec) //nolint:gosec // ttlSec is config-validated and fits uint32
 
 	_, err = s.client.Client().Operate(wp, key,
 		as.ListAppendOp(accumEntriesBin, entry),

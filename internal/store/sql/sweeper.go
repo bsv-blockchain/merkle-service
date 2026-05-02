@@ -50,7 +50,7 @@ var ttlTables = []ttlTable{
 }
 
 // sweeper runs a periodic DELETE pass over TTL-bearing tables. One goroutine
-// for the whole registry; stops when its context is cancelled.
+// for the whole registry; stops when its context is canceled.
 type sweeper struct {
 	db       *sql.DB
 	d        *dialect
@@ -130,7 +130,7 @@ func (s *sweeper) sweepOnce(ctx context.Context) {
 // brings them under the eviction window.
 func (s *sweeper) sweepCallbackURLs(ctx context.Context) (int64, error) {
 	cutoff := -int(s.urlRetention / time.Second)
-	q := fmt.Sprintf(
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"DELETE FROM callback_urls WHERE last_seen_at IS NOT NULL AND last_seen_at < %s",
 		s.d.intervalSeconds(cutoff))
 	res, err := s.db.ExecContext(ctx, q)
@@ -182,7 +182,7 @@ func (s *sweeper) sweepTableBatch(ctx context.Context, t ttlTable, batch int) (i
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// 1. Snapshot up to `batch` expired parent keys. Holding the txn means
 	//    concurrent writers may block (sqlite) or wait for row locks
@@ -202,20 +202,18 @@ func (s *sweeper) sweepTableBatch(ctx context.Context, t ttlTable, batch int) (i
 	if err != nil {
 		return 0, fmt.Errorf("select expired %s keys: %w", t.parent, err)
 	}
+	defer func() { _ = rows.Close() }()
 	var keys []interface{}
 	for rows.Next() {
 		var k string
-		if err := rows.Scan(&k); err != nil {
-			rows.Close()
+		if err = rows.Scan(&k); err != nil {
 			return 0, err
 		}
 		keys = append(keys, k)
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
+	if err = rows.Err(); err != nil {
 		return 0, err
 	}
-	rows.Close()
 	if len(keys) == 0 {
 		return 0, nil
 	}
@@ -228,14 +226,14 @@ func (s *sweeper) sweepTableBatch(ctx context.Context, t ttlTable, batch int) (i
 
 	// 2. Delete child rows for those parents.
 	for _, c := range t.children {
-		q := fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", c.table, c.fk, inList)
-		if _, err := tx.ExecContext(ctx, q, keys...); err != nil {
+		q := fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", c.table, c.fk, inList) //nolint:gosec // internal table/column names, no user input
+		if _, err = tx.ExecContext(ctx, q, keys...); err != nil {
 			return 0, fmt.Errorf("delete children %s: %w", c.table, err)
 		}
 	}
 
 	// 3. Delete the parents themselves.
-	q := fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", t.parent, t.parentKey, inList)
+	q := fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", t.parent, t.parentKey, inList) //nolint:gosec // internal table/column names, no user input
 	res, err := tx.ExecContext(ctx, q, keys...)
 	if err != nil {
 		return 0, err

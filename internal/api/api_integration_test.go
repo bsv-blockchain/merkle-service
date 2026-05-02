@@ -19,19 +19,19 @@ import (
 
 // setupTestServer creates an API server backed by real Aerospike and returns
 // an httptest.Server wrapping its chi router. The caller should defer ts.Close().
-func setupTestServer(t *testing.T) (*httptest.Server, *store.RegistrationStore, *store.AerospikeClient) {
+func setupTestServer(t *testing.T) (*httptest.Server, store.RegistrationStore, *store.AerospikeClient) {
 	t.Helper()
 
 	asClient, err := store.NewAerospikeClient("localhost", 3000, "test", 3, 100, slog.Default())
 	if err != nil {
-		t.Fatalf("failed to create Aerospike client: %v", err)
+		t.Skipf("Aerospike not available: %v", err)
 	}
 	t.Cleanup(func() { asClient.Close() })
 
 	setName := fmt.Sprintf("api_integ_%d", time.Now().UnixNano())
 	regStore := store.NewRegistrationStore(asClient, setName, 3, 100, 0, slog.Default())
 
-	srv := api.NewServer(config.APIConfig{Port: 0}, regStore, asClient, slog.Default())
+	srv := api.NewServer(config.APIConfig{Port: 0}, regStore, nil, nil, slog.Default())
 
 	// Call Init to build the chi router and routes.
 	if err := srv.Init(nil); err != nil {

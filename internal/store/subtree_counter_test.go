@@ -12,7 +12,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
-func newSubtreeCounterStore(t *testing.T) *store.SubtreeCounterStore {
+func newSubtreeCounterStore(t *testing.T) store.SubtreeCounterStore {
 	t.Helper()
 	client := newAerospikeClient(t)
 	return store.NewSubtreeCounterStore(client, "subtree_counter_test", 60, 3, 100, slog.Default())

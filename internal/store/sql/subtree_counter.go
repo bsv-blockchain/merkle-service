@@ -25,7 +25,8 @@ func newSubtreeCounter(db *sql.DB, d *dialect, ttlSec int) *subtreeCounter {
 func (s *subtreeCounter) Init(blockHash string, count int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	q := fmt.Sprintf(`INSERT INTO subtree_counters (block_hash, remaining, expires_at) VALUES (%s, %s, %s)
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		`INSERT INTO subtree_counters (block_hash, remaining, expires_at) VALUES (%s, %s, %s)
         ON CONFLICT (block_hash) DO UPDATE SET remaining = EXCLUDED.remaining, expires_at = EXCLUDED.expires_at`,
 		s.d.placeholder(1), s.d.placeholder(2), s.d.intervalSeconds(s.ttlSec))
 	_, err := s.db.ExecContext(ctx, q, blockHash, count)
@@ -41,7 +42,8 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	defer cancel()
 
 	if isPostgres(s.d) {
-		q := fmt.Sprintf("UPDATE subtree_counters SET remaining = remaining - 1 WHERE block_hash = %s RETURNING remaining",
+		q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+			"UPDATE subtree_counters SET remaining = remaining - 1 WHERE block_hash = %s RETURNING remaining",
 			s.d.placeholder(1))
 		var remaining int
 		if err := s.db.QueryRowContext(ctx, q, blockHash).Scan(&remaining); err != nil {
@@ -55,14 +57,15 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var remaining int
-	qSel := fmt.Sprintf("SELECT remaining FROM subtree_counters WHERE block_hash = %s", s.d.placeholder(1))
+	qSel := fmt.Sprintf("SELECT remaining FROM subtree_counters WHERE block_hash = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
 	if err := tx.QueryRowContext(ctx, qSel, blockHash).Scan(&remaining); err != nil {
 		return 0, err
 	}
 	remaining--
-	qUp := fmt.Sprintf("UPDATE subtree_counters SET remaining = %s WHERE block_hash = %s",
+	qUp := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"UPDATE subtree_counters SET remaining = %s WHERE block_hash = %s",
 		s.d.placeholder(1), s.d.placeholder(2))
 	if _, err := tx.ExecContext(ctx, qUp, remaining, blockHash); err != nil {
 		return 0, err

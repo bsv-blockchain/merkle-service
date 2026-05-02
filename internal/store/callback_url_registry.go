@@ -48,7 +48,7 @@ var _ CallbackURLRegistry = (*aerospikeCallbackURLRegistry)(nil)
 // NewCallbackURLRegistry creates a new Aerospike-backed callback URL registry.
 // ttlSec sets the per-URL eviction window — pass 0 (or negative) to use the
 // default of 7 days.
-func NewCallbackURLRegistry(client *AerospikeClient, setName string, ttlSec int, maxRetries int, retryBaseMs int, logger *slog.Logger) CallbackURLRegistry {
+func NewCallbackURLRegistry(client *AerospikeClient, setName string, ttlSec, maxRetries, retryBaseMs int, logger *slog.Logger) CallbackURLRegistry {
 	if ttlSec <= 0 {
 		ttlSec = defaultCallbackURLRegistryTTLSec
 	}
@@ -82,7 +82,7 @@ func (r *aerospikeCallbackURLRegistry) Add(callbackURL string) error {
 	wp := r.client.WritePolicy(r.maxRetries, r.retryBaseMs)
 	wp.RecordExistsAction = as.UPDATE
 	if r.ttlSec > 0 {
-		wp.Expiration = uint32(r.ttlSec)
+		wp.Expiration = uint32(r.ttlSec) //nolint:gosec // ttlSec is config-validated and fits uint32
 	}
 
 	bins := as.BinMap{callbackURLBin: callbackURL}
@@ -90,7 +90,7 @@ func (r *aerospikeCallbackURLRegistry) Add(callbackURL string) error {
 		// If TTL is rejected (namespace lacks nsup-period), retry without TTL.
 		// We log loudly because losing TTL re-introduces F-037's unbounded
 		// growth — the operator should fix the namespace config.
-		if asErr, ok := err.(as.Error); ok && asErr.Matches(astypes.FAIL_FORBIDDEN) && r.ttlSec > 0 {
+		if err.Matches(astypes.FAIL_FORBIDDEN) && r.ttlSec > 0 {
 			if r.logger != nil {
 				r.logger.Warn("callback URL registry TTL rejected, writing without TTL "+
 					"(configure Aerospike nsup-period to enable bounded growth)",

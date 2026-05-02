@@ -29,12 +29,12 @@ type Handlers struct {
 
 // pageData is the common data passed to templates.
 type pageData struct {
-	Title        string
-	TxidCount    int
+	Title         string
+	TxidCount     int
 	CallbackCount int
-	CallbackURL  string
-	Flash        string
-	FlashError   string
+	CallbackURL   string
+	Flash         string
+	FlashError    string
 }
 
 func (h *Handlers) newPageData(title string) pageData {
@@ -49,6 +49,7 @@ func (h *Handlers) newPageData(title string) pageData {
 // homeData is the data struct for all handlers that render home.html.
 type homeData struct {
 	pageData
+
 	RecentCallbacks []CallbackEntry
 	LookupTxid      string
 	LookupURLs      []string
@@ -77,6 +78,7 @@ func (h *Handlers) getRecentCallbacks(n int) []CallbackEntry {
 
 // handleRegister handles txid registration via the merkle-service API.
 func (h *Handlers) handleRegister(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB — debug tool, not a public endpoint
 	txid := r.FormValue("txid")
 	callbackURL := r.FormValue("callbackUrl")
 
@@ -99,16 +101,22 @@ func (h *Handlers) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"txid":        txid,
 		"callbackUrl": callbackURL,
 	}
-	body, _ := json.Marshal(payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		data := h.newHomeData()
+		data.FlashError = fmt.Sprintf("Failed to encode request: %v", err)
+		h.render(w, "home.html", data)
+		return
+	}
 
-	resp, err := http.Post(h.merkleAPIURL+"/watch", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(h.merkleAPIURL+"/watch", "application/json", bytes.NewReader(body)) //nolint:noctx // debug tool, context not plumbed through form handler
 	if err != nil {
 		data := h.newHomeData()
 		data.FlashError = fmt.Sprintf("Failed to reach merkle-service: %v", err)
 		h.render(w, "home.html", data)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -128,6 +136,7 @@ func (h *Handlers) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 // handleLookup looks up a txid in Aerospike.
 func (h *Handlers) handleLookup(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB — debug tool, not a public endpoint
 	txid := r.FormValue("txid")
 
 	if txid == "" {
@@ -168,6 +177,7 @@ func (h *Handlers) handleRegistrations(w http.ResponseWriter, r *http.Request) {
 
 	data := struct {
 		pageData
+
 		Txids []TrackedTxid
 	}{
 		pageData: h.newPageData("Registrations"),
@@ -180,6 +190,7 @@ func (h *Handlers) handleRegistrations(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleCallbacks(w http.ResponseWriter, r *http.Request) {
 	data := struct {
 		pageData
+
 		Callbacks []CallbackEntry
 	}{
 		pageData:  h.newPageData("Callbacks"),
@@ -215,7 +226,7 @@ func (h *Handlers) handleCallbackReceive(w http.ResponseWriter, r *http.Request)
 	)
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
 // handleStump renders the STUMP visualizer page.

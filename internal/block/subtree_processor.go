@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	subtreepkg "github.com/bsv-blockchain/go-subtree"
 
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -22,7 +22,7 @@ import (
 // /watch registration arriving after an earlier "not registered"
 // observation is not masked until cache eviction (F-020).
 type RegCache interface {
-	FilterUncached(txids []string) (uncached []string, cachedRegistered []string)
+	FilterUncached(txids []string) (uncached, cachedRegistered []string)
 	SetMultiRegistered(txids []string) error
 }
 
@@ -235,7 +235,7 @@ func lookupRegistrations(
 }
 
 // batchGetWithSem runs RegistrationStore.BatchGet under the optional semaphore.
-// Returns ctx.Err() if the context is cancelled while waiting for a slot.
+// Returns ctx.Err() if the context is canceled while waiting for a slot.
 func batchGetWithSem(
 	ctx context.Context,
 	txids []string,

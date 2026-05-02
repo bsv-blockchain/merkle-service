@@ -65,7 +65,7 @@ func TestFetchSubtree_Success(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write(subtreeBytes)
+		_, _ = w.Write(subtreeBytes)
 	}))
 	defer server.Close()
 
@@ -123,7 +123,7 @@ func TestFetchBlockMetadata_Success(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Write(payload)
+		_, _ = w.Write(payload)
 	}))
 	defer server.Close()
 
@@ -203,11 +203,11 @@ func TestFetchSubtreeRaw_RetryOnServerError(t *testing.T) {
 		attempts++
 		if attempts < 3 {
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("error"))
+			_, _ = w.Write([]byte("error"))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 	defer server.Close()
 

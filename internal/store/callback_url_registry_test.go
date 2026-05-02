@@ -37,7 +37,7 @@ func TestNewCallbackURLRegistry(t *testing.T) {
 
 // TestNewCallbackURLRegistry_DefaultTTL verifies that a zero/negative ttlSec
 // arg is coerced to the default 7-day window, so a misconfigured deployment
-// can't accidentally fall back to F-037's unbounded behaviour.
+// can't accidentally fall back to F-037's unbounded behavior.
 func TestNewCallbackURLRegistry_DefaultTTL(t *testing.T) {
 	for _, in := range []int{0, -1, -3600} {
 		r := NewCallbackURLRegistry(nil, "test-set", in, 3, 100, nil).(*aerospikeCallbackURLRegistry)

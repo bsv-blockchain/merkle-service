@@ -127,6 +127,7 @@ func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 
 type statusWriter struct {
 	http.ResponseWriter
+
 	status int
 }
 

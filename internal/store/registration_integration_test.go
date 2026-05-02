@@ -15,7 +15,7 @@ func newAerospikeClient(t *testing.T) *store.AerospikeClient {
 	t.Helper()
 	client, err := store.NewAerospikeClient("localhost", 3000, "test", 3, 100, slog.Default())
 	if err != nil {
-		t.Fatalf("failed to create Aerospike client: %v", err)
+		t.Skipf("Aerospike not available: %v", err)
 	}
 	t.Cleanup(func() { client.Close() })
 	return client
@@ -217,7 +217,7 @@ func TestSeenCounter_IncrementReturnsCorrectCount(t *testing.T) {
 	txid := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 	for i := 1; i <= 5; i++ {
-		result, err := counter.Increment(txid)
+		result, err := counter.Increment(txid, fmt.Sprintf("subtree-%d", i))
 		if err != nil {
 			t.Fatalf("Increment #%d failed: %v", i, err)
 		}
@@ -236,7 +236,7 @@ func TestSeenCounter_ThresholdReachedFiresAtThreshold(t *testing.T) {
 	txid := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 	for i := 1; i <= 5; i++ {
-		result, err := counter.Increment(txid)
+		result, err := counter.Increment(txid, fmt.Sprintf("subtree-%d", i))
 		if err != nil {
 			t.Fatalf("Increment #%d failed: %v", i, err)
 		}
@@ -263,7 +263,7 @@ func TestSeenCounter_AboveThresholdDoesNotReFire(t *testing.T) {
 
 	thresholdFiredCount := 0
 	for i := 1; i <= 10; i++ {
-		result, err := counter.Increment(txid)
+		result, err := counter.Increment(txid, fmt.Sprintf("subtree-%d", i))
 		if err != nil {
 			t.Fatalf("Increment #%d failed: %v", i, err)
 		}

@@ -23,7 +23,7 @@ import (
 type failingSyncProducer struct {
 	mu       sync.Mutex
 	messages []*sarama.ProducerMessage
-	failAt   int       // 0-indexed call to fail on; -1 means never fail
+	failAt   int // 0-indexed call to fail on; -1 means never fail
 	failErr  error
 	calls    int
 }
@@ -60,6 +60,7 @@ func (f *failingSyncProducer) AbortTxn() error  { return nil }
 func (f *failingSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
 	return nil
 }
+
 func (f *failingSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
 	return nil
 }
@@ -127,9 +128,9 @@ func newBlockMessageBytes(t *testing.T, hash, dataHubURL string) []byte {
 
 // newDataHubServerWithSubtrees serves a binary block payload at /block/{hash}
 // containing exactly the requested number of subtree slots.
-func newDataHubServerWithSubtrees(t *testing.T, height uint32, subtreeCount int) *httptest.Server {
+func newDataHubServerWithSubtrees(t *testing.T, subtreeCount int) *httptest.Server {
 	t.Helper()
-	payload := buildBlockPayload(height, subtreeCount)
+	payload := buildBlockPayload(200, subtreeCount)
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/block/") && !strings.HasSuffix(r.URL.Path, "/json") {
 			w.Header().Set("Content-Type", "application/octet-stream")
@@ -163,13 +164,13 @@ func buildProcessorWithProducer(t *testing.T, sp sarama.SyncProducer) (*Processo
 }
 
 // TestHandleMessage_HappyPath_AllPublished verifies the full success path:
-// every subtree work message is published, the counter is initialised, and
+// every subtree work message is published, the counter is initialized, and
 // the block is added to the dedup cache.
 func TestHandleMessage_HappyPath_AllPublished(t *testing.T) {
 	mockProducer := &failingSyncProducer{failAt: -1}
 	p, counter, dedup := buildProcessorWithProducer(t, mockProducer)
 
-	server := newDataHubServerWithSubtrees(t, 200, 3)
+	server := newDataHubServerWithSubtrees(t, 3)
 	defer server.Close()
 
 	const blockHash = "block-happy"
@@ -185,7 +186,7 @@ func TestHandleMessage_HappyPath_AllPublished(t *testing.T) {
 		t.Errorf("expected 3 published messages, got %d", got)
 	}
 	if v, ok := counter.get(blockHash); !ok || v != 3 {
-		t.Errorf("expected counter to be initialised to 3, got value=%d ok=%v", v, ok)
+		t.Errorf("expected counter to be initialized to 3, got value=%d ok=%v", v, ok)
 	}
 	if !dedup.Contains(blockHash) {
 		t.Errorf("expected block hash to be added to dedup cache after success")
@@ -206,7 +207,7 @@ func TestHandleMessage_PublishFailureMidLoop_StopsAndReturnsError(t *testing.T) 
 	}
 	p, counter, dedup := buildProcessorWithProducer(t, mockProducer)
 
-	server := newDataHubServerWithSubtrees(t, 200, 4)
+	server := newDataHubServerWithSubtrees(t, 4)
 	defer server.Close()
 
 	const blockHash = "block-publish-fail"
@@ -231,10 +232,10 @@ func TestHandleMessage_PublishFailureMidLoop_StopsAndReturnsError(t *testing.T) 
 	if dedup.Contains(blockHash) {
 		t.Errorf("block must NOT be in dedup cache when publish fails")
 	}
-	// Counter should have been initialised (so workers for the published
+	// Counter should have been initialized (so workers for the published
 	// message can decrement); on retry, Init is upsert and overwrites cleanly.
 	if v, ok := counter.get(blockHash); !ok || v != 4 {
-		t.Errorf("expected counter initialised to 4, got value=%d ok=%v", v, ok)
+		t.Errorf("expected counter initialized to 4, got value=%d ok=%v", v, ok)
 	}
 }
 
@@ -248,7 +249,7 @@ func TestHandleMessage_PublishFailureFirstMessage_NoMessagesLeak(t *testing.T) {
 	}
 	p, _, dedup := buildProcessorWithProducer(t, mockProducer)
 
-	server := newDataHubServerWithSubtrees(t, 200, 3)
+	server := newDataHubServerWithSubtrees(t, 3)
 	defer server.Close()
 
 	const blockHash = "block-publish-fail-first"
@@ -269,7 +270,7 @@ func TestHandleMessage_PublishFailureFirstMessage_NoMessagesLeak(t *testing.T) {
 
 // TestHandleMessage_RetryAfterPublishFailure_Republishes verifies that after a
 // publish failure, redelivering the same block message republishes the work
-// and (on success) marks the block in dedup. The counter is re-initialised
+// and (on success) marks the block in dedup. The counter is re-initialized
 // idempotently via the upsert semantics promised by the SubtreeCounterStore.
 func TestHandleMessage_RetryAfterPublishFailure_Republishes(t *testing.T) {
 	mockProducer := &failingSyncProducer{
@@ -278,7 +279,7 @@ func TestHandleMessage_RetryAfterPublishFailure_Republishes(t *testing.T) {
 	}
 	p, counter, dedup := buildProcessorWithProducer(t, mockProducer)
 
-	server := newDataHubServerWithSubtrees(t, 200, 3)
+	server := newDataHubServerWithSubtrees(t, 3)
 	defer server.Close()
 
 	const blockHash = "block-retry"
@@ -304,7 +305,7 @@ func TestHandleMessage_RetryAfterPublishFailure_Republishes(t *testing.T) {
 		t.Errorf("expected block in dedup after successful retry")
 	}
 	if counter.inits() <= firstInits {
-		t.Errorf("expected counter to be re-initialised on retry")
+		t.Errorf("expected counter to be re-initialized on retry")
 	}
 	// Total successful sends across both attempts: 1 (before failure) + 3 (retry).
 	if mockProducer.calls < 5 || len(mockProducer.messages) != 4 {
@@ -314,14 +315,14 @@ func TestHandleMessage_RetryAfterPublishFailure_Republishes(t *testing.T) {
 }
 
 // TestHandleMessage_CounterInitFailure_NoPublishNoDedup verifies that if the
-// subtree counter cannot be initialised, no messages are published and the
+// subtree counter cannot be initialized, no messages are published and the
 // block is not marked in the dedup cache (so the block is retried).
 func TestHandleMessage_CounterInitFailure_NoPublishNoDedup(t *testing.T) {
 	mockProducer := &failingSyncProducer{failAt: -1}
 	p, counter, dedup := buildProcessorWithProducer(t, mockProducer)
 	counter.failNext = true
 
-	server := newDataHubServerWithSubtrees(t, 200, 2)
+	server := newDataHubServerWithSubtrees(t, 2)
 	defer server.Close()
 
 	const blockHash = "block-counter-fail"
@@ -347,7 +348,7 @@ func TestHandleMessage_NoSubtrees_DedupAdded(t *testing.T) {
 	mockProducer := &failingSyncProducer{failAt: -1}
 	p, _, dedup := buildProcessorWithProducer(t, mockProducer)
 
-	server := newDataHubServerWithSubtrees(t, 200, 0)
+	server := newDataHubServerWithSubtrees(t, 0)
 	defer server.Close()
 
 	const blockHash = "block-empty"

@@ -128,7 +128,7 @@ func TestCallbackAccumulator_NoLostEntries_F046(t *testing.T) {
 			url := "uB"
 			tx := "txB" + itoa(i)
 			subtree := i + 1
-			if err := s.Append(blockHash, url, []string{tx}, subtree, []byte{byte(i)}); err != nil {
+			if err := s.Append(blockHash, url, []string{tx}, subtree, []byte{byte(i)}); err != nil { //nolint:gosec // i is bounded test counter
 				t.Errorf("concurrent Append %d: %v", i, err)
 				return
 			}

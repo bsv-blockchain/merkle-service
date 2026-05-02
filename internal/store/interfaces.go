@@ -8,7 +8,7 @@ import (
 // RegistrationStore maps a txid to the set of callback URLs registered for it.
 // Add is set-insert: duplicate (txid, url) pairs are silently deduplicated.
 type RegistrationStore interface {
-	Add(txid string, callbackURL string) error
+	Add(txid, callbackURL string) error
 	Get(txid string) ([]string, error)
 	BatchGet(txids []string) (map[string][]string, error)
 	UpdateTTL(txid string, ttl time.Duration) error
@@ -57,7 +57,7 @@ type CallbackAccumulatorStore interface {
 // Increment fires ThresholdReached exactly once — when the unique count first
 // reaches the configured threshold.
 type SeenCounterStore interface {
-	Increment(txid string, subtreeID string) (*IncrementResult, error)
+	Increment(txid, subtreeID string) (*IncrementResult, error)
 	Threshold() int
 }
 

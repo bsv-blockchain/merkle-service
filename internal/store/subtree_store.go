@@ -171,15 +171,19 @@ func (c *ConcurrentBlobStore) Get(key string) ([]byte, error) {
 func (c *ConcurrentBlobStore) Set(key string, data []byte, opts ...BlobOption) error {
 	return c.store.Set(key, data, opts...)
 }
+
 func (c *ConcurrentBlobStore) SetFromReader(key string, r io.Reader, size int64, opts ...BlobOption) error {
 	return c.store.SetFromReader(key, r, size, opts...)
 }
+
 func (c *ConcurrentBlobStore) GetIoReader(key string) (io.ReadCloser, error) {
 	return c.store.GetIoReader(key)
 }
+
 func (c *ConcurrentBlobStore) Del(key string) error {
 	return c.store.Del(key)
 }
+
 func (c *ConcurrentBlobStore) SetCurrentBlockHeight(height uint64) {
 	c.store.SetCurrentBlockHeight(height)
 }

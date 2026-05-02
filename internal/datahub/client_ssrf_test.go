@@ -14,7 +14,7 @@ import (
 // TestFetchSubtreeRaw_RejectsLoopbackURL verifies that a peer-supplied
 // DataHub URL pointing at 127.0.0.1 is rejected at request-time
 // validation, before any network I/O happens. This is the first layer of
-// the SSRF defence: an attacker cannot turn a forged P2P announcement
+// the SSRF defense: an attacker cannot turn a forged P2P announcement
 // into a GET against a service listening on the loopback interface.
 func TestFetchSubtreeRaw_RejectsLoopbackURL(t *testing.T) {
 	client := NewClientWithSSRFGuard(5, 0, 0, 0, false, testLogger())

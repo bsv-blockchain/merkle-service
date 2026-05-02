@@ -24,7 +24,7 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to build store registry: ", err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }()
 
 	processor := block.NewProcessor(
 		cfg.Kafka, cfg.Block, cfg.DataHub,

@@ -63,7 +63,7 @@ func (m *mockRegStore) Get(txid string) ([]string, error) {
 
 type mockSeenCounter struct{}
 
-func (m *mockSeenCounter) Increment(txid string, subtreeID string) (*store.IncrementResult, error) {
+func (m *mockSeenCounter) Increment(txid, subtreeID string) (*store.IncrementResult, error) {
 	return &store.IncrementResult{NewCount: 1, ThresholdReached: false}, nil
 }
 
@@ -76,7 +76,7 @@ type mockRegCache struct {
 	setReg []string // txids passed to SetMultiRegistered
 }
 
-func (m *mockRegCache) FilterUncached(txids []string) (uncached []string, cachedRegistered []string) {
+func (m *mockRegCache) FilterUncached(txids []string) (uncached, cachedRegistered []string) {
 	for _, txid := range txids {
 		isReg, isCached := m.cached[txid]
 		if !isCached {
@@ -85,7 +85,7 @@ func (m *mockRegCache) FilterUncached(txids []string) (uncached []string, cached
 			cachedRegistered = append(cachedRegistered, txid)
 		}
 	}
-	return
+	return uncached, cachedRegistered
 }
 
 func (m *mockRegCache) SetMultiRegistered(txids []string) error {
@@ -516,7 +516,7 @@ func TestFindRegisteredTxids_LargeSubtree(t *testing.T) {
 	txids := make([]string, totalTxids)
 	for i := 0; i < totalTxids; i++ {
 		txids[i] = strings.Repeat("00", 28) + hex.EncodeToString([]byte{
-			byte(i >> 24), byte(i >> 16), byte(i >> 8), byte(i),
+			byte(i >> 24), byte(i >> 16), byte(i >> 8), byte(i), //nolint:gosec // i is bounded by totalTxids (10000), fits in 4 bytes
 		})
 	}
 
@@ -592,10 +592,10 @@ func TestFindRegisteredTxids_CacheUpdatedCorrectly(t *testing.T) {
 // mockIdempotentSeenCounter simulates the idempotent seen counter behavior:
 // tracks which subtreeIDs have been counted per txid and fires threshold once.
 type mockIdempotentSeenCounter struct {
-	mu              sync.Mutex
-	subtreesByTxid  map[string]map[string]bool // txid -> set of subtreeIDs
-	thresholdFired  map[string]bool            // txid -> whether threshold already fired
-	threshold       int
+	mu             sync.Mutex
+	subtreesByTxid map[string]map[string]bool // txid -> set of subtreeIDs
+	thresholdFired map[string]bool            // txid -> whether threshold already fired
+	threshold      int
 }
 
 func newMockIdempotentSeenCounter(threshold int) *mockIdempotentSeenCounter {
@@ -606,7 +606,7 @@ func newMockIdempotentSeenCounter(threshold int) *mockIdempotentSeenCounter {
 	}
 }
 
-func (m *mockIdempotentSeenCounter) Increment(txid string, subtreeID string) (*store.IncrementResult, error) {
+func (m *mockIdempotentSeenCounter) Increment(txid, subtreeID string) (*store.IncrementResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -649,7 +649,7 @@ func TestIdempotentSeenCounter_DuplicateSubtreeDoesNotIncrement(t *testing.T) {
 	sc := newMockIdempotentSeenCounter(3)
 
 	// First call with subtree-A.
-	sc.Increment("txid-1", "subtree-A")
+	_, _ = sc.Increment("txid-1", "subtree-A")
 
 	// Duplicate call with same subtree-A.
 	result, _ := sc.Increment("txid-1", "subtree-A")
@@ -664,8 +664,8 @@ func TestIdempotentSeenCounter_DuplicateSubtreeDoesNotIncrement(t *testing.T) {
 func TestIdempotentSeenCounter_ThresholdFiresOnce(t *testing.T) {
 	sc := newMockIdempotentSeenCounter(3)
 
-	sc.Increment("txid-1", "subtree-A")
-	sc.Increment("txid-1", "subtree-B")
+	_, _ = sc.Increment("txid-1", "subtree-A")
+	_, _ = sc.Increment("txid-1", "subtree-B")
 
 	// Third unique subtree should trigger threshold.
 	result, _ := sc.Increment("txid-1", "subtree-C")
@@ -689,7 +689,7 @@ func TestIdempotentSeenCounter_ThresholdFiresOnce(t *testing.T) {
 func TestIdempotentSeenCounter_ThresholdDoesNotFireOnDuplicates(t *testing.T) {
 	sc := newMockIdempotentSeenCounter(2)
 
-	sc.Increment("txid-1", "subtree-A")
+	_, _ = sc.Increment("txid-1", "subtree-A")
 
 	// Duplicate of subtree-A — count stays 1, no threshold.
 	result, _ := sc.Increment("txid-1", "subtree-A")
@@ -719,8 +719,8 @@ func TestIdempotentSeenCounter_ThresholdDoesNotFireOnDuplicates(t *testing.T) {
 func TestIdempotentSeenCounter_IndependentPerTxid(t *testing.T) {
 	sc := newMockIdempotentSeenCounter(2)
 
-	sc.Increment("txid-1", "subtree-A")
-	sc.Increment("txid-2", "subtree-A")
+	_, _ = sc.Increment("txid-1", "subtree-A")
+	_, _ = sc.Increment("txid-2", "subtree-A")
 
 	// Same subtreeID for different txids should be independent.
 	result1, _ := sc.Increment("txid-1", "subtree-B")
@@ -912,21 +912,23 @@ func (m *mockSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int6
 	m.messages = append(m.messages, msg)
 	return 0, int64(len(m.messages)), nil
 }
+
 func (m *mockSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, msgs...)
 	return nil
 }
-func (m *mockSyncProducer) Close() error                { return nil }
-func (m *mockSyncProducer) IsTransactional() bool       { return false }
+func (m *mockSyncProducer) Close() error                            { return nil }
+func (m *mockSyncProducer) IsTransactional() bool                   { return false }
 func (m *mockSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag { return 0 }
-func (m *mockSyncProducer) BeginTxn() error             { return nil }
-func (m *mockSyncProducer) CommitTxn() error             { return nil }
-func (m *mockSyncProducer) AbortTxn() error              { return nil }
+func (m *mockSyncProducer) BeginTxn() error                         { return nil }
+func (m *mockSyncProducer) CommitTxn() error                        { return nil }
+func (m *mockSyncProducer) AbortTxn() error                         { return nil }
 func (m *mockSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
 	return nil
 }
+
 func (m *mockSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
 	return nil
 }
@@ -1100,7 +1102,7 @@ func TestBatchedSeenCallbacks_SeenMultipleNodesThreshold(t *testing.T) {
 func TestBatchedSeenCallbacks_PartialThreshold(t *testing.T) {
 	// Threshold=2: tx1 has already been seen once (will reach threshold), tx2 hasn't.
 	sc := newMockIdempotentSeenCounter(2)
-	sc.Increment("tx1", "subtree-PREV") // pre-seen once
+	_, _ = sc.Increment("tx1", "subtree-PREV") // pre-seen once
 
 	regStore := &mockRegStore{registrations: map[string][]string{}}
 	p, mockProd := newTestProcessor(t, regStore, sc)
@@ -1334,6 +1336,7 @@ func (f *callbackFailingSyncProducer) AbortTxn() error  { return nil }
 func (f *callbackFailingSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
 	return nil
 }
+
 func (f *callbackFailingSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
 	return nil
 }
@@ -1395,6 +1398,7 @@ func (f *urlFailingSyncProducer) AbortTxn() error  { return nil }
 func (f *urlFailingSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
 	return nil
 }
+
 func (f *urlFailingSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
 	return nil
 }

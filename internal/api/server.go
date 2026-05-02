@@ -8,11 +8,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 )
 
 //go:embed dashboard.html
@@ -21,6 +22,7 @@ var dashboardHTML []byte
 // Server implements the API server service.
 type Server struct {
 	service.BaseService
+
 	cfg         config.APIConfig
 	httpServer  *http.Server
 	router      chi.Router
