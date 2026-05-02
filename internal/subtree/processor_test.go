@@ -38,10 +38,16 @@ type mockRegStore struct {
 	// registrations maps txid -> []callbackURL
 	registrations map[string][]string
 	batchGetCalls [][]string // records each BatchGet call's txids
+	// batchGetErr, when non-nil, is returned from BatchGet instead of a result.
+	// Used to simulate backing-store outages (F-056).
+	batchGetErr error
 }
 
 func (m *mockRegStore) BatchGet(txids []string) (map[string][]string, error) {
 	m.batchGetCalls = append(m.batchGetCalls, txids)
+	if m.batchGetErr != nil {
+		return nil, m.batchGetErr
+	}
 	result := make(map[string][]string)
 	for _, txid := range txids {
 		if urls, ok := m.registrations[txid]; ok {
@@ -1566,5 +1572,143 @@ func TestHandleMessage_CallbackPublishFailure_RoutesToRetry(t *testing.T) {
 	}
 	if got := p.messagesRetried.Load(); got != 1 {
 		t.Errorf("expected messagesRetried=1 after callback failure, got %d", got)
+	}
+}
+
+// --- F-056: Cached registration lookup failure propagation tests ---
+//
+// Pre-fix, when the registration cache reported txids as registered but the
+// backing store BatchGet for those txids failed, findRegisteredTxids logged a
+// warning and returned a partial allRegistered map. handleMessage then marked
+// the subtree as processed in the dedup cache, permanently dropping
+// SEEN_ON_NETWORK and threshold callbacks for those txids. The fix returns the
+// lookup error so handleMessage routes through handleTransientFailure (which
+// leaves the dedup cache untouched and lets the consumer redeliver).
+
+// TestFindRegisteredTxids_CachedLookupFailureReturnsError verifies that a
+// backing-store failure on the cached-registered-URL lookup surfaces as an
+// error rather than being swallowed.
+func TestFindRegisteredTxids_CachedLookupFailureReturnsError(t *testing.T) {
+	cachedRegTxid := "aaaa000000000000000000000000000000000000000000000000000000000001"
+
+	regStore := &mockRegStore{
+		registrations: map[string][]string{
+			cachedRegTxid: {"http://cached-cb.example.com"},
+		},
+		batchGetErr: errors.New("aerospike unavailable"),
+	}
+
+	cache := &mockRegCache{
+		cached: map[string]bool{
+			cachedRegTxid: true, // cache says: registered
+		},
+	}
+
+	p := &Processor{
+		registrationStore: regStore,
+		regCache:          cache,
+	}
+
+	result, err := p.findRegisteredTxids([]string{cachedRegTxid})
+	if err == nil {
+		t.Fatalf("expected non-nil error when backing-store lookup fails, got result=%v", result)
+	}
+	if result != nil {
+		t.Errorf("expected nil result on error, got %v", result)
+	}
+}
+
+// TestHandleMessage_CachedLookupFailure_RoutesToRetryAndSkipsDedup is the
+// end-to-end F-056 contract test: when the cache says "registered" but the
+// backing store BatchGet for cached txids fails, handleMessage must route the
+// subtree message through the retry pipeline AND must NOT add the subtree
+// hash to the dedup cache (otherwise redeliveries are silently skipped and
+// SEEN callbacks are permanently lost).
+func TestHandleMessage_CachedLookupFailure_RoutesToRetryAndSkipsDedup(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	registeredTxid := "9602604163d73e2ab424bad28b1363694c397512dfa883ec1ee90cc92f847359"
+
+	// Backing store will fail every BatchGet — simulating an Aerospike outage.
+	regStore := &mockRegStore{
+		registrations: map[string][]string{
+			registeredTxid: {"http://callback.example.com/notify"},
+		},
+		batchGetErr: errors.New("aerospike outage"),
+	}
+
+	// Pre-populate the cache to claim the txid is registered. With this set,
+	// findRegisteredTxids hits the cached-URL BatchGet path that previously
+	// swallowed errors.
+	regCache := &mockRegCache{
+		cached: map[string]bool{
+			registeredTxid: true,
+		},
+	}
+
+	rawBytes := hashFromHex(t, registeredTxid)
+	dataHubServer := startRawSubtreeServer(rawBytes)
+	defer dataHubServer.Close()
+
+	cbMock := &mockSyncProducer{}
+	retryMock := &mockSyncProducer{}
+	dlqMock := &mockSyncProducer{}
+	dedup := cache.NewDedupCache(100)
+
+	p := &Processor{
+		cfg: &config.Config{
+			Subtree: config.SubtreeConfig{
+				MaxAttempts: 5,
+				StorageMode: "stream", // skip blob store
+			},
+		},
+		registrationStore: regStore,
+		regCache:          regCache,
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(cbMock, "callback-test", logger),
+		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		dataHubClient:     datahub.NewClient(5, 0, logger),
+		dedupCache:        dedup,
+	}
+	p.InitBase("subtree-cached-lookup-fail-test")
+	p.Logger = logger
+
+	subtreeMsg := &kafka.SubtreeMessage{
+		Hash:         "subtree-cached-lookup-fail",
+		DataHubURL:   dataHubServer.URL,
+		AttemptCount: 0,
+	}
+	value, err := subtreeMsg.Encode()
+	if err != nil {
+		t.Fatalf("encode subtree msg: %v", err)
+	}
+
+	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage: expected nil error (retry path returns nil after re-publishing), got: %v", err)
+	}
+
+	// Critical: dedup cache MUST NOT contain this subtree's hash, otherwise
+	// the redelivery would be silently skipped.
+	if dedup.Contains(subtreeMsg.Hash) {
+		t.Errorf("dedup cache must NOT contain %q after a cached-lookup failure", subtreeMsg.Hash)
+	}
+
+	// Retry producer received the re-published subtree message.
+	if got := len(retryMock.getMessages()); got != 1 {
+		t.Errorf("expected exactly 1 retry publish, got %d", got)
+	}
+	if got := len(dlqMock.getMessages()); got != 0 {
+		t.Errorf("expected zero DLQ publishes, got %d", got)
+	}
+	if got := p.messagesProcessed.Load(); got != 0 {
+		t.Errorf("expected messagesProcessed=0 after cached-lookup failure, got %d", got)
+	}
+	if got := p.messagesRetried.Load(); got != 1 {
+		t.Errorf("expected messagesRetried=1 after cached-lookup failure, got %d", got)
+	}
+	// No callbacks should have been emitted — we never built a complete map.
+	if got := len(cbMock.getMessages()); got != 0 {
+		t.Errorf("expected 0 callback publishes after cached-lookup failure, got %d", got)
 	}
 }
