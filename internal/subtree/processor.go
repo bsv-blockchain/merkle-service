@@ -27,10 +27,13 @@ type SeenCounter interface {
 }
 
 // RegCache abstracts the registration deduplication cache for testability.
+//
+// The cache only stores positive results. Negative ("not registered")
+// lookups are intentionally not cached so that a /watch arriving after
+// an early negative lookup is not hidden until cache eviction (F-020).
 type RegCache interface {
 	FilterUncached(txids []string) (uncached []string, cachedRegistered []string)
 	SetMultiRegistered(txids []string) error
-	SetMultiNotRegistered(txids []string) error
 }
 
 // Processor consumes subtree announcement messages from Kafka, fetches full
@@ -406,22 +409,18 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]string, er
 		}
 	}
 
-	// 4.4: Update cache with results.
-	if p.regCache != nil {
+	// 4.4: Update cache with positive results only. Negatives are NOT
+	// cached: a txid observed before its /watch registration must remain
+	// looked up against the backing store on subsequent passes (F-020).
+	if p.regCache != nil && len(registeredFromStore) > 0 {
 		foundTxids := make([]string, 0, len(registeredFromStore))
-		notFoundTxids := make([]string, 0, len(uncached)-len(registeredFromStore))
 		for _, txid := range uncached {
 			if _, found := registeredFromStore[txid]; found {
 				foundTxids = append(foundTxids, txid)
-			} else {
-				notFoundTxids = append(notFoundTxids, txid)
 			}
 		}
 		if len(foundTxids) > 0 {
 			_ = p.regCache.SetMultiRegistered(foundTxids)
-		}
-		if len(notFoundTxids) > 0 {
-			_ = p.regCache.SetMultiNotRegistered(notFoundTxids)
 		}
 	}
 

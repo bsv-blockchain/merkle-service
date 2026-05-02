@@ -17,10 +17,13 @@ import (
 // RegCache is the registration deduplication cache abstraction used by
 // block-time subtree processing. Mirrors the shape used by the subtree-fetcher
 // so a future cross-process cache implementation can be substituted.
+//
+// Only positive lookups are cached. Negatives are not cached so that a
+// /watch registration arriving after an earlier "not registered"
+// observation is not masked until cache eviction (F-020).
 type RegCache interface {
 	FilterUncached(txids []string) (uncached []string, cachedRegistered []string)
 	SetMultiRegistered(txids []string) error
-	SetMultiNotRegistered(txids []string) error
 }
 
 // SubtreeResult holds the callback groups produced by processing a subtree.
@@ -212,23 +215,19 @@ func lookupRegistrations(
 		return nil, err
 	}
 
-	// Update cache with discoveries from the uncached portion only — we don't
-	// re-record cachedRegistered txids because they're already in the cache.
-	if regCache != nil && len(uncached) > 0 {
+	// Update cache with discoveries from the uncached portion. Only
+	// positive results are cached; negatives are intentionally not
+	// cached so a later /watch registration is not hidden by a stale
+	// negative entry (F-020).
+	if regCache != nil && len(uncached) > 0 && len(registered) > 0 {
 		foundTxids := make([]string, 0, len(registered))
-		notFoundTxids := make([]string, 0, len(uncached))
 		for _, txid := range uncached {
 			if _, found := registered[txid]; found {
 				foundTxids = append(foundTxids, txid)
-			} else {
-				notFoundTxids = append(notFoundTxids, txid)
 			}
 		}
 		if len(foundTxids) > 0 {
 			_ = regCache.SetMultiRegistered(foundTxids)
-		}
-		if len(notFoundTxids) > 0 {
-			_ = regCache.SetMultiNotRegistered(notFoundTxids)
 		}
 	}
 
