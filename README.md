@@ -435,7 +435,7 @@ Run unit tests:
 
 ```bash
 make test
-or 
+or
 magex test
 ```
 
