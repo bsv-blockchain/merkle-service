@@ -41,7 +41,7 @@ var _ RegistrationStore = (*aerospikeRegistration)(nil)
 // strongly discouraged; see F-050). Adds that would exceed the cap return
 // ErrMaxCallbacksPerTxIDExceeded; idempotent re-adds of an already-registered
 // URL succeed regardless of the cap.
-func NewRegistrationStore(client *AerospikeClient, setName string, maxRetries int, retryBaseMs int, maxCallbacksPerTxID int, logger *slog.Logger) RegistrationStore {
+func NewRegistrationStore(client *AerospikeClient, setName string, maxRetries, retryBaseMs, maxCallbacksPerTxID int, logger *slog.Logger) RegistrationStore {
 	if maxCallbacksPerTxID < 0 {
 		maxCallbacksPerTxID = 0
 	}
@@ -67,7 +67,7 @@ const addCASMaxAttempts = 5
 // UNIQUE flag for set semantics. When maxCallbacksPerTxID > 0, the read-and-
 // write is gated by an optimistic generation CAS so concurrent registrations
 // can't both observe (count == max-1) and both succeed past the cap.
-func (s *aerospikeRegistration) Add(txid string, callbackURL string) error {
+func (s *aerospikeRegistration) Add(txid, callbackURL string) error {
 	key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
 	if err != nil {
 		return fmt.Errorf("failed to create key: %w", err)

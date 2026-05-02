@@ -337,7 +337,7 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 		if dedupKey != "" {
 			exists, err := d.dedupStore.Exists(dedupKey, cbMsg.CallbackURL, string(cbMsg.Type))
 			if err != nil {
-				// Previous behaviour was "proceed with delivery" — but if a
+				// Previous behavior was "proceed with delivery" — but if a
 				// prior attempt had succeeded and Aerospike is briefly
 				// unreadable, we'd deliver a duplicate BLOCK_PROCESSED. Safer
 				// to fall through to the retry path so the next attempt
@@ -509,7 +509,7 @@ func (d *DeliveryService) publishToDLQDurably(cbMsg *kafka.CallbackTopicMessage)
 }
 
 // heartbeat emits an INFO-level throughput line every 30 seconds until ctx
-// is cancelled. Lets operators see "service is alive and doing work" without
+// is canceled. Lets operators see "service is alive and doing work" without
 // turning on DEBUG for per-message success logs.
 func (d *DeliveryService) heartbeat(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
@@ -588,7 +588,7 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 		)
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil

@@ -26,7 +26,7 @@ type aerospikeCallbackDedup struct {
 
 var _ CallbackDedupStore = (*aerospikeCallbackDedup)(nil)
 
-func NewCallbackDedupStore(client *AerospikeClient, setName string, maxRetries int, retryBaseMs int, logger *slog.Logger) CallbackDedupStore {
+func NewCallbackDedupStore(client *AerospikeClient, setName string, maxRetries, retryBaseMs int, logger *slog.Logger) CallbackDedupStore {
 	return &aerospikeCallbackDedup{
 		client:      client,
 		setName:     setName,
@@ -74,7 +74,7 @@ func (s *aerospikeCallbackDedup) Record(txid, callbackURL, statusType string, tt
 	bins := as.BinMap{dedupMarkerBin: 1}
 	if err := s.client.Client().Put(wp, key, bins); err != nil {
 		// If TTL is rejected (namespace lacks nsup-period), retry without TTL.
-		if asErr, ok := err.(as.Error); ok && asErr.Matches(astypes.FAIL_FORBIDDEN) && ttl > 0 {
+		if err.Matches(astypes.FAIL_FORBIDDEN) && ttl > 0 {
 			s.logger.Warn("callback dedup TTL rejected, writing without TTL (configure Aerospike nsup-period to enable TTL)",
 				"txid", txid, "statusType", statusType)
 			wp2 := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)

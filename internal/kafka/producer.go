@@ -81,5 +81,5 @@ func HashPartitionKey(s string) string {
 // Int32FromHash converts first 4 bytes of hash to int32 for partition selection.
 func Int32FromHash(s string) int32 {
 	hash := sha256.Sum256([]byte(s))
-	return int32(binary.BigEndian.Uint32(hash[:4]))
+	return int32(binary.BigEndian.Uint32(hash[:4])) //nolint:gosec // intentional wrapping for partition key
 }

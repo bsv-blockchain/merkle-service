@@ -40,17 +40,18 @@ func (m *mockSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
 	return nil
 }
 
-func (m *mockSyncProducer) Close() error                { return nil }
-func (m *mockSyncProducer) IsTransactional() bool       { return false }
+func (m *mockSyncProducer) Close() error          { return nil }
+func (m *mockSyncProducer) IsTransactional() bool { return false }
 func (m *mockSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
 	return sarama.ProducerTxnFlagReady
 }
-func (m *mockSyncProducer) BeginTxn() error   { return nil }
-func (m *mockSyncProducer) CommitTxn() error   { return nil }
-func (m *mockSyncProducer) AbortTxn() error    { return nil }
+func (m *mockSyncProducer) BeginTxn() error  { return nil }
+func (m *mockSyncProducer) CommitTxn() error { return nil }
+func (m *mockSyncProducer) AbortTxn() error  { return nil }
 func (m *mockSyncProducer) AddOffsetsToTxn(_ map[string][]*sarama.PartitionOffsetMetadata, _ string) error {
 	return nil
 }
+
 func (m *mockSyncProducer) AddMessageToTxn(_ *sarama.ConsumerMessage, _ string, _ *string) error {
 	return nil
 }
@@ -508,7 +509,7 @@ func TestHandleBlockMessage_PropagatesTerminalError(t *testing.T) {
 	}
 }
 
-// TestSignalFatal_PropagatesToRun verifies that a fatal error signalled from
+// TestSignalFatal_PropagatesToRun verifies that a fatal error signaled from
 // any publish path bubbles up out of Run so the entrypoint can exit non-zero.
 func TestSignalFatal_PropagatesToRun(t *testing.T) {
 	client, _, _ := newTestClient(t)
@@ -590,8 +591,8 @@ func (f *flakyProducer) SendMessage(_ *sarama.ProducerMessage) (int32, int64, er
 }
 
 func (f *flakyProducer) SendMessages(_ []*sarama.ProducerMessage) error { return nil }
-func (f *flakyProducer) Close() error                                    { return nil }
-func (f *flakyProducer) IsTransactional() bool                           { return false }
+func (f *flakyProducer) Close() error                                   { return nil }
+func (f *flakyProducer) IsTransactional() bool                          { return false }
 func (f *flakyProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
 	return sarama.ProducerTxnFlagReady
 }
@@ -601,6 +602,7 @@ func (f *flakyProducer) AbortTxn() error  { return nil }
 func (f *flakyProducer) AddOffsetsToTxn(_ map[string][]*sarama.PartitionOffsetMetadata, _ string) error {
 	return nil
 }
+
 func (f *flakyProducer) AddMessageToTxn(_ *sarama.ConsumerMessage, _ string, _ *string) error {
 	return nil
 }

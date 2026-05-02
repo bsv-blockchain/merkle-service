@@ -6,17 +6,17 @@ import (
 	"net/http"
 	"regexp"
 
-	"github.com/bsv-blockchain/merkle-service/internal/store"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
+	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
 var txidRegex = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(dashboardHTML)
+	_, _ = w.Write(dashboardHTML)
 }
 
 // WatchRequest represents the POST /watch request body.
@@ -169,7 +169,12 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(data)
 }

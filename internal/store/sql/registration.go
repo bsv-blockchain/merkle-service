@@ -45,9 +45,10 @@ func (s *registrationStore) Add(txid, callbackURL string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
-	insertReg := fmt.Sprintf("INSERT INTO registrations (txid) VALUES (%s)%s",
+	insertReg := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"INSERT INTO registrations (txid) VALUES (%s)%s",
 		s.d.placeholder(1), s.d.onConflictDoNothing)
 	if _, err := tx.ExecContext(ctx, insertReg, txid); err != nil {
 		return fmt.Errorf("insert registration: %w", err)
@@ -57,7 +58,7 @@ func (s *registrationStore) Add(txid, callbackURL string) error {
 		// Lock the parent row (Postgres) so the count + insert below race
 		// safely against concurrent registrations for the same txid.
 		if isPostgres(s.d) {
-			lockQ := fmt.Sprintf("SELECT 1 FROM registrations WHERE txid = %s FOR UPDATE", s.d.placeholder(1))
+			lockQ := fmt.Sprintf("SELECT 1 FROM registrations WHERE txid = %s FOR UPDATE", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
 			var dummy int
 			if err := tx.QueryRowContext(ctx, lockQ, txid).Scan(&dummy); err != nil {
 				return fmt.Errorf("lock registration: %w", err)
@@ -66,7 +67,8 @@ func (s *registrationStore) Add(txid, callbackURL string) error {
 
 		// Idempotency probe: if the URL is already registered, re-adding is
 		// a no-op regardless of the cap. Otherwise enforce the limit.
-		probeQ := fmt.Sprintf("SELECT 1 FROM registration_urls WHERE txid = %s AND callback_url = %s",
+		probeQ := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+			"SELECT 1 FROM registration_urls WHERE txid = %s AND callback_url = %s",
 			s.d.placeholder(1), s.d.placeholder(2))
 		var exists int
 		switch err := tx.QueryRowContext(ctx, probeQ, txid, callbackURL).Scan(&exists); err {
@@ -80,7 +82,7 @@ func (s *registrationStore) Add(txid, callbackURL string) error {
 			return fmt.Errorf("probe registration url: %w", err)
 		}
 
-		countQ := fmt.Sprintf("SELECT COUNT(*) FROM registration_urls WHERE txid = %s", s.d.placeholder(1))
+		countQ := fmt.Sprintf("SELECT COUNT(*) FROM registration_urls WHERE txid = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
 		var count int
 		if err := tx.QueryRowContext(ctx, countQ, txid).Scan(&count); err != nil {
 			return fmt.Errorf("count registration urls: %w", err)
@@ -90,7 +92,8 @@ func (s *registrationStore) Add(txid, callbackURL string) error {
 		}
 	}
 
-	insertURL := fmt.Sprintf("INSERT INTO registration_urls (txid, callback_url) VALUES (%s, %s)%s",
+	insertURL := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"INSERT INTO registration_urls (txid, callback_url) VALUES (%s, %s)%s",
 		s.d.placeholder(1), s.d.placeholder(2), s.d.onConflictDoNothing)
 	if _, err := tx.ExecContext(ctx, insertURL, txid, callbackURL); err != nil {
 		return fmt.Errorf("insert registration url: %w", err)
@@ -101,7 +104,7 @@ func (s *registrationStore) Add(txid, callbackURL string) error {
 func (s *registrationStore) Get(txid string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	q := fmt.Sprintf("SELECT callback_url FROM registration_urls WHERE txid = %s ORDER BY callback_url", s.d.placeholder(1))
+	q := fmt.Sprintf("SELECT callback_url FROM registration_urls WHERE txid = %s ORDER BY callback_url", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
 	rows, err := s.db.QueryContext(ctx, q, txid)
 	if err != nil {
 		return nil, err
@@ -131,7 +134,8 @@ func (s *registrationStore) BatchGet(txids []string) (map[string][]string, error
 		placeholders[i] = s.d.placeholder(i + 1)
 		args[i] = t
 	}
-	q := fmt.Sprintf("SELECT txid, callback_url FROM registration_urls WHERE txid IN (%s)",
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"SELECT txid, callback_url FROM registration_urls WHERE txid IN (%s)",
 		strings.Join(placeholders, ", "))
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -153,7 +157,8 @@ func (s *registrationStore) BatchGet(txids []string) (map[string][]string, error
 func (s *registrationStore) UpdateTTL(txid string, ttl time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	q := fmt.Sprintf("UPDATE registrations SET expires_at = %s WHERE txid = %s",
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"UPDATE registrations SET expires_at = %s WHERE txid = %s",
 		s.d.intervalSeconds(int(ttl.Seconds())), s.d.placeholder(1))
 	_, err := s.db.ExecContext(ctx, q, txid)
 	return err
@@ -171,7 +176,8 @@ func (s *registrationStore) BatchUpdateTTL(txids []string, ttl time.Duration) er
 		placeholders[i] = s.d.placeholder(i + 1)
 		args[i] = t
 	}
-	q := fmt.Sprintf("UPDATE registrations SET expires_at = %s WHERE txid IN (%s)",
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"UPDATE registrations SET expires_at = %s WHERE txid IN (%s)",
 		s.d.intervalSeconds(int(ttl.Seconds())), strings.Join(placeholders, ", "))
 	_, err := s.db.ExecContext(ctx, q, args...)
 	return err

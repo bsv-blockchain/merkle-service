@@ -129,7 +129,7 @@ func TestSubtreeDataRetrieval_DataHubFallback(t *testing.T) {
 		if strings.HasPrefix(r.URL.Path, "/subtree/") {
 			fetchCount++
 			w.WriteHeader(http.StatusOK)
-			w.Write(rawBytes)
+			_, _ = w.Write(rawBytes)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -156,7 +156,7 @@ func TestSubtreeDataRetrieval_DataHubFallback(t *testing.T) {
 	}
 
 	// Store in blob store for future use.
-	if err := subtreeStore.StoreSubtree("st-new", rawData, 100); err != nil {
+	if err = subtreeStore.StoreSubtree("st-new", rawData, 100); err != nil {
 		t.Fatalf("failed to store subtree: %v", err)
 	}
 
@@ -274,7 +274,7 @@ func TestBlockMetadataFetch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/block/") && !strings.HasSuffix(r.URL.Path, "/json") {
 			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Write(payload)
+			_, _ = w.Write(payload)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)

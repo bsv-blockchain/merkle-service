@@ -58,7 +58,7 @@ func (b *BaseService) SetStarted(started bool) {
 }
 
 // WaitForShutdown blocks until a SIGTERM or SIGINT signal is received,
-// or until the provided context is cancelled.
+// or until the provided context is canceled.
 func (b *BaseService) WaitForShutdown(ctx context.Context) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -67,7 +67,7 @@ func (b *BaseService) WaitForShutdown(ctx context.Context) {
 	case sig := <-sigCh:
 		b.Logger.Info("received shutdown signal", "signal", sig.String())
 	case <-ctx.Done():
-		b.Logger.Info("context cancelled, shutting down")
+		b.Logger.Info("context canceled, shutting down")
 	}
 
 	signal.Stop(sigCh)

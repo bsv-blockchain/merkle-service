@@ -40,7 +40,7 @@ func TestSweeper_CascadesRegistrationChildren(t *testing.T) {
 
 	// Parent row should be gone.
 	var parentCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM registrations WHERE txid = ?", "tx-old").Scan(&parentCount); err != nil {
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM registrations WHERE txid = ?", "tx-old").Scan(&parentCount); err != nil {
 		t.Fatal(err)
 	}
 	if parentCount != 0 {
@@ -49,7 +49,7 @@ func TestSweeper_CascadesRegistrationChildren(t *testing.T) {
 
 	// And — the bug: child rows must also be gone.
 	var orphanCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM registration_urls WHERE txid = ?", "tx-old").Scan(&orphanCount); err != nil {
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM registration_urls WHERE txid = ?", "tx-old").Scan(&orphanCount); err != nil {
 		t.Fatal(err)
 	}
 	if orphanCount != 0 {
@@ -82,13 +82,13 @@ func TestSweeper_CascadesAccumulatorChildren(t *testing.T) {
 	// Insert an expired parent + entries directly to simulate what would
 	// otherwise require waiting on real time. The shape mirrors what Append
 	// would produce.
-	if _, err := db.Exec(
+	if _, err := db.ExecContext(context.Background(),
 		"INSERT INTO callback_accumulator (block_hash, expires_at) VALUES (?, datetime('now', '-1 hour'))",
 		"blk-old"); err != nil {
 		t.Fatal(err)
 	}
 	for i, txns := range [][]string{{"tx-old-1"}, {"tx-old-2", "tx-old-3"}} {
-		if _, err := db.Exec(
+		if _, err := db.ExecContext(context.Background(),
 			`INSERT INTO callback_accumulator_entries
                 (block_hash, callback_url, subtree_index, txids_json, stump_data)
              VALUES (?, ?, ?, ?, ?)`,
@@ -102,7 +102,7 @@ func TestSweeper_CascadesAccumulatorChildren(t *testing.T) {
 
 	// Parent gone.
 	var parentCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM callback_accumulator WHERE block_hash = ?", "blk-old").Scan(&parentCount); err != nil {
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM callback_accumulator WHERE block_hash = ?", "blk-old").Scan(&parentCount); err != nil {
 		t.Fatal(err)
 	}
 	if parentCount != 0 {
@@ -111,7 +111,7 @@ func TestSweeper_CascadesAccumulatorChildren(t *testing.T) {
 
 	// No orphan child rows.
 	var orphanCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM callback_accumulator_entries WHERE block_hash = ?", "blk-old").Scan(&orphanCount); err != nil {
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM callback_accumulator_entries WHERE block_hash = ?", "blk-old").Scan(&orphanCount); err != nil {
 		t.Fatal(err)
 	}
 	if orphanCount != 0 {

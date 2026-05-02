@@ -31,14 +31,14 @@ func clearConfigEnv(t *testing.T) {
 		"BLOB_STORE_URL",
 	}
 	for _, v := range envVars {
-		os.Unsetenv(v)
+		_ = os.Unsetenv(v)
 	}
 }
 
 func TestLoad_Defaults(t *testing.T) {
 	clearConfigEnv(t)
-	os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	defer os.Unsetenv("CONFIG_FILE")
+	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
 
 	cfg, err := Load()
 	if err != nil {
@@ -138,38 +138,38 @@ func TestLoad_Defaults(t *testing.T) {
 
 func TestLoad_EnvOverrides(t *testing.T) {
 	clearConfigEnv(t)
-	os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	defer os.Unsetenv("CONFIG_FILE")
+	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
 
-	os.Setenv("MODE", "microservice")
-	os.Setenv("API_PORT", "9090")
-	os.Setenv("AEROSPIKE_HOST", "aerospike.example.com")
-	os.Setenv("AEROSPIKE_PORT", "3001")
-	os.Setenv("AEROSPIKE_NAMESPACE", "testns")
-	os.Setenv("AEROSPIKE_SET", "testregs")
-	os.Setenv("AEROSPIKE_SEEN_SET", "testseen")
-	os.Setenv("AEROSPIKE_MAX_RETRIES", "7")
-	os.Setenv("AEROSPIKE_RETRY_BASE_MS", "200")
-	os.Setenv("KAFKA_BROKERS", "broker1:9092,broker2:9092")
-	os.Setenv("KAFKA_SUBTREE_TOPIC", "my-subtree")
-	os.Setenv("KAFKA_BLOCK_TOPIC", "my-block")
-	os.Setenv("KAFKA_CALLBACK_TOPIC", "my-callback")
-	os.Setenv("KAFKA_CALLBACK_DLQ_TOPIC", "my-callback-dlq")
-	os.Setenv("KAFKA_SUBTREE_DLQ_TOPIC", "my-subtree-dlq")
-	os.Setenv("KAFKA_CONSUMER_GROUP", "my-group")
-	os.Setenv("P2P_NETWORK", "testnet")
-	os.Setenv("P2P_STORAGE_PATH", "/tmp/p2p-test")
-	os.Setenv("SUBTREE_STORAGE_MODE", "deferred")
-	os.Setenv("SUBTREE_DAH_OFFSET", "3")
-	os.Setenv("SUBTREE_CACHE_MAX_MB", "128")
-	os.Setenv("SUBTREE_MAX_ATTEMPTS", "7")
-	os.Setenv("BLOCK_WORKER_POOL_SIZE", "32")
-	os.Setenv("BLOCK_POST_MINE_TTL_SEC", "3600")
-	os.Setenv("CALLBACK_MAX_RETRIES", "10")
-	os.Setenv("CALLBACK_BACKOFF_BASE_SEC", "60")
-	os.Setenv("CALLBACK_TIMEOUT_SEC", "20")
-	os.Setenv("CALLBACK_SEEN_THRESHOLD", "5")
-	os.Setenv("BLOB_STORE_URL", "s3://my-bucket")
+	_ = os.Setenv("MODE", "microservice")
+	_ = os.Setenv("API_PORT", "9090")
+	_ = os.Setenv("AEROSPIKE_HOST", "aerospike.example.com")
+	_ = os.Setenv("AEROSPIKE_PORT", "3001")
+	_ = os.Setenv("AEROSPIKE_NAMESPACE", "testns")
+	_ = os.Setenv("AEROSPIKE_SET", "testregs")
+	_ = os.Setenv("AEROSPIKE_SEEN_SET", "testseen")
+	_ = os.Setenv("AEROSPIKE_MAX_RETRIES", "7")
+	_ = os.Setenv("AEROSPIKE_RETRY_BASE_MS", "200")
+	_ = os.Setenv("KAFKA_BROKERS", "broker1:9092,broker2:9092")
+	_ = os.Setenv("KAFKA_SUBTREE_TOPIC", "my-subtree")
+	_ = os.Setenv("KAFKA_BLOCK_TOPIC", "my-block")
+	_ = os.Setenv("KAFKA_CALLBACK_TOPIC", "my-callback")
+	_ = os.Setenv("KAFKA_CALLBACK_DLQ_TOPIC", "my-callback-dlq")
+	_ = os.Setenv("KAFKA_SUBTREE_DLQ_TOPIC", "my-subtree-dlq")
+	_ = os.Setenv("KAFKA_CONSUMER_GROUP", "my-group")
+	_ = os.Setenv("P2P_NETWORK", "testnet")
+	_ = os.Setenv("P2P_STORAGE_PATH", "/tmp/p2p-test")
+	_ = os.Setenv("SUBTREE_STORAGE_MODE", "deferred")
+	_ = os.Setenv("SUBTREE_DAH_OFFSET", "3")
+	_ = os.Setenv("SUBTREE_CACHE_MAX_MB", "128")
+	_ = os.Setenv("SUBTREE_MAX_ATTEMPTS", "7")
+	_ = os.Setenv("BLOCK_WORKER_POOL_SIZE", "32")
+	_ = os.Setenv("BLOCK_POST_MINE_TTL_SEC", "3600")
+	_ = os.Setenv("CALLBACK_MAX_RETRIES", "10")
+	_ = os.Setenv("CALLBACK_BACKOFF_BASE_SEC", "60")
+	_ = os.Setenv("CALLBACK_TIMEOUT_SEC", "20")
+	_ = os.Setenv("CALLBACK_SEEN_THRESHOLD", "5")
+	_ = os.Setenv("BLOB_STORE_URL", "s3://my-bucket")
 
 	defer clearConfigEnv(t)
 
@@ -242,11 +242,11 @@ callback:
   maxRetries: 99
 `)
 	tmpFile := t.TempDir() + "/test-config.yaml"
-	if err := os.WriteFile(tmpFile, yamlContent, 0644); err != nil {
+	if err := os.WriteFile(tmpFile, yamlContent, 0o644); err != nil { //nolint:gosec // test temp file, 0644 is fine
 		t.Fatalf("failed to write temp yaml: %v", err)
 	}
-	os.Setenv("CONFIG_FILE", tmpFile)
-	defer os.Unsetenv("CONFIG_FILE")
+	_ = os.Setenv("CONFIG_FILE", tmpFile)
+	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
 
 	cfg, err := Load()
 	if err != nil {
@@ -273,14 +273,14 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 
 	yamlContent := []byte(`mode: from-yaml`)
 	tmpFile := t.TempDir() + "/test-config.yaml"
-	if err := os.WriteFile(tmpFile, yamlContent, 0644); err != nil {
+	if err := os.WriteFile(tmpFile, yamlContent, 0o644); err != nil { //nolint:gosec // test temp file, 0644 is fine
 		t.Fatalf("failed to write temp yaml: %v", err)
 	}
-	os.Setenv("CONFIG_FILE", tmpFile)
-	os.Setenv("MODE", "from-env")
+	_ = os.Setenv("CONFIG_FILE", tmpFile)
+	_ = os.Setenv("MODE", "from-env")
 	defer func() {
-		os.Unsetenv("CONFIG_FILE")
-		os.Unsetenv("MODE")
+		_ = os.Unsetenv("CONFIG_FILE")
+		_ = os.Unsetenv("MODE")
 	}()
 
 	cfg, err := Load()
@@ -297,11 +297,11 @@ func TestLoad_InvalidYAMLReturnsError(t *testing.T) {
 
 	yamlContent := []byte(`mode: [invalid yaml`)
 	tmpFile := t.TempDir() + "/bad-config.yaml"
-	if err := os.WriteFile(tmpFile, yamlContent, 0644); err != nil {
+	if err := os.WriteFile(tmpFile, yamlContent, 0o644); err != nil { //nolint:gosec // test temp file, 0644 is fine
 		t.Fatalf("failed to write temp yaml: %v", err)
 	}
-	os.Setenv("CONFIG_FILE", tmpFile)
-	defer os.Unsetenv("CONFIG_FILE")
+	_ = os.Setenv("CONFIG_FILE", tmpFile)
+	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
 
 	_, err := Load()
 	if err == nil {
@@ -311,8 +311,8 @@ func TestLoad_InvalidYAMLReturnsError(t *testing.T) {
 
 func TestLoad_P2PMsgBusDefaults(t *testing.T) {
 	clearConfigEnv(t)
-	os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	defer os.Unsetenv("CONFIG_FILE")
+	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
 
 	cfg, err := Load()
 	if err != nil {
@@ -335,11 +335,11 @@ func TestLoad_P2PMsgBusDefaults(t *testing.T) {
 
 func TestLoad_P2PDHTModeEnvOverride(t *testing.T) {
 	clearConfigEnv(t)
-	os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	os.Setenv("P2P_DHT_MODE", "server")
+	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	_ = os.Setenv("P2P_DHT_MODE", "server")
 	defer func() {
-		os.Unsetenv("CONFIG_FILE")
-		os.Unsetenv("P2P_DHT_MODE")
+		_ = os.Unsetenv("CONFIG_FILE")
+		_ = os.Unsetenv("P2P_DHT_MODE")
 	}()
 
 	cfg, err := Load()
@@ -354,8 +354,8 @@ func TestLoad_P2PDHTModeEnvOverride(t *testing.T) {
 
 func TestLoad_LogLevelDefault(t *testing.T) {
 	clearConfigEnv(t)
-	os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	defer os.Unsetenv("CONFIG_FILE")
+	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
 
 	cfg, err := Load()
 	if err != nil {
@@ -369,11 +369,11 @@ func TestLoad_LogLevelDefault(t *testing.T) {
 
 func TestLoad_LogLevelEnvOverride(t *testing.T) {
 	clearConfigEnv(t)
-	os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	os.Setenv("LOG_LEVEL", "debug")
+	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	_ = os.Setenv("LOG_LEVEL", "debug")
 	defer func() {
-		os.Unsetenv("CONFIG_FILE")
-		os.Unsetenv("LOG_LEVEL")
+		_ = os.Unsetenv("CONFIG_FILE")
+		_ = os.Unsetenv("LOG_LEVEL")
 	}()
 
 	cfg, err := Load()

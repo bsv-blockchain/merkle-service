@@ -24,7 +24,7 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to build store registry: ", err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }()
 
 	processor := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree)
 

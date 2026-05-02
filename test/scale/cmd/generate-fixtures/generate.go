@@ -35,7 +35,7 @@ func generateAll(seed int64, instances, txidsPerInstance, subtreeCount, txidsPer
 	fmt.Println("  Wrote manifest.json")
 
 	// Step 4: Verify fixture integrity.
-	if err := verifyFixtures(manifest, txids, subtreeCount, txidsPerSubtree); err != nil {
+	if err := verifyFixtures(manifest, txids, txidsPerSubtree); err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
 	fmt.Println("  Verification passed")
@@ -46,13 +46,11 @@ func generateAll(seed int64, instances, txidsPerInstance, subtreeCount, txidsPer
 // generateTxids produces n deterministic 32-byte hashes from SHA256(seed || index).
 func generateTxids(seed int64, n int) [][]byte {
 	txids := make([][]byte, n)
-	seedBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(seedBytes, uint64(seed))
+	var input [16]byte
+	binary.BigEndian.PutUint64(input[:8], uint64(seed)) //nolint:gosec // seed is internal, not user-controlled
 	for i := 0; i < n; i++ {
-		indexBytes := make([]byte, 8)
-		binary.BigEndian.PutUint64(indexBytes, uint64(i))
-		input := append(seedBytes, indexBytes...)
-		hash := sha256.Sum256(input)
+		binary.BigEndian.PutUint64(input[8:], uint64(i))
+		hash := sha256.Sum256(input[:])
 		txids[i] = hash[:]
 	}
 	return txids
@@ -64,14 +62,14 @@ func writeTxids(path string, txids [][]byte) error {
 	for _, txid := range txids {
 		data = append(data, txid...)
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0o644) //nolint:gosec // 0644 intentional for shared fixture files
 }
 
 // writeSubtrees assigns txids to subtrees and writes each subtree file.
 // Returns the SHA256 hash of each subtree's raw data (used as subtree ID).
 func writeSubtrees(outDir string, txids [][]byte, subtreeCount, txidsPerSubtree int) ([]string, error) {
 	subtreeDir := filepath.Join(outDir, "subtrees")
-	if err := os.MkdirAll(subtreeDir, 0755); err != nil {
+	if err := os.MkdirAll(subtreeDir, 0o755); err != nil { //nolint:gosec // 0755 intentional for shared fixture dirs
 		return nil, err
 	}
 
@@ -106,7 +104,7 @@ func writeSubtrees(outDir string, txids [][]byte, subtreeCount, txidsPerSubtree 
 
 		// Write subtree file.
 		filename := filepath.Join(subtreeDir, fmt.Sprintf(fmtStr, i))
-		if err := os.WriteFile(filename, rawData, 0644); err != nil {
+		if err := os.WriteFile(filename, rawData, 0o644); err != nil { //nolint:gosec // 0644 intentional for shared fixture files
 			return nil, fmt.Errorf("writing subtree %d: %w", i, err)
 		}
 	}
@@ -116,12 +114,12 @@ func writeSubtrees(outDir string, txids [][]byte, subtreeCount, txidsPerSubtree 
 
 // Manifest describes the full test fixture layout.
 type Manifest struct {
-	Seed            int64              `json:"seed"`
-	BlockHash       string             `json:"blockHash"`
-	BlockHeight     uint32             `json:"blockHeight"`
-	TotalTxids      int                `json:"totalTxids"`
-	ArcadeInstances []ArcadeInstance   `json:"arcadeInstances"`
-	Subtrees        []SubtreeInfo      `json:"subtrees"`
+	Seed            int64            `json:"seed"`
+	BlockHash       string           `json:"blockHash"`
+	BlockHeight     uint32           `json:"blockHeight"`
+	TotalTxids      int              `json:"totalTxids"`
+	ArcadeInstances []ArcadeInstance `json:"arcadeInstances"`
+	Subtrees        []SubtreeInfo    `json:"subtrees"`
 }
 
 // ArcadeInstance describes one simulated Arcade.
@@ -135,9 +133,9 @@ type ArcadeInstance struct {
 
 // SubtreeInfo describes one subtree in the test block.
 type SubtreeInfo struct {
-	Index         int    `json:"index"`
-	Hash          string `json:"hash"`
-	TxidIndices   []int  `json:"txidIndices"` // global indices of txids in this subtree
+	Index       int    `json:"index"`
+	Hash        string `json:"hash"`
+	TxidIndices []int  `json:"txidIndices"` // global indices of txids in this subtree
 }
 
 func buildManifest(seed int64, instances, txidsPerInstance, subtreeCount, txidsPerSubtree int, subtreeHashes []string) *Manifest {
@@ -182,11 +180,11 @@ func writeManifest(path string, m *Manifest) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0o644) //nolint:gosec // 0644 intentional for shared fixture files
 }
 
 // verifyFixtures checks that all txids are assigned to exactly one subtree and one arcade instance.
-func verifyFixtures(m *Manifest, txids [][]byte, subtreeCount, txidsPerSubtree int) error {
+func verifyFixtures(m *Manifest, txids [][]byte, txidsPerSubtree int) error {
 	totalTxids := len(txids)
 
 	// Check arcade coverage.

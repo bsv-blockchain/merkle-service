@@ -18,10 +18,10 @@ type fakeClaim struct {
 	messages chan *sarama.ConsumerMessage
 }
 
-func (f *fakeClaim) Topic() string                         { return "test" }
-func (f *fakeClaim) Partition() int32                      { return 0 }
-func (f *fakeClaim) InitialOffset() int64                  { return 0 }
-func (f *fakeClaim) HighWaterMarkOffset() int64            { return 0 }
+func (f *fakeClaim) Topic() string                            { return "test" }
+func (f *fakeClaim) Partition() int32                         { return 0 }
+func (f *fakeClaim) InitialOffset() int64                     { return 0 }
+func (f *fakeClaim) HighWaterMarkOffset() int64               { return 0 }
 func (f *fakeClaim) Messages() <-chan *sarama.ConsumerMessage { return f.messages }
 
 // fakeSession is a tiny stand-in for sarama.ConsumerGroupSession. It records
@@ -45,6 +45,7 @@ func (f *fakeSession) MarkOffset(topic string, partition int32, offset int64, me
 func (f *fakeSession) Commit() {}
 func (f *fakeSession) ResetOffset(topic string, partition int32, offset int64, metadata string) {
 }
+
 func (f *fakeSession) MarkMessage(msg *sarama.ConsumerMessage, metadata string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -217,7 +218,7 @@ func TestNewConsumerConfig_InitialOffsetOldest(t *testing.T) {
 }
 
 // TestConsumeClaim_ContextCancelled verifies the loop exits cleanly when the
-// session context is cancelled mid-flight (Stop / rebalance path).
+// session context is canceled mid-flight (Stop / rebalance path).
 func TestConsumeClaim_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	session := newFakeSession(ctx)

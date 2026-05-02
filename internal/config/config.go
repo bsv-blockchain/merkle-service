@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -49,8 +50,8 @@ const (
 // nested config blocks. When Backend == "aerospike" the top-level Aerospike
 // block is used; when Backend == "sql" the Store.SQL block is used.
 type StoreConfig struct {
-	Backend string          `yaml:"backend" mapstructure:"backend"`
-	SQL     StoreSQLConfig  `yaml:"sql"     mapstructure:"sql"`
+	Backend string         `yaml:"backend" mapstructure:"backend"`
+	SQL     StoreSQLConfig `yaml:"sql"     mapstructure:"sql"`
 }
 
 // StoreSQLConfig configures the SQL backend.
@@ -80,25 +81,25 @@ type AerospikeConfig struct {
 	// node's connection pool becoming the bottleneck).
 	Host string `yaml:"host" mapstructure:"host"`
 	// Seeds is a list of seed node addresses. When non-empty, Host is ignored.
-	Seeds                []string `yaml:"seeds"                mapstructure:"seeds"`
-	Port                 int      `yaml:"port"                 mapstructure:"port"`
-	Namespace            string   `yaml:"namespace"            mapstructure:"namespace"`
-	SetName              string   `yaml:"setName"              mapstructure:"setname"`
-	SeenSet              string   `yaml:"seenSet"              mapstructure:"seenset"`
-	CallbackDedupSet     string   `yaml:"callbackDedupSet"     mapstructure:"callbackdedupset"`
-	CallbackURLRegistry  string   `yaml:"callbackUrlRegistry"  mapstructure:"callbackurlregistry"`
+	Seeds               []string `yaml:"seeds"                mapstructure:"seeds"`
+	Port                int      `yaml:"port"                 mapstructure:"port"`
+	Namespace           string   `yaml:"namespace"            mapstructure:"namespace"`
+	SetName             string   `yaml:"setName"              mapstructure:"setname"`
+	SeenSet             string   `yaml:"seenSet"              mapstructure:"seenset"`
+	CallbackDedupSet    string   `yaml:"callbackDedupSet"     mapstructure:"callbackdedupset"`
+	CallbackURLRegistry string   `yaml:"callbackUrlRegistry"  mapstructure:"callbackurlregistry"`
 	// CallbackURLRegistryTTLSec is the per-URL eviction window applied by the
 	// Aerospike callback URL registry (and the SQL sibling). URLs whose last
 	// `Add` is older than this are evicted, bounding the registry's growth so
 	// BLOCK_PROCESSED fan-out and the underlying record(s) never grow without
 	// limit. Default 7 days. See F-037 / issue #23.
-	CallbackURLRegistryTTLSec int `yaml:"callbackUrlRegistryTTLSec" mapstructure:"callbackurlregistryttlsec"`
-	SubtreeCounterSet    string   `yaml:"subtreeCounterSet"    mapstructure:"subtreecounterset"`
-	SubtreeCounterTTLSec int      `yaml:"subtreeCounterTTLSec" mapstructure:"subtreecounterttlsec"`
+	CallbackURLRegistryTTLSec int    `yaml:"callbackUrlRegistryTTLSec" mapstructure:"callbackurlregistryttlsec"`
+	SubtreeCounterSet         string `yaml:"subtreeCounterSet"    mapstructure:"subtreecounterset"`
+	SubtreeCounterTTLSec      int    `yaml:"subtreeCounterTTLSec" mapstructure:"subtreecounterttlsec"`
 	CallbackAccumulatorSet    string `yaml:"callbackAccumulatorSet"    mapstructure:"callbackaccumulatorset"`
 	CallbackAccumulatorTTLSec int    `yaml:"callbackAccumulatorTTLSec" mapstructure:"callbackaccumulatorttlsec"`
-	MaxRetries  int `yaml:"maxRetries"  mapstructure:"maxretries"`
-	RetryBaseMs int `yaml:"retryBaseMs" mapstructure:"retrybasems"`
+	MaxRetries                int    `yaml:"maxRetries"  mapstructure:"maxretries"`
+	RetryBaseMs               int    `yaml:"retryBaseMs" mapstructure:"retrybasems"`
 	// ConnectionQueueSize is the per-node connection pool size. The Aerospike
 	// Go client default is 100; under bursty BatchGet load (e.g. 14+ subtrees
 	// processed in parallel during block-time, each fanning out thousands of
@@ -413,31 +414,31 @@ func bindEnvVars(v *viper.Viper) {
 		"api.port": "API_PORT",
 
 		// Store
-		"store.backend":             "STORE_BACKEND",
-		"store.sql.driver":          "STORE_SQL_DRIVER",
-		"store.sql.dsn":             "STORE_SQL_DSN",
-		"store.sql.schema":          "STORE_SQL_SCHEMA",
-		"store.sql.sweeperinterval": "STORE_SQL_SWEEPER_INTERVAL",
-		"store.sql.maxopenconns":    "STORE_SQL_MAX_OPEN_CONNS",
-		"store.sql.maxidleconns":    "STORE_SQL_MAX_IDLE_CONNS",
+		"store.backend":                          "STORE_BACKEND",
+		"store.sql.driver":                       "STORE_SQL_DRIVER",
+		"store.sql.dsn":                          "STORE_SQL_DSN",
+		"store.sql.schema":                       "STORE_SQL_SCHEMA",
+		"store.sql.sweeperinterval":              "STORE_SQL_SWEEPER_INTERVAL",
+		"store.sql.maxopenconns":                 "STORE_SQL_MAX_OPEN_CONNS",
+		"store.sql.maxidleconns":                 "STORE_SQL_MAX_IDLE_CONNS",
 		"store.sql.callbackurlregistryretention": "STORE_SQL_CALLBACK_URL_REGISTRY_RETENTION",
 
 		// Aerospike
-		"aerospike.host":      "AEROSPIKE_HOST",
-		"aerospike.seeds":     "AEROSPIKE_SEEDS",
-		"aerospike.port":      "AEROSPIKE_PORT",
-		"aerospike.namespace": "AEROSPIKE_NAMESPACE",
-		"aerospike.setname":   "AEROSPIKE_SET",
-		"aerospike.seenset":             "AEROSPIKE_SEEN_SET",
-		"aerospike.callbackdedupset":    "AEROSPIKE_CALLBACK_DEDUP_SET",
+		"aerospike.host":                        "AEROSPIKE_HOST",
+		"aerospike.seeds":                       "AEROSPIKE_SEEDS",
+		"aerospike.port":                        "AEROSPIKE_PORT",
+		"aerospike.namespace":                   "AEROSPIKE_NAMESPACE",
+		"aerospike.setname":                     "AEROSPIKE_SET",
+		"aerospike.seenset":                     "AEROSPIKE_SEEN_SET",
+		"aerospike.callbackdedupset":            "AEROSPIKE_CALLBACK_DEDUP_SET",
 		"aerospike.callbackurlregistry":         "AEROSPIKE_CALLBACK_URL_REGISTRY",
 		"aerospike.callbackurlregistryttlsec":   "AEROSPIKE_CALLBACK_URL_REGISTRY_TTL_SEC",
-		"aerospike.subtreecounterset":         "AEROSPIKE_SUBTREE_COUNTER_SET",
-		"aerospike.subtreecounterttlsec":      "AEROSPIKE_SUBTREE_COUNTER_TTL_SEC",
-		"aerospike.callbackaccumulatorset":    "AEROSPIKE_CALLBACK_ACCUMULATOR_SET",
-		"aerospike.callbackaccumulatorttlsec": "AEROSPIKE_CALLBACK_ACCUMULATOR_TTL_SEC",
-		"aerospike.maxretries":                "AEROSPIKE_MAX_RETRIES",
-		"aerospike.retrybasems":               "AEROSPIKE_RETRY_BASE_MS",
+		"aerospike.subtreecounterset":           "AEROSPIKE_SUBTREE_COUNTER_SET",
+		"aerospike.subtreecounterttlsec":        "AEROSPIKE_SUBTREE_COUNTER_TTL_SEC",
+		"aerospike.callbackaccumulatorset":      "AEROSPIKE_CALLBACK_ACCUMULATOR_SET",
+		"aerospike.callbackaccumulatorttlsec":   "AEROSPIKE_CALLBACK_ACCUMULATOR_TTL_SEC",
+		"aerospike.maxretries":                  "AEROSPIKE_MAX_RETRIES",
+		"aerospike.retrybasems":                 "AEROSPIKE_RETRY_BASE_MS",
 		"aerospike.connectionqueuesize":         "AEROSPIKE_CONNECTION_QUEUE_SIZE",
 		"aerospike.minconnectionspernode":       "AEROSPIKE_MIN_CONNECTIONS_PER_NODE",
 		"aerospike.limitconnectionstoqueuesize": "AEROSPIKE_LIMIT_CONNECTIONS_TO_QUEUE_SIZE",
@@ -451,19 +452,19 @@ func bindEnvVars(v *viper.Viper) {
 		"aerospike.errorratewindow":             "AEROSPIKE_ERROR_RATE_WINDOW",
 
 		// Kafka
-		"kafka.brokers":        "KAFKA_BROKERS",
-		"kafka.subtreetopic":   "KAFKA_SUBTREE_TOPIC",
-		"kafka.blocktopic":     "KAFKA_BLOCK_TOPIC",
-		"kafka.callbacktopic":    "KAFKA_CALLBACK_TOPIC",
-		"kafka.callbackdlqtopic": "KAFKA_CALLBACK_DLQ_TOPIC",
-		"kafka.subtreedlqtopic":  "KAFKA_SUBTREE_DLQ_TOPIC",
+		"kafka.brokers":             "KAFKA_BROKERS",
+		"kafka.subtreetopic":        "KAFKA_SUBTREE_TOPIC",
+		"kafka.blocktopic":          "KAFKA_BLOCK_TOPIC",
+		"kafka.callbacktopic":       "KAFKA_CALLBACK_TOPIC",
+		"kafka.callbackdlqtopic":    "KAFKA_CALLBACK_DLQ_TOPIC",
+		"kafka.subtreedlqtopic":     "KAFKA_SUBTREE_DLQ_TOPIC",
 		"kafka.subtreeworktopic":    "KAFKA_SUBTREE_WORK_TOPIC",
 		"kafka.subtreeworkdlqtopic": "KAFKA_SUBTREE_WORK_DLQ_TOPIC",
 		"kafka.consumergroup":       "KAFKA_CONSUMER_GROUP",
 
 		// P2P
-		"p2p.network":     "P2P_NETWORK",
-		"p2p.storagepath": "P2P_STORAGE_PATH",
+		"p2p.network":               "P2P_NETWORK",
+		"p2p.storagepath":           "P2P_STORAGE_PATH",
 		"p2p.msgbus.dhtmode":        "P2P_DHT_MODE",
 		"p2p.msgbus.port":           "P2P_PORT",
 		"p2p.msgbus.announceaddrs":  "P2P_ANNOUNCE_ADDRS",
@@ -490,10 +491,10 @@ func bindEnvVars(v *viper.Viper) {
 		"block.batchgetconcurrency": "BLOCK_BATCH_GET_CONCURRENCY",
 
 		// Callback
-		"callback.maxretries":     "CALLBACK_MAX_RETRIES",
-		"callback.backoffbasesec": "CALLBACK_BACKOFF_BASE_SEC",
-		"callback.timeoutsec":     "CALLBACK_TIMEOUT_SEC",
-		"callback.seenthreshold":  "CALLBACK_SEEN_THRESHOLD",
+		"callback.maxretries":          "CALLBACK_MAX_RETRIES",
+		"callback.backoffbasesec":      "CALLBACK_BACKOFF_BASE_SEC",
+		"callback.timeoutsec":          "CALLBACK_TIMEOUT_SEC",
+		"callback.seenthreshold":       "CALLBACK_SEEN_THRESHOLD",
 		"callback.dedupttlsec":         "CALLBACK_DEDUP_TTL_SEC",
 		"callback.deliveryworkers":     "CALLBACK_DELIVERY_WORKERS",
 		"callback.maxconnsperhost":     "CALLBACK_MAX_CONNS_PER_HOST",
@@ -542,7 +543,8 @@ func Load() (*Config, error) {
 
 	// Read config file (ignore file-not-found).
 	if err := v.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+		var notFoundErr viper.ConfigFileNotFoundError
+		if errors.As(err, &notFoundErr) {
 			// No config file found — use defaults + env vars only.
 		} else if os.IsNotExist(err) {
 			// Explicit CONFIG_FILE path doesn't exist — use defaults + env vars only.

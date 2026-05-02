@@ -27,7 +27,8 @@ func TestDeliveryHTTPClient_BlocksLoopbackByDefault(t *testing.T) {
 	client := newDeliveryHTTPClient(cfg)
 
 	// httptest binds to 127.0.0.1; attempting to reach it must fail.
-	resp, err := client.Get(srv.URL)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	resp, err := client.Do(req)
 	if err == nil {
 		_ = resp.Body.Close()
 		t.Fatalf("expected dial-time block, got status %d", resp.StatusCode)
@@ -52,7 +53,8 @@ func TestDeliveryHTTPClient_AllowPrivateOptIn(t *testing.T) {
 	cfg := config.CallbackConfig{TimeoutSec: 5, AllowPrivateIPs: true}
 	client := newDeliveryHTTPClient(cfg)
 
-	resp, err := client.Get(srv.URL)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("expected success with allowPrivateIPs=true, got %v", err)
 	}
@@ -74,7 +76,7 @@ func TestDeliverCallback_RefusesPrivateIPViaTransport(t *testing.T) {
 	cfg.Callback.AllowPrivateIPs = false
 	client := newDeliveryHTTPClient(cfg.Callback)
 
-	ds, _, _, _ := newTestDeliveryServiceWithStumps(t, cfg, client)
+	ds, _, _, _ := newTestDeliveryServiceWithStumps(t, cfg, client) //nolint:dogsled // helper returns four values; only ds is needed here
 
 	msg := &kafka.CallbackTopicMessage{
 		// Valid public-looking URL parse, but resolves to loopback.

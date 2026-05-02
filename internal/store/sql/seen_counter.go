@@ -43,26 +43,28 @@ func (s *seenCounter) Increment(txid, subtreeID string) (*storepkg.IncrementResu
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Ensure the parent counter row exists (no-op if already there).
-	qIns := fmt.Sprintf("INSERT INTO seen_counters (txid) VALUES (%s)%s",
+	qIns := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"INSERT INTO seen_counters (txid) VALUES (%s)%s",
 		s.d.placeholder(1), s.d.onConflictDoNothing)
-	if _, err := tx.ExecContext(ctx, qIns, txid); err != nil {
+	if _, err = tx.ExecContext(ctx, qIns, txid); err != nil {
 		return nil, fmt.Errorf("insert seen_counters: %w", err)
 	}
 
 	// Idempotent append of subtreeID.
-	qSub := fmt.Sprintf("INSERT INTO seen_counter_subtrees (txid, subtree_id) VALUES (%s, %s)%s",
+	qSub := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"INSERT INTO seen_counter_subtrees (txid, subtree_id) VALUES (%s, %s)%s",
 		s.d.placeholder(1), s.d.placeholder(2), s.d.onConflictDoNothing)
-	if _, err := tx.ExecContext(ctx, qSub, txid, subtreeID); err != nil {
+	if _, err = tx.ExecContext(ctx, qSub, txid, subtreeID); err != nil {
 		return nil, fmt.Errorf("insert seen_counter_subtrees: %w", err)
 	}
 
 	// Count distinct subtrees for this txid.
-	qCount := fmt.Sprintf("SELECT COUNT(*) FROM seen_counter_subtrees WHERE txid = %s", s.d.placeholder(1))
+	qCount := fmt.Sprintf("SELECT COUNT(*) FROM seen_counter_subtrees WHERE txid = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
 	var count int
-	if err := tx.QueryRowContext(ctx, qCount, txid).Scan(&count); err != nil {
+	if err = tx.QueryRowContext(ctx, qCount, txid).Scan(&count); err != nil {
 		return nil, fmt.Errorf("count subtrees: %w", err)
 	}
 
@@ -93,7 +95,8 @@ func (s *seenCounter) tryFireThreshold(ctx context.Context, tx *sql.Tx, txid str
 		// Postgres: UPDATE … RETURNING. RETURNING emits a row only when the
 		// WHERE matches, so the presence of a result row IS the false->true
 		// transition signal.
-		q := fmt.Sprintf(`UPDATE seen_counters
+		q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+			`UPDATE seen_counters
             SET threshold_fired = 1
             WHERE txid = %s AND threshold_fired = 0
             RETURNING 1`, s.d.placeholder(1))
@@ -112,7 +115,8 @@ func (s *seenCounter) tryFireThreshold(ctx context.Context, tx *sql.Tx, txid str
 	// portability with older builds by inspecting RowsAffected: the WHERE
 	// filter on threshold_fired = 0 makes the UPDATE itself the CAS, and
 	// RowsAffected > 0 means we won the race.
-	q := fmt.Sprintf(`UPDATE seen_counters
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		`UPDATE seen_counters
         SET threshold_fired = 1
         WHERE txid = %s AND threshold_fired = 0`, s.d.placeholder(1))
 	res, err := tx.ExecContext(ctx, q, txid)

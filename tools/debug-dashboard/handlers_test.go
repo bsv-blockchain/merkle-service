@@ -19,7 +19,7 @@ func TestHandleCallbackReceive_ValidPayload(t *testing.T) {
 	}
 
 	body := `{"txid":"abc123","status":"SEEN_ON_NETWORK"}`
-	req := httptest.NewRequest(http.MethodPost, "/callbacks/receive", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/callbacks/receive", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.handleCallbackReceive(w, req)
@@ -53,9 +53,9 @@ func TestHandleRegister_CustomCallbackURL(t *testing.T) {
 	var receivedPayload map[string]string
 	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &receivedPayload)
+		_ = json.Unmarshal(body, &receivedPayload)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	defer mockAPI.Close()
 
@@ -74,7 +74,7 @@ func TestHandleRegister_CustomCallbackURL(t *testing.T) {
 	form := url.Values{}
 	form.Set("txid", txid)
 	form.Set("callbackUrl", customURL)
-	req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(form.Encode()))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/register", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 
@@ -117,7 +117,7 @@ func TestHandleRegister_EmptyCallbackURL(t *testing.T) {
 	form := url.Values{}
 	form.Set("txid", txid)
 	form.Set("callbackUrl", "")
-	req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(form.Encode()))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/register", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 
@@ -135,9 +135,9 @@ func TestHandleRegister_DefaultCallbackURL(t *testing.T) {
 	var receivedPayload map[string]string
 	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &receivedPayload)
+		_ = json.Unmarshal(body, &receivedPayload)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	defer mockAPI.Close()
 
@@ -156,7 +156,7 @@ func TestHandleRegister_DefaultCallbackURL(t *testing.T) {
 	form := url.Values{}
 	form.Set("txid", txid)
 	form.Set("callbackUrl", defaultURL)
-	req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(form.Encode()))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/register", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 
@@ -178,7 +178,7 @@ func TestHandleStump_Returns200(t *testing.T) {
 		logger:        testLogger(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/stump", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/stump", nil)
 	w := httptest.NewRecorder()
 
 	h.handleStump(w, req)

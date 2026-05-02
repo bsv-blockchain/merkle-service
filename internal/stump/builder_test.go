@@ -392,9 +392,19 @@ func TestNextPowerOfTwo(t *testing.T) {
 		input    int
 		expected int
 	}{
-		{0, 1}, {1, 1}, {2, 2}, {3, 4}, {4, 4},
-		{5, 8}, {7, 8}, {8, 8}, {9, 16}, {10, 16},
-		{15, 16}, {16, 16}, {17, 32},
+		{0, 1},
+		{1, 1},
+		{2, 2},
+		{3, 4},
+		{4, 4},
+		{5, 8},
+		{7, 8},
+		{8, 8},
+		{9, 16},
+		{10, 16},
+		{15, 16},
+		{16, 16},
+		{17, 32},
 	}
 	for _, tc := range tests {
 		got := nextPowerOfTwo(tc.input)
@@ -541,7 +551,7 @@ func TestEndToEnd_10Transactions_BRC74BUMP(t *testing.T) {
 		}
 	}
 	for idx := range registeredIndices {
-		if !txidOffsets[uint64(idx)] {
+		if !txidOffsets[uint64(idx)] { //nolint:gosec // idx is a tree index bounded by test data size
 			t.Errorf("registered txid at index %d not found in level 0 with TxID=true", idx)
 		}
 	}
@@ -552,7 +562,7 @@ func TestEndToEnd_10Transactions_BRC74BUMP(t *testing.T) {
 		allOffsets[leaf.Offset] = true
 	}
 	for idx := range registeredIndices {
-		siblingIdx := uint64(idx ^ 1)
+		siblingIdx := uint64(idx ^ 1) //nolint:gosec // idx is a tree index bounded by test data size
 		if !allOffsets[siblingIdx] {
 			t.Errorf("missing sibling at offset %d for registered txid at %d", siblingIdx, idx)
 		}

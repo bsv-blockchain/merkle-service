@@ -78,6 +78,7 @@ func (f *callbackFailingProducer) AbortTxn() error  { return nil }
 func (f *callbackFailingProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
 	return nil
 }
+
 func (f *callbackFailingProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
 	return nil
 }
@@ -197,7 +198,7 @@ func (s *staticRegStore) BatchGet(txids []string) (map[string][]string, error) {
 	}
 	return out, nil
 }
-func (s *staticRegStore) UpdateTTL(txid string, ttl time.Duration) error          { return nil }
+func (s *staticRegStore) UpdateTTL(txid string, ttl time.Duration) error         { return nil }
 func (s *staticRegStore) BatchUpdateTTL(txids []string, ttl time.Duration) error { return nil }
 
 // rawSubtreeServer serves a raw 32-byte-hash subtree payload at any path. The
@@ -674,8 +675,8 @@ func TestHandleMessage_HappyPath_DecrementToZeroEmitsBlockProcessed(t *testing.T
 // getAllErr, when non-nil, causes GetAll to fail — used to drive the F-014
 // "registry lookup error during emit" path.
 type fakeURLRegistry struct {
-	urls       []string
-	getAllErr  error
+	urls      []string
+	getAllErr error
 }
 
 func (f *fakeURLRegistry) Add(callbackURL string) error { return nil }
@@ -949,4 +950,3 @@ func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsErr
 		t.Errorf("expected counter Decrement called once on DLQ path, got %d", got)
 	}
 }
-

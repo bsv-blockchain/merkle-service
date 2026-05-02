@@ -4,7 +4,6 @@
 # persistent connection to the BSV network and publishes subtree/block
 # messages to Kafka. Running multiple replicas would cause duplicate messages.
 # Use a second replica only for failover (with leader election or standby).
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

@@ -29,19 +29,19 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to build store registry: ", err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }()
 
 	subtreeProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.SubtreeTopic, logger)
 	if err != nil {
 		log.Fatal("failed to create subtree producer: ", err)
 	}
-	defer subtreeProducer.Close()
+	defer func() { _ = subtreeProducer.Close() }()
 
 	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, logger)
 	if err != nil {
 		log.Fatal("failed to create block producer: ", err)
 	}
-	defer blockProducer.Close()
+	defer func() { _ = blockProducer.Close() }()
 
 	apiServer := api.NewServer(cfg.API, registry.Registration, registry.CallbackURLRegistry, registry.Health, logger)
 	apiServer.SetAllowPrivateCallbackIPs(cfg.Callback.AllowPrivateIPs)

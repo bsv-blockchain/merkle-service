@@ -34,7 +34,7 @@ type Leaf struct {
 //
 // The resulting STUMP follows BRC-0074 BUMP format where the subtree root
 // replaces the block merkle root.
-func Build(blockHeight uint64, leaves [][]byte, internalNodes [][]byte, registeredIndices map[int]string) *STUMP {
+func Build(blockHeight uint64, leaves, internalNodes [][]byte, registeredIndices map[int]string) *STUMP {
 	if len(registeredIndices) == 0 || len(leaves) == 0 {
 		return nil
 	}
@@ -102,20 +102,20 @@ func Build(blockHeight uint64, leaves [][]byte, internalNodes [][]byte, register
 		for idx := range needed {
 			// At level 0, include the registered txid itself.
 			if level == 0 {
-				if _, isReg := registeredIndices[idx]; isReg && !addedOffsets[uint64(idx)] {
+				if _, isReg := registeredIndices[idx]; isReg && !addedOffsets[uint64(idx)] { //nolint:gosec // idx is a tree index, bounded by block size
 					pathLeaves = append(pathLeaves, Leaf{
-						Offset: uint64(idx),
+						Offset: uint64(idx), //nolint:gosec // idx is a tree index, bounded by block size
 						Hash:   leaves[idx],
 						TxID:   true,
 					})
-					addedOffsets[uint64(idx)] = true
+					addedOffsets[uint64(idx)] = true //nolint:gosec // idx is a tree index, bounded by block size
 				}
 			}
 
 			// Add sibling hash needed for proof.
 			siblingIdx := idx ^ 1
-			if !addedOffsets[uint64(siblingIdx)] {
-				leaf := Leaf{Offset: uint64(siblingIdx)}
+			if !addedOffsets[uint64(siblingIdx)] { //nolint:gosec // siblingIdx is a tree index, bounded by block size
+				leaf := Leaf{Offset: uint64(siblingIdx)} //nolint:gosec // siblingIdx is a tree index, bounded by block size
 
 				if siblingIdx >= realCount {
 					// Sibling is beyond real data — verifier duplicates the working hash.
@@ -138,7 +138,7 @@ func Build(blockHeight uint64, leaves [][]byte, internalNodes [][]byte, register
 				}
 
 				pathLeaves = append(pathLeaves, leaf)
-				addedOffsets[uint64(siblingIdx)] = true
+				addedOffsets[uint64(siblingIdx)] = true //nolint:gosec // siblingIdx is a tree index, bounded by block size
 			}
 
 			nextNeeded[idx/2] = true

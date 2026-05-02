@@ -22,7 +22,7 @@ func TestFileBlobStore_SetCreatesParentDir(t *testing.T) {
 	key := "stump/3292be80a8cd32bc53582b666a1f13564259281a256a6b40aae0bc83c4d50a4d"
 	payload := []byte("stump-bytes")
 
-	if err := bs.Set(key, payload); err != nil {
+	if err = bs.Set(key, payload); err != nil {
 		t.Fatalf("Set with nested key: %v", err)
 	}
 
@@ -164,7 +164,7 @@ func TestFileBlobStore_RejectsPathTraversalKeys(t *testing.T) {
 	outside := t.TempDir()
 	sentinelPath := filepath.Join(outside, "secret")
 	sentinelData := []byte("DO NOT TOUCH")
-	if err := os.WriteFile(sentinelPath, sentinelData, 0o600); err != nil {
+	if err = os.WriteFile(sentinelPath, sentinelData, 0o600); err != nil {
 		t.Fatalf("seeding sentinel: %v", err)
 	}
 
@@ -182,24 +182,23 @@ func TestFileBlobStore_RejectsPathTraversalKeys(t *testing.T) {
 	}
 
 	for _, tc := range traversalCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if err := bs.Set(tc.key, []byte("pwn")); err == nil {
+			if err = bs.Set(tc.key, []byte("pwn")); err == nil {
 				t.Errorf("Set(%q) accepted; want rejection", tc.key)
 			} else if !errors.Is(err, ErrBlobKeyEscapesRoot) {
 				t.Errorf("Set(%q) error = %v; want ErrBlobKeyEscapesRoot", tc.key, err)
 			}
-			if _, err := bs.Get(tc.key); err == nil {
+			if _, err = bs.Get(tc.key); err == nil {
 				t.Errorf("Get(%q) accepted; want rejection", tc.key)
 			} else if !errors.Is(err, ErrBlobKeyEscapesRoot) {
 				t.Errorf("Get(%q) error = %v; want ErrBlobKeyEscapesRoot", tc.key, err)
 			}
-			if _, err := bs.GetIoReader(tc.key); err == nil {
+			if _, err = bs.GetIoReader(tc.key); err == nil {
 				t.Errorf("GetIoReader(%q) accepted; want rejection", tc.key)
 			} else if !errors.Is(err, ErrBlobKeyEscapesRoot) {
 				t.Errorf("GetIoReader(%q) error = %v; want ErrBlobKeyEscapesRoot", tc.key, err)
 			}
-			if err := bs.Del(tc.key); err == nil {
+			if err = bs.Del(tc.key); err == nil {
 				t.Errorf("Del(%q) accepted; want rejection", tc.key)
 			} else if !errors.Is(err, ErrBlobKeyEscapesRoot) {
 				t.Errorf("Del(%q) error = %v; want ErrBlobKeyEscapesRoot", tc.key, err)
@@ -209,7 +208,7 @@ func TestFileBlobStore_RejectsPathTraversalKeys(t *testing.T) {
 
 	// The sentinel must still exist with original contents — a single
 	// traversal that snuck through would either delete it or rewrite it.
-	got, err := os.ReadFile(sentinelPath)
+	got, err := os.ReadFile(sentinelPath) //nolint:gosec // sentinelPath is a test-controlled temp path
 	if err != nil {
 		t.Fatalf("sentinel disappeared: %v", err)
 	}
@@ -239,7 +238,6 @@ func TestFileBlobStore_AcceptsValidKeys(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			payload := []byte("payload-" + tc.name)
 			if err := bs.Set(tc.key, payload); err != nil {

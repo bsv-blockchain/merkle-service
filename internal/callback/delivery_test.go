@@ -60,12 +60,13 @@ func (m *mockSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
 	return sarama.ProducerTxnFlagReady
 }
 
-func (m *mockSyncProducer) BeginTxn() error { return nil }
+func (m *mockSyncProducer) BeginTxn() error  { return nil }
 func (m *mockSyncProducer) CommitTxn() error { return nil }
-func (m *mockSyncProducer) AbortTxn() error { return nil }
+func (m *mockSyncProducer) AbortTxn() error  { return nil }
 func (m *mockSyncProducer) AddOffsetsToTxn(offsets map[string][]*sarama.PartitionOffsetMetadata, groupId string) error {
 	return nil
 }
+
 func (m *mockSyncProducer) AddMessageToTxn(msg *sarama.ConsumerMessage, groupId string, metadata *string) error {
 	return nil
 }
@@ -268,7 +269,6 @@ func TestDeliverCallback_Non2xxReturnsError(t *testing.T) {
 	}
 
 	for _, code := range statusCodes {
-		code := code
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(code)
@@ -297,7 +297,6 @@ func TestDeliverCallback_2xxStatusesSucceed(t *testing.T) {
 	statusCodes := []int{200, 201, 202, 204}
 
 	for _, code := range statusCodes {
-		code := code
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(code)
@@ -325,7 +324,7 @@ func TestDeliverCallback_2xxStatusesSucceed(t *testing.T) {
 // TestProcessDelivery_RetriesViaKafkaRepublish asserts that an HTTP failure
 // with retries available causes the message to be republished to the
 // callback topic (the durable side-effect) before processDelivery returns
-// nil. The original behaviour parked retries in a time.AfterFunc — that's
+// nil. The original behavior parked retries in a time.AfterFunc — that's
 // what F-021 is fixing.
 func TestProcessDelivery_RetriesViaKafkaRepublish(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

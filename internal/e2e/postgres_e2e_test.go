@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,9 @@ func startPostgres(ctx context.Context, t *testing.T) (dsn string) {
 		),
 	)
 	if err != nil {
+		if strings.Contains(err.Error(), "get provider") || strings.Contains(err.Error(), "Docker") {
+			t.Skipf("Docker not available; skipping: %v", err)
+		}
 		t.Fatalf("start postgres: %v", err)
 	}
 	t.Cleanup(func() {

@@ -32,7 +32,7 @@ type aerospikeSeenCounter struct {
 
 var _ SeenCounterStore = (*aerospikeSeenCounter)(nil)
 
-func NewSeenCounterStore(client *AerospikeClient, setName string, threshold int, maxRetries int, retryBaseMs int, logger *slog.Logger) SeenCounterStore {
+func NewSeenCounterStore(client *AerospikeClient, setName string, threshold, maxRetries, retryBaseMs int, logger *slog.Logger) SeenCounterStore {
 	return &aerospikeSeenCounter{
 		client:      client,
 		setName:     setName,
@@ -56,7 +56,7 @@ func NewSeenCounterStore(client *AerospikeClient, setName string, threshold int,
 // and the marker write were two unrelated operations, so two concurrent
 // observations could both pass `alreadyFired == false` and emit duplicate
 // SEEN_MULTIPLE_NODES callbacks.
-func (s *aerospikeSeenCounter) Increment(txid string, subtreeID string) (*IncrementResult, error) {
+func (s *aerospikeSeenCounter) Increment(txid, subtreeID string) (*IncrementResult, error) {
 	key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create key: %w", err)

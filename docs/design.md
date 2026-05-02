@@ -1,10 +1,10 @@
-  ---                                                                                    
-  Arcade + Merkle Service Integration Design                                             
-                                                                                         
-  Overview                                                                               
-                                                                                         
+  ---
+  Arcade + Merkle Service Integration Design
+
+  Overview
+
   Arcade is a BSV transaction broadcast and status tracking service. Merkle Service is an
-   external service that monitors the blockchain for mined transactions and delivers     
+   external service that monitors the blockchain for mined transactions and delivers
   cryptographic proofs (STUMPs) back to Arcade via HTTP callbacks. Together they provide
   end-to-end transaction lifecycle tracking: from submission through broadcast, mining
   confirmation, and final merkle proof construction.

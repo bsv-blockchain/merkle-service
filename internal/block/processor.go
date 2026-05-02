@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/IBM/sarama"
+
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
@@ -17,17 +18,18 @@ import (
 // Processor implements the block processor service.
 type Processor struct {
 	service.BaseService
-	kafkaCfg             config.KafkaConfig
-	blockCfg             config.BlockConfig
-	datahubCfg           config.DataHubConfig
-	consumer             *kafka.Consumer
-	subtreeWorkProducer  *kafka.Producer
-	regStore             store.RegistrationStore
-	subtreeStore         store.SubtreeStore
-	urlRegistry          store.CallbackURLRegistry
-	subtreeCounter       store.SubtreeCounterStore
-	dataHubClient        *datahub.Client
-	dedupCache           *cache.DedupCache
+
+	kafkaCfg            config.KafkaConfig
+	blockCfg            config.BlockConfig
+	datahubCfg          config.DataHubConfig
+	consumer            *kafka.Consumer
+	subtreeWorkProducer *kafka.Producer
+	regStore            store.RegistrationStore
+	subtreeStore        store.SubtreeStore
+	urlRegistry         store.CallbackURLRegistry
+	subtreeCounter      store.SubtreeCounterStore
+	dataHubClient       *datahub.Client
+	dedupCache          *cache.DedupCache
 }
 
 func NewProcessor(
@@ -182,7 +184,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	// Pre-encode every SubtreeWorkMessage before initializing the counter or
 	// publishing anything. Encoding is deterministic; failing now means the
 	// payload is malformed and would fail again on retry, but we must not have
-	// already initialised the counter (which would leave it pointing at work
+	// already initialized the counter (which would leave it pointing at work
 	// that will never arrive). Returning an error keeps the offset un-acked so
 	// Kafka redelivers; persistent failure should be caught by an upstream DLQ
 	// policy on the block topic.
@@ -230,7 +232,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	// Publish each pre-encoded SubtreeWorkMessage. On the first publish
 	// failure we stop and return an error so the block message is NOT ack'd
 	// and NOT added to the dedup cache. On redelivery the counter is
-	// re-initialised (overwriting whatever the previous attempt left); some
+	// re-initialized (overwriting whatever the previous attempt left); some
 	// subtree work may be re-published, but the SubtreeWorkMessage retry
 	// pipeline (AttemptCount + subtree-work-dlq) is already idempotent, so
 	// duplicate fan-out is safe.

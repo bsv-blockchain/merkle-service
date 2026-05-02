@@ -53,7 +53,7 @@ type Client struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// fatalErr is signalled (non-blocking, buffered=1) when a publish loop hits
+	// fatalErr is signaled (non-blocking, buffered=1) when a publish loop hits
 	// a terminal condition (e.g. ErrPublishExhausted). Run reads from it to
 	// propagate the failure to the caller, which is expected to exit the
 	// process so an orchestrator-managed restart can re-establish state.
@@ -154,8 +154,8 @@ func (c *Client) Start(ctx context.Context) error {
 }
 
 // Run starts the client (if it has not already been started) and blocks until
-// either the supplied context is cancelled or a terminal/fatal error is
-// signalled by the publish path (e.g. ErrPublishExhausted).
+// either the supplied context is canceled or a terminal/fatal error is
+// signaled by the publish path (e.g. ErrPublishExhausted).
 //
 // On terminal error the returned error is non-nil; callers (typically a
 // process entry point) should log it and exit the process with a non-zero
@@ -188,7 +188,7 @@ func (c *Client) signalFatal(err error) {
 	case c.fatalErr <- err:
 	default:
 		// A fatal error has already been reported; drop the duplicate but
-		// still ensure the context is cancelled.
+		// still ensure the context is canceled.
 	}
 	if c.cancel != nil {
 		c.cancel()
@@ -282,7 +282,7 @@ func (c *Client) processSubtreeMessages(ctx context.Context, ch <-chan teranode.
 				return
 			}
 		case <-ctx.Done():
-			c.Logger.Info("subtree message loop exiting: context cancelled")
+			c.Logger.Info("subtree message loop exiting: context canceled")
 			return
 		}
 	}
@@ -306,7 +306,7 @@ func (c *Client) processBlockMessages(ctx context.Context, ch <-chan teranode.Bl
 				return
 			}
 		case <-ctx.Done():
-			c.Logger.Info("block message loop exiting: context cancelled")
+			c.Logger.Info("block message loop exiting: context canceled")
 			return
 		}
 	}
@@ -407,12 +407,12 @@ func (c *Client) publishWithRetry(ctx context.Context, producer *kafka.Producer,
 		)
 
 		if attempt == maxPublishRetries {
-			c.Logger.Error("kafka publish exhausted all retries, signalling fatal shutdown",
+			c.Logger.Error("kafka publish exhausted all retries, signaling fatal shutdown",
 				"type", msgType,
 				"key", key,
 				"valueLen", len(value),
 			)
-			return fmt.Errorf("%w: type=%s key=%s: %v", ErrPublishExhausted, msgType, key, err)
+			return fmt.Errorf("%w: type=%s key=%s: %w", ErrPublishExhausted, msgType, key, err)
 		}
 
 		select {

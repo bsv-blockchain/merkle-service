@@ -167,7 +167,7 @@ func validateTxid(s string) error {
 		return fmt.Errorf("must be exactly 64 hex characters, got %d", len(s))
 	}
 	for i, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 			return fmt.Errorf("invalid character %q at position %d", c, i)
 		}
 	}
@@ -182,11 +182,11 @@ func loadTxids(path string) ([]string, error) {
 	if path == "-" {
 		r = os.Stdin
 	} else {
-		f, err := os.Open(path)
+		f, err := os.Open(path) //nolint:gosec // path comes from CLI flag, not user HTTP input
 		if err != nil {
 			return nil, fmt.Errorf("cannot open file: %w", err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		r = f
 	}
 
@@ -241,7 +241,7 @@ func registerOne(ctx context.Context, client *http.Client, apiURL, txid, callbac
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if flagVerbose {
 		fmt.Fprintf(os.Stderr, "  → %d\n", resp.StatusCode)

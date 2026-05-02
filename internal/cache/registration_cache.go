@@ -3,7 +3,6 @@ package cache
 import (
 	"encoding/hex"
 	"log/slog"
-	"sync"
 )
 
 // RegistrationCache wraps ImprovedCache for deduplicating registration lookups.
@@ -27,7 +26,6 @@ import (
 type RegistrationCache struct {
 	cache  *ImprovedCache
 	logger *slog.Logger
-	mu     sync.RWMutex
 }
 
 // NewRegistrationCache creates a new registration cache.
@@ -82,7 +80,7 @@ func (rc *RegistrationCache) SetMultiRegistered(txids []string) error {
 
 // Invalidate removes any cached entry for txid. Safe to call for txids
 // that were never cached. Provided so an in-process /watch handler can
-// drop a stale entry as defence in depth — note that the canonical fix
+// drop a stale entry as defense in depth — note that the canonical fix
 // for F-020 is "do not cache negatives", which this cache enforces by
 // construction (there is no SetNotRegistered).
 func (rc *RegistrationCache) Invalidate(txid string) error {
@@ -101,7 +99,7 @@ func (rc *RegistrationCache) Invalidate(txid string) error {
 // isRegistered==true. The two-value signature is preserved so callers
 // can reason about cache hits explicitly. If isCached is false, the
 // caller must query the backing store.
-func (rc *RegistrationCache) GetCached(txid string) (isRegistered bool, isCached bool) {
+func (rc *RegistrationCache) GetCached(txid string) (isRegistered, isCached bool) {
 	key, err := hex.DecodeString(txid)
 	if err != nil {
 		return false, false
@@ -121,7 +119,7 @@ func (rc *RegistrationCache) GetCached(txid string) (isRegistered bool, isCached
 //
 // Because negatives are never cached, every cached entry is positive,
 // and cachedRegistered will contain every txid that hits the cache.
-func (rc *RegistrationCache) FilterUncached(txids []string) (uncached []string, cachedRegistered []string) {
+func (rc *RegistrationCache) FilterUncached(txids []string) (uncached, cachedRegistered []string) {
 	for _, txid := range txids {
 		isReg, isCached := rc.GetCached(txid)
 		if !isCached {
@@ -130,7 +128,7 @@ func (rc *RegistrationCache) FilterUncached(txids []string) (uncached []string, 
 			cachedRegistered = append(cachedRegistered, txid)
 		}
 	}
-	return
+	return uncached, cachedRegistered
 }
 
 // GetStats returns cache statistics.

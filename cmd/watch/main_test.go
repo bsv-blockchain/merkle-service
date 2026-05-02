@@ -52,11 +52,7 @@ func TestValidateTxid_Empty(t *testing.T) {
 
 // --- loadTxids ---
 
-func validTxid(n byte) string {
-	return strings.Repeat(string([]byte{n}), 0) + strings.Repeat("a", 63) + string([]byte{n+'0'-'a'+'0'})
-}
-
-func goodTxid() string { return strings.Repeat("a", 64) }
+func goodTxid() string  { return strings.Repeat("a", 64) }
 func goodTxid2() string { return strings.Repeat("b", 64) }
 
 func TestLoadTxids_File(t *testing.T) {
@@ -69,8 +65,12 @@ func TestLoadTxids_File(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.WriteString(content)
-	f.Close()
+	if _, werr := f.WriteString(content); werr != nil {
+		t.Fatal(werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		t.Fatal(cerr)
+	}
 
 	txids, err := loadTxids(f.Name())
 	if err != nil {
@@ -93,8 +93,12 @@ func TestLoadTxids_InvalidLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.WriteString(content)
-	f.Close()
+	if _, werr := f.WriteString(content); werr != nil {
+		t.Fatal(werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		t.Fatal(cerr)
+	}
 
 	_, err = loadTxids(f.Name())
 	if err == nil {
@@ -111,8 +115,12 @@ func TestLoadTxids_Stdin(t *testing.T) {
 	origStdin := os.Stdin
 	r, w, _ := os.Pipe()
 	os.Stdin = r
-	w.WriteString(content)
-	w.Close()
+	if _, err := w.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 	defer func() { os.Stdin = origStdin }()
 
 	txids, err := loadTxids("-")
@@ -132,12 +140,14 @@ func TestRegisterOne_Success(t *testing.T) {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		var req watchRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
 		if req.TxID != goodTxid() {
 			t.Errorf("expected txid %s, got %s", goodTxid(), req.TxID)
 		}
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 	defer server.Close()
 
@@ -150,7 +160,7 @@ func TestRegisterOne_Success(t *testing.T) {
 func TestRegisterOne_BadRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "invalid txid format"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid txid format"})
 	}))
 	defer server.Close()
 
@@ -167,7 +177,7 @@ func TestRegisterOne_BadRequest(t *testing.T) {
 func TestRegisterOne_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal server error"))
+		_, _ = w.Write([]byte("internal server error"))
 	}))
 	defer server.Close()
 

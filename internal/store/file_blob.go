@@ -94,7 +94,7 @@ var ErrBlobKeyEscapesRoot = errors.New("blob key escapes root directory")
 // NewFileBlobStore creates a new file-based blob store rooted at dir.
 // The directory is created if it doesn't exist.
 func NewFileBlobStore(dir string) (*FileBlobStore, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // 0755 is intentional: data dir needs group read
 		return nil, fmt.Errorf("creating blob store directory %s: %w", dir, err)
 	}
 	rootAbs, err := filepath.Abs(dir)
@@ -173,11 +173,11 @@ func (f *FileBlobStore) Set(key string, data []byte, opts ...BlobOption) error {
 	// different blob categories. os.WriteFile does not create parents, so
 	// ensure the containing directory exists before writing.
 	if parent := filepath.Dir(path); parent != "" && parent != f.rootAbs {
-		if err := os.MkdirAll(parent, 0o755); err != nil {
+		if err := os.MkdirAll(parent, 0o755); err != nil { //nolint:gosec // 0755 intentional for data dirs
 			return fmt.Errorf("creating blob parent dir %s: %w", parent, err)
 		}
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o644); err != nil { //nolint:gosec // 0644 intentional for data blobs
 		return fmt.Errorf("writing blob %s: %w", key, err)
 	}
 
@@ -203,7 +203,7 @@ func (f *FileBlobStore) Get(key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path is resolved through resolvePath which validates against rootAbs
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: %s", ErrBlobNotFound, key)

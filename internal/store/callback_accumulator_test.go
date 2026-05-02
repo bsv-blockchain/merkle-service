@@ -128,7 +128,7 @@ func TestCallbackAccumulatorStore_ReadAndDeleteRemovesRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second ReadAndDelete failed: %v", err)
 	}
-	if result2 != nil && len(result2) != 0 {
+	if len(result2) != 0 {
 		t.Errorf("expected empty result after delete, got %d entries", len(result2))
 	}
 }

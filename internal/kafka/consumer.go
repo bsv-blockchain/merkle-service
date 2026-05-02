@@ -66,7 +66,7 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 	}, nil
 }
 
-// Start begins consuming messages. Blocks until context is cancelled.
+// Start begins consuming messages. Blocks until context is canceled.
 func (c *Consumer) Start(ctx context.Context) error {
 	ctx, c.cancel = context.WithCancel(ctx)
 

@@ -14,8 +14,9 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
-	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/teranode/model"
+
+	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 )
 
 // Default per-endpoint response body caps. They are intentionally generous so
@@ -75,10 +76,10 @@ type Client struct {
 
 // NewClient creates a new DataHub client with the default per-endpoint
 // response body caps. The SSRF guard is enabled with allowPrivateIPs=true
-// for parity with this constructor's historical test-friendly behaviour
+// for parity with this constructor's historical test-friendly behavior
 // (httptest binds to 127.0.0.1). Production code MUST use
 // NewClientWithSSRFGuard so private destinations are blocked by default.
-func NewClient(timeoutSec int, maxRetries int, logger *slog.Logger) *Client {
+func NewClient(timeoutSec, maxRetries int, logger *slog.Logger) *Client {
 	return NewClientWithSSRFGuard(timeoutSec, maxRetries, 0, 0, true, logger)
 }
 
@@ -89,7 +90,7 @@ func NewClient(timeoutSec int, maxRetries int, logger *slog.Logger) *Client {
 // allowPrivateIPs=true so existing tests using httptest (127.0.0.1) keep
 // working. Production code paths should call NewClientWithSSRFGuard with
 // the operator's AllowPrivateIPs setting.
-func NewClientWithCaps(timeoutSec int, maxRetries int, maxBlockBytes int64, maxSubtreeBytes int64, logger *slog.Logger) *Client {
+func NewClientWithCaps(timeoutSec, maxRetries int, maxBlockBytes, maxSubtreeBytes int64, logger *slog.Logger) *Client {
 	return NewClientWithSSRFGuard(timeoutSec, maxRetries, maxBlockBytes, maxSubtreeBytes, true, logger)
 }
 
@@ -100,7 +101,7 @@ func NewClientWithCaps(timeoutSec int, maxRetries int, maxBlockBytes int64, maxS
 // 0. allowPrivateIPs=false (the production default) blocks
 // loopback/link-local/RFC1918/cloud-metadata destinations even if a
 // peer-supplied dataHubURL points there. Mitigates F-028.
-func NewClientWithSSRFGuard(timeoutSec int, maxRetries int, maxBlockBytes int64, maxSubtreeBytes int64, allowPrivateIPs bool, logger *slog.Logger) *Client {
+func NewClientWithSSRFGuard(timeoutSec, maxRetries int, maxBlockBytes, maxSubtreeBytes int64, allowPrivateIPs bool, logger *slog.Logger) *Client {
 	if maxBlockBytes <= 0 {
 		maxBlockBytes = DefaultMaxBlockBytes
 	}
@@ -148,12 +149,12 @@ func newSSRFAwareHTTPClient(timeoutSec int, allowPrivateIPs bool) *http.Client {
 
 // BlockHeader holds the parsed block header from a DataHub response.
 type BlockHeader struct {
-	Version       uint32 `json:"version"`
-	HashPrevBlock string `json:"hash_prev_block"`
+	Version        uint32 `json:"version"`
+	HashPrevBlock  string `json:"hash_prev_block"`
 	HashMerkleRoot string `json:"hash_merkle_root"`
-	Timestamp     uint32 `json:"timestamp"`
-	Bits          string `json:"bits"`
-	Nonce         uint32 `json:"nonce"`
+	Timestamp      uint32 `json:"timestamp"`
+	Bits           string `json:"bits"`
+	Nonce          uint32 `json:"nonce"`
 }
 
 // BlockMetadata holds the parsed response from a DataHub block endpoint.
@@ -168,7 +169,7 @@ type BlockMetadata struct {
 // dataHubURL is treated as untrusted (it flows from peer-controlled P2P
 // announcements) and is validated against the SSRF predicate before any
 // network I/O happens.
-func (c *Client) FetchSubtreeRaw(ctx context.Context, dataHubURL string, hash string) ([]byte, error) {
+func (c *Client) FetchSubtreeRaw(ctx context.Context, dataHubURL, hash string) ([]byte, error) {
 	if err := c.validateDataHubURL(dataHubURL); err != nil {
 		return nil, err
 	}
@@ -179,7 +180,7 @@ func (c *Client) FetchSubtreeRaw(ctx context.Context, dataHubURL string, hash st
 // FetchSubtree fetches and parses a subtree from a DataHub endpoint.
 // The DataHub binary endpoint returns concatenated 32-byte txid hashes,
 // not the full go-subtree Serialize() format.
-func (c *Client) FetchSubtree(ctx context.Context, dataHubURL string, hash string) (*subtreepkg.Subtree, error) {
+func (c *Client) FetchSubtree(ctx context.Context, dataHubURL, hash string) (*subtreepkg.Subtree, error) {
 	raw, err := c.FetchSubtreeRaw(ctx, dataHubURL, hash)
 	if err != nil {
 		return nil, fmt.Errorf("fetching subtree %s: %w", hash, err)
@@ -252,7 +253,7 @@ func ParseBinaryBlockMetadata(data []byte) (*BlockMetadata, error) {
 // dataHubURL is treated as untrusted (it flows from peer-controlled P2P
 // announcements) and is validated against the SSRF predicate before any
 // network I/O happens.
-func (c *Client) FetchBlockMetadata(ctx context.Context, dataHubURL string, hash string) (*BlockMetadata, error) {
+func (c *Client) FetchBlockMetadata(ctx context.Context, dataHubURL, hash string) (*BlockMetadata, error) {
 	if err := c.validateDataHubURL(dataHubURL); err != nil {
 		return nil, err
 	}
@@ -374,7 +375,7 @@ func (c *Client) doGetWithRetry(ctx context.Context, url string, maxBytes int64)
 		}
 
 		body, readErr := readCapped(resp.Body, maxBytes)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode == http.StatusNotFound {
 			return nil, fmt.Errorf("not found: %s (HTTP 404)", url)

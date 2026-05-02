@@ -9,10 +9,10 @@ import (
 type CallbackType string
 
 const (
-	CallbackSeenOnNetwork    CallbackType = "SEEN_ON_NETWORK"
+	CallbackSeenOnNetwork     CallbackType = "SEEN_ON_NETWORK"
 	CallbackSeenMultipleNodes CallbackType = "SEEN_MULTIPLE_NODES"
-	CallbackStump            CallbackType = "STUMP"
-	CallbackBlockProcessed   CallbackType = "BLOCK_PROCESSED"
+	CallbackStump             CallbackType = "STUMP"
+	CallbackBlockProcessed    CallbackType = "BLOCK_PROCESSED"
 )
 
 // SubtreeMessage represents a subtree announcement received from P2P.

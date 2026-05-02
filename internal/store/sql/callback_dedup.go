@@ -31,7 +31,8 @@ func (s *callbackDedup) Exists(txid, callbackURL, statusType string) (bool, erro
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	key := dedupKey(txid, callbackURL, statusType)
-	q := fmt.Sprintf("SELECT 1 FROM callback_dedup WHERE dedup_key = %s AND (expires_at IS NULL OR expires_at > %s)",
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"SELECT 1 FROM callback_dedup WHERE dedup_key = %s AND (expires_at IS NULL OR expires_at > %s)",
 		s.d.placeholder(1), s.d.now)
 	row := s.db.QueryRowContext(ctx, q, key)
 	var x int
@@ -55,7 +56,8 @@ func (s *callbackDedup) Record(txid, callbackURL, statusType string, ttl time.Du
 	} else {
 		expiresExpr = "NULL"
 	}
-	q := fmt.Sprintf(`INSERT INTO callback_dedup (dedup_key, expires_at) VALUES (%s, %s)
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		`INSERT INTO callback_dedup (dedup_key, expires_at) VALUES (%s, %s)
         ON CONFLICT (dedup_key) DO UPDATE SET expires_at = EXCLUDED.expires_at`,
 		s.d.placeholder(1), expiresExpr)
 	_, err := s.db.ExecContext(ctx, q, key)

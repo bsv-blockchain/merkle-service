@@ -8,7 +8,7 @@
 // AllowPrivate when an operator has explicitly allow-listed internal
 // callbacks.
 //
-// Threat model
+// # Threat model
 //
 // The /watch endpoint accepts a callback URL from a potentially untrusted
 // caller and the callback delivery worker later POSTs to that URL from
@@ -17,7 +17,7 @@
 //	http://169.254.169.254/latest/meta-data/iam/security-credentials/
 //
 // and turn the delivery worker into an SSRF primitive against cloud
-// metadata endpoints, kubernetes services, or any RFC1918 neighbour. We
+// metadata endpoints, kubernetes services, or any RFC1918 neighbor. We
 // block by destination IP rather than hostname so an attacker cannot
 // bypass via DNS, IP literal, or rebinding.
 package ssrfguard
@@ -45,11 +45,11 @@ var ErrInvalidURL = errors.New("invalid callback URL")
 // covered by IsLinkLocalUnicast, but we list them defensively so the
 // rejection message is human-readable when someone tries them by name.
 var blockedHostnames = map[string]struct{}{
-	"metadata.google.internal":           {},
-	"metadata":                           {},
-	"metadata.goog":                      {},
-	"169.254.169.254":                    {},
-	"fd00:ec2::254":                      {}, // AWS IMDSv2 link-local IPv6
+	"metadata.google.internal": {},
+	"metadata":                 {},
+	"metadata.goog":            {},
+	"169.254.169.254":          {},
+	"fd00:ec2::254":            {}, // AWS IMDSv2 link-local IPv6
 }
 
 // IsBlockedIP reports whether ip is on the SSRF deny-list. The deny-list
@@ -91,7 +91,7 @@ func IsBlockedIP(ip net.IP, allowPrivate bool) bool {
 
 // IsBlockedHostname returns true if the hostname (lowercased, port
 // stripped) matches a known cloud metadata or internal hostname.
-// Hostname-based blocking is a best-effort defence-in-depth check on top
+// Hostname-based blocking is a best-effort defense-in-depth check on top
 // of IP-based blocking; the IP check is authoritative.
 func IsBlockedHostname(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
@@ -122,7 +122,7 @@ func ValidateURL(raw string, allowPrivate bool, lookup func(host string) ([]net.
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidURL, err)
+		return fmt.Errorf("%w: %w", ErrInvalidURL, err)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
@@ -164,7 +164,7 @@ func ValidateURL(raw string, allowPrivate bool, lookup func(host string) ([]net.
 		// validation error so the caller knows their URL is unusable;
 		// a typo'd hostname must not slip through validation only to
 		// silently DLQ later.
-		return fmt.Errorf("%w: failed to resolve %s: %v", ErrInvalidURL, host, err)
+		return fmt.Errorf("%w: failed to resolve %s: %w", ErrInvalidURL, host, err)
 	}
 	if len(ips) == 0 {
 		return fmt.Errorf("%w: %s did not resolve to any addresses", ErrInvalidURL, host)
@@ -186,7 +186,7 @@ func CheckDialAddress(address string, allowPrivate bool) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		// If we can't even parse the address, fail closed.
-		return fmt.Errorf("%w: cannot parse dial address %q: %v", ErrBlockedAddress, address, err)
+		return fmt.Errorf("%w: cannot parse dial address %q: %w", ErrBlockedAddress, address, err)
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
