@@ -351,6 +351,10 @@ func (c *ImprovedCache) Set(k, v []byte) error {
 // Returns:
 // - Error if the operation fails, particularly if keys length is not a multiple of keySize
 func (c *ImprovedCache) SetMultiKeysSingleValue(keys [][]byte, value []byte, keySize int) error {
+	if keySize <= 0 {
+		return fmt.Errorf("SetMultiKeysSingleValue: keySize must be > 0; got %d", keySize)
+	}
+
 	if len(keys)%keySize != 0 {
 		return fmt.Errorf("keys length must be a multiple of keySize; got %d; want %d", len(keys), keySize)
 	}
@@ -399,6 +403,10 @@ func (c *ImprovedCache) SetMultiKeysSingleValue(keys [][]byte, value []byte, key
 // Value: single value is sent for all keys.
 // Value bytes are appended to the end of the previous value bytes.
 func (c *ImprovedCache) SetMultiKeysSingleValueAppended(keys, value []byte, keySize int) error {
+	if keySize <= 0 {
+		return fmt.Errorf("SetMultiKeysSingleValueAppended: keySize must be > 0; got %d", keySize)
+	}
+
 	if len(keys)%keySize != 0 {
 		return fmt.Errorf("keys length must be a multiple of keySize; got %d; want %d", len(keys), keySize)
 	}
@@ -442,6 +450,10 @@ func (c *ImprovedCache) SetMultiKeysSingleValueAppended(keys, value []byte, keyS
 
 // SetMulti stores multiple (k, v) entries in the cache, for different values.
 func (c *ImprovedCache) SetMulti(keys, values [][]byte) error {
+	if len(keys) != len(values) {
+		return fmt.Errorf("SetMulti: keys/values length mismatch (%d != %d)", len(keys), len(values))
+	}
+
 	batchedKeys := make([][][]byte, BucketsCount)
 	batchedValues := make([][][]byte, BucketsCount)
 
