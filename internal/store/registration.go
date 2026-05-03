@@ -29,6 +29,11 @@ type aerospikeRegistration struct {
 	maxRetries          int
 	retryBaseMs         int
 	maxCallbacksPerTxID int
+	// updateTTLOne is the per-record TTL updater used by BatchUpdateTTL. It
+	// defaults to (*aerospikeRegistration).UpdateTTL and is overridable in
+	// tests so the aggregation behavior of BatchUpdateTTL can be exercised
+	// without a live Aerospike cluster.
+	updateTTLOne func(txid string, ttl time.Duration) error
 }
 
 // Compile-time check: aerospikeRegistration satisfies RegistrationStore.
@@ -45,7 +50,7 @@ func NewRegistrationStore(client *AerospikeClient, setName string, maxRetries, r
 	if maxCallbacksPerTxID < 0 {
 		maxCallbacksPerTxID = 0
 	}
-	return &aerospikeRegistration{
+	r := &aerospikeRegistration{
 		client:              client,
 		setName:             setName,
 		logger:              logger,
@@ -53,6 +58,8 @@ func NewRegistrationStore(client *AerospikeClient, setName string, maxRetries, r
 		retryBaseMs:         retryBaseMs,
 		maxCallbacksPerTxID: maxCallbacksPerTxID,
 	}
+	r.updateTTLOne = r.UpdateTTL
+	return r
 }
 
 // addCASMaxAttempts caps how many times Add will retry the optimistic
@@ -253,16 +260,30 @@ func (s *aerospikeRegistration) UpdateTTL(txid string, ttl time.Duration) error 
 	return nil
 }
 
-// BatchUpdateTTL updates TTL for multiple txids in batch.
+// BatchUpdateTTL updates TTL for multiple txids and reports per-record failures
+// as an aggregated error. Aerospike batch operations (and our per-record
+// fallback path) report results independently per item, so we iterate every
+// txid before returning rather than fail-fast on the first error: callers can
+// tell which records were touched successfully even when others failed. The
+// returned error is non-nil if and only if at least one per-record update
+// failed; individual failures are joined via errors.Join so callers can use
+// errors.Is/errors.As on each underlying error. Each failure is also logged at
+// WARN level (the most common cause is an Aerospike namespace with
+// nsup-period=0, which rejects TTL updates outright). F-043.
 func (s *aerospikeRegistration) BatchUpdateTTL(txids []string, ttl time.Duration) error {
 	if len(txids) == 0 {
 		return nil
 	}
 
+	var errs []error
 	for _, txid := range txids {
-		if err := s.UpdateTTL(txid, ttl); err != nil {
+		if err := s.updateTTLOne(txid, ttl); err != nil {
 			s.logger.Warn("failed to update TTL (check Aerospike nsup-period config)", "txid", txid, "error", err)
+			errs = append(errs, fmt.Errorf("txid %s: %w", txid, err))
 		}
 	}
-	return nil
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("batch update TTL: %w", errors.Join(errs...))
 }
