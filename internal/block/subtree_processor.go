@@ -31,6 +31,13 @@ type RegCache interface {
 type SubtreeResult struct {
 	// CallbackGroups maps callbackURL → list of matched txids.
 	CallbackGroups map[string][]string
+	// CallbackTokens maps callbackURL → the bearer token registered for that
+	// URL on /watch. The publisher attaches the token to each
+	// CallbackTopicMessage so deliveries to arcade carry the
+	// `Authorization: Bearer <token>` header arcade requires. URLs without a
+	// configured token map to "" (no Authorization header) which preserves
+	// pre-token-rollout behavior.
+	CallbackTokens map[string]string
 	// SubtreeHash is the hash of the processed subtree.
 	SubtreeHash string
 	// StumpData is the serialized STUMP binary (BRC-0074 format).
@@ -108,6 +115,25 @@ func ProcessBlockSubtree(
 		return nil, nil
 	}
 
+	// Reduce CallbackEntry tuples back into the (txid → urls) shape that
+	// the STUMP grouping logic expects, while capturing the latest token
+	// per URL on the side. If multiple txids have the same callbackURL with
+	// different tokens (e.g. mid-rotation), the last token observed wins —
+	// in practice every txid registered against a given URL went through
+	// the same /watch payload, so they will agree.
+	registrationsByTxID := make(map[string][]string, len(registrations))
+	urlTokens := make(map[string]string)
+	for txid, entries := range registrations {
+		urls := make([]string, 0, len(entries))
+		for _, e := range entries {
+			urls = append(urls, e.URL)
+			if _, ok := urlTokens[e.URL]; !ok || e.Token != "" {
+				urlTokens[e.URL] = e.Token
+			}
+		}
+		registrationsByTxID[txid] = urls
+	}
+
 	// 6.5: Build full merkle tree from subtree nodes.
 	merkleTreeStore, err := subtreepkg.BuildMerkleTreeStoreFromBytes(nodes)
 	if err != nil {
@@ -148,7 +174,7 @@ func ProcessBlockSubtree(
 	stumpData := s.Encode()
 
 	// 6.9: Group txids by callback URL.
-	callbackGroups := stump.GroupByCallback(registrations)
+	callbackGroups := stump.GroupByCallback(registrationsByTxID)
 
 	// 6.11: Batch update registration TTLs (skip if postMineTTLSec is 0).
 	if postMineTTLSec > 0 {
@@ -170,12 +196,13 @@ func ProcessBlockSubtree(
 
 	return &SubtreeResult{
 		CallbackGroups: callbackGroups,
+		CallbackTokens: urlTokens,
 		SubtreeHash:    subtreeHash,
 		StumpData:      stumpData,
 	}, nil
 }
 
-// lookupRegistrations resolves txid → callbackURLs using the in-process
+// lookupRegistrations resolves txid → []CallbackEntry using the in-process
 // registration cache (when set) to filter out the unregistered majority before
 // issuing a single bounded BatchGet against Aerospike. The semaphore caps the
 // number of concurrent BatchGets across all callers in the process.
@@ -185,9 +212,9 @@ func lookupRegistrations(
 	regStore store.RegistrationStore,
 	regCache RegCache,
 	batchSem chan struct{},
-) (map[string][]string, error) {
+) (map[string][]store.CallbackEntry, error) {
 	if len(txids) == 0 {
-		return map[string][]string{}, nil
+		return map[string][]store.CallbackEntry{}, nil
 	}
 
 	uncached := txids
@@ -207,7 +234,7 @@ func lookupRegistrations(
 	}
 
 	if len(lookup) == 0 {
-		return map[string][]string{}, nil
+		return map[string][]store.CallbackEntry{}, nil
 	}
 
 	registered, err := batchGetWithSem(ctx, lookup, regStore, batchSem)
@@ -241,7 +268,7 @@ func batchGetWithSem(
 	txids []string,
 	regStore store.RegistrationStore,
 	batchSem chan struct{},
-) (map[string][]string, error) {
+) (map[string][]store.CallbackEntry, error) {
 	if batchSem != nil {
 		select {
 		case batchSem <- struct{}{}:

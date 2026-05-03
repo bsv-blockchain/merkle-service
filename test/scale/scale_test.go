@@ -57,7 +57,7 @@ func findNamespace() string {
 		}
 		// Verify namespace is writable with a probe write.
 		regStore := store.NewRegistrationStore(client, "ns_probe", 1, 50, 0, logger)
-		if err := regStore.Add("probe_txid", "http://probe"); err != nil {
+		if err := regStore.Add("probe_txid", "http://probe", ""); err != nil {
 			client.Close()
 			continue
 		}

@@ -36,7 +36,7 @@ func TestRegistrationStore_AddAndGet(t *testing.T) {
 	txid := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	callback := "https://example.com/cb1"
 
-	err := regStore.Add(txid, callback)
+	err := regStore.Add(txid, callback, "")
 	if err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
@@ -48,8 +48,8 @@ func TestRegistrationStore_AddAndGet(t *testing.T) {
 	if len(urls) != 1 {
 		t.Fatalf("expected 1 callback, got %d", len(urls))
 	}
-	if urls[0] != callback {
-		t.Fatalf("expected %q, got %q", callback, urls[0])
+	if urls[0].URL != callback {
+		t.Fatalf("expected %q, got %q", callback, urls[0].URL)
 	}
 }
 
@@ -64,7 +64,7 @@ func TestRegistrationStore_MultipleCallbacksSameTxid(t *testing.T) {
 	cb3 := "https://example.com/cb3"
 
 	for _, cb := range []string{cb1, cb2, cb3} {
-		if err := regStore.Add(txid, cb); err != nil {
+		if err := regStore.Add(txid, cb, ""); err != nil {
 			t.Fatalf("Add(%q) failed: %v", cb, err)
 		}
 	}
@@ -77,11 +77,16 @@ func TestRegistrationStore_MultipleCallbacksSameTxid(t *testing.T) {
 		t.Fatalf("expected 3 callbacks, got %d: %v", len(urls), urls)
 	}
 
-	// The store uses ordered list, so callbacks should be sorted.
-	expected := []string{cb1, cb2, cb3}
-	for i, u := range urls {
-		if u != expected[i] {
-			t.Errorf("callback[%d] = %q, want %q", i, u, expected[i])
+	// Reads are not guaranteed to be ordered post-token migration (the
+	// reader preserves insertion order from the bin's CDT list). Compare as
+	// a set instead.
+	got := map[string]bool{}
+	for _, u := range urls {
+		got[u.URL] = true
+	}
+	for _, want := range []string{cb1, cb2, cb3} {
+		if !got[want] {
+			t.Errorf("missing callback %q in result %+v", want, urls)
 		}
 	}
 }
@@ -95,10 +100,10 @@ func TestRegistrationStore_IdempotentAdd(t *testing.T) {
 	callback := "https://example.com/cb_dup"
 
 	// Add the same callback twice.
-	if err := regStore.Add(txid, callback); err != nil {
+	if err := regStore.Add(txid, callback, ""); err != nil {
 		t.Fatalf("first Add failed: %v", err)
 	}
-	if err := regStore.Add(txid, callback); err != nil {
+	if err := regStore.Add(txid, callback, ""); err != nil {
 		t.Fatalf("second Add failed: %v", err)
 	}
 
@@ -109,8 +114,8 @@ func TestRegistrationStore_IdempotentAdd(t *testing.T) {
 	if len(urls) != 1 {
 		t.Fatalf("expected 1 callback (idempotent), got %d: %v", len(urls), urls)
 	}
-	if urls[0] != callback {
-		t.Fatalf("expected %q, got %q", callback, urls[0])
+	if urls[0].URL != callback {
+		t.Fatalf("expected %q, got %q", callback, urls[0].URL)
 	}
 }
 
@@ -123,10 +128,10 @@ func TestRegistrationStore_BatchGet(t *testing.T) {
 	txid2 := "2222222222222222222222222222222222222222222222222222222222222222"
 	txid3 := "3333333333333333333333333333333333333333333333333333333333333333" // no registration
 
-	if err := regStore.Add(txid1, "https://example.com/a"); err != nil {
+	if err := regStore.Add(txid1, "https://example.com/a", ""); err != nil {
 		t.Fatalf("Add txid1 failed: %v", err)
 	}
-	if err := regStore.Add(txid2, "https://example.com/b"); err != nil {
+	if err := regStore.Add(txid2, "https://example.com/b", ""); err != nil {
 		t.Fatalf("Add txid2 failed: %v", err)
 	}
 
@@ -135,10 +140,10 @@ func TestRegistrationStore_BatchGet(t *testing.T) {
 		t.Fatalf("BatchGet failed: %v", err)
 	}
 
-	if len(result[txid1]) != 1 || result[txid1][0] != "https://example.com/a" {
+	if len(result[txid1]) != 1 || result[txid1][0].URL != "https://example.com/a" {
 		t.Errorf("txid1: expected [https://example.com/a], got %v", result[txid1])
 	}
-	if len(result[txid2]) != 1 || result[txid2][0] != "https://example.com/b" {
+	if len(result[txid2]) != 1 || result[txid2][0].URL != "https://example.com/b" {
 		t.Errorf("txid2: expected [https://example.com/b], got %v", result[txid2])
 	}
 	if _, exists := result[txid3]; exists {
@@ -154,7 +159,7 @@ func TestRegistrationStore_UpdateTTL(t *testing.T) {
 	txid := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	callback := "https://example.com/ttl"
 
-	if err := regStore.Add(txid, callback); err != nil {
+	if err := regStore.Add(txid, callback, ""); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
 

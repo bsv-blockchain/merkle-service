@@ -183,18 +183,36 @@ func (c *countingSubtreeCounter) value(blockHash string) int {
 }
 
 // staticRegStore is a RegistrationStore that returns a pre-configured set of
-// callback URLs for any txid lookup. Enables ProcessBlockSubtree to produce
-// non-empty CallbackGroups without reaching for Aerospike.
+// callback URLs (with optional tokens) for any txid lookup. Enables
+// ProcessBlockSubtree to produce non-empty CallbackGroups without reaching
+// for Aerospike.
 type staticRegStore struct {
-	urls []string
+	urls    []string
+	tokens  map[string]string
+	entries []store.CallbackEntry
 }
 
-func (s *staticRegStore) Add(txid, callbackURL string) error { return nil }
-func (s *staticRegStore) Get(txid string) ([]string, error)  { return s.urls, nil }
-func (s *staticRegStore) BatchGet(txids []string) (map[string][]string, error) {
-	out := make(map[string][]string, len(txids))
+func (s *staticRegStore) lookup() []store.CallbackEntry {
+	if s.entries != nil {
+		return s.entries
+	}
+	out := make([]store.CallbackEntry, 0, len(s.urls))
+	for _, u := range s.urls {
+		out = append(out, store.CallbackEntry{URL: u, Token: s.tokens[u]})
+	}
+	return out
+}
+
+func (s *staticRegStore) Add(txid, callbackURL, callbackToken string) error { return nil }
+
+func (s *staticRegStore) Get(txid string) ([]store.CallbackEntry, error) {
+	return s.lookup(), nil
+}
+
+func (s *staticRegStore) BatchGet(txids []string) (map[string][]store.CallbackEntry, error) {
+	out := make(map[string][]store.CallbackEntry, len(txids))
 	for _, txid := range txids {
-		out[txid] = s.urls
+		out[txid] = s.lookup()
 	}
 	return out, nil
 }
@@ -676,15 +694,20 @@ func TestHandleMessage_HappyPath_DecrementToZeroEmitsBlockProcessed(t *testing.T
 // "registry lookup error during emit" path.
 type fakeURLRegistry struct {
 	urls      []string
+	tokens    map[string]string
 	getAllErr error
 }
 
-func (f *fakeURLRegistry) Add(callbackURL string) error { return nil }
-func (f *fakeURLRegistry) GetAll() ([]string, error) {
+func (f *fakeURLRegistry) Add(callbackURL, callbackToken string) error { return nil }
+func (f *fakeURLRegistry) GetAll() ([]store.CallbackEntry, error) {
 	if f.getAllErr != nil {
 		return nil, f.getAllErr
 	}
-	return f.urls, nil
+	out := make([]store.CallbackEntry, 0, len(f.urls))
+	for _, u := range f.urls {
+		out = append(out, store.CallbackEntry{URL: u, Token: f.tokens[u]})
+	}
+	return out, nil
 }
 
 // --- F-014 BLOCK_PROCESSED publish-failure tests ---

@@ -677,6 +677,66 @@ func TestDedupKeyForMessage(t *testing.T) {
 	}
 }
 
+// TestDeliverCallback_AuthorizationHeaderWhenTokenSet asserts the new
+// callback-token plumbing: a non-empty CallbackTopicMessage.CallbackToken
+// produces an `Authorization: Bearer <token>` header on the outbound POST.
+// arcade's callback endpoint requires this header — without it every
+// callback would 401.
+func TestDeliverCallback_AuthorizationHeaderWhenTokenSet(t *testing.T) {
+	var receivedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := defaultTestConfig()
+	ds, _, _ := newTestDeliveryService(t, cfg, server.Client())
+
+	const token = "tok-arcade-mainnet" //nolint:gosec // test fixture, not a real credential
+	msg := &kafka.CallbackTopicMessage{
+		CallbackURL:   server.URL + "/callback",
+		CallbackToken: token,
+		Type:          kafka.CallbackSeenOnNetwork,
+		TxID:          "tx-auth",
+	}
+	if err := ds.deliverCallback(context.Background(), msg); err != nil {
+		t.Fatalf("expected successful delivery, got error: %v", err)
+	}
+	if got, want := receivedAuth, "Bearer "+token; got != want {
+		t.Errorf("expected Authorization=%q, got %q", want, got)
+	}
+}
+
+// TestDeliverCallback_NoAuthorizationHeaderWhenTokenEmpty asserts the
+// back-compat invariant: when CallbackToken is empty, NO Authorization
+// header is set. This preserves today's behavior for arcade deployments
+// that haven't shipped the matching token-passing change.
+func TestDeliverCallback_NoAuthorizationHeaderWhenTokenEmpty(t *testing.T) {
+	var hadAuth bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, hadAuth = r.Header["Authorization"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := defaultTestConfig()
+	ds, _, _ := newTestDeliveryService(t, cfg, server.Client())
+
+	msg := &kafka.CallbackTopicMessage{
+		CallbackURL: server.URL + "/callback",
+		Type:        kafka.CallbackSeenOnNetwork,
+		TxID:        "tx-no-auth",
+		// CallbackToken intentionally left empty.
+	}
+	if err := ds.deliverCallback(context.Background(), msg); err != nil {
+		t.Fatalf("expected successful delivery, got error: %v", err)
+	}
+	if hadAuth {
+		t.Errorf("expected NO Authorization header for empty token, got one")
+	}
+}
+
 func TestDeliverCallback_BlockProcessedPayload(t *testing.T) {
 	var receivedBody []byte
 
