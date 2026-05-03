@@ -66,9 +66,29 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 	}, nil
 }
 
-// Start begins consuming messages. Blocks until context is canceled.
+// Start begins consuming messages. Returns when the consumer group has been
+// set up (Setup callback fired), or when startup fails.
+//
+// F-029: the previous implementation blocked unconditionally on <-c.ready.
+// If sarama's group setup repeatedly failed (e.g. broker unreachable, auth
+// failure, topic missing) Consume() would return an error before Setup ever
+// ran, the goroutine would loop forever logging the error, and Start would
+// hang the process indefinitely with no way to surface the problem. The
+// select below adds two additional exit paths: a setup-failed channel that
+// the consume goroutine writes to on the first Consume() error, and the
+// caller's context. This guarantees Start always returns in bounded time.
 func (c *Consumer) Start(ctx context.Context) error {
 	ctx, c.cancel = context.WithCancel(ctx)
+
+	// Buffered so the consume goroutine never blocks if Start has already
+	// returned via a different branch of the select below.
+	errCh := make(chan error, 1)
+
+	// Snapshot the initial ready channel for the select below. The consume
+	// goroutine rotates c.ready after every rebalance, so reading c.ready
+	// directly inside the select would race with that write. We only need
+	// to observe the FIRST setup-completion event for Start to return.
+	ready := c.ready
 
 	c.wg.Add(1)
 	go func() {
@@ -81,6 +101,13 @@ func (c *Consumer) Start(ctx context.Context) error {
 			}
 			if err := c.group.Consume(ctx, c.topics, handler); err != nil {
 				c.logger.Error("consumer group error", "error", err)
+				// Non-blocking send: only the first error needs to escape
+				// to Start; subsequent errors are logged above and the
+				// loop will exit via ctx.Err() once the caller cancels.
+				select {
+				case errCh <- err:
+				default:
+				}
 			}
 			if ctx.Err() != nil {
 				return
@@ -89,9 +116,15 @@ func (c *Consumer) Start(ctx context.Context) error {
 		}
 	}()
 
-	<-c.ready
-	c.logger.Info("consumer ready", "topics", c.topics)
-	return nil
+	select {
+	case <-ready:
+		c.logger.Info("consumer ready", "topics", c.topics)
+		return nil
+	case err := <-errCh:
+		return fmt.Errorf("consumer setup: %w", err)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Stop gracefully shuts down the consumer.
