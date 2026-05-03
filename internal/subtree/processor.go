@@ -16,9 +16,14 @@ import (
 )
 
 // RegistrationGetter abstracts registration lookups for testability.
+//
+// The shape mirrors store.RegistrationStore: BatchGet/Get return
+// []store.CallbackEntry so the per-URL bearer token reaches the SEEN
+// callback emit sites and is propagated through CallbackTopicMessage to
+// the delivery service.
 type RegistrationGetter interface {
-	BatchGet(txids []string) (map[string][]string, error)
-	Get(txid string) ([]string, error)
+	BatchGet(txids []string) (map[string][]store.CallbackEntry, error)
+	Get(txid string) ([]store.CallbackEntry, error)
 }
 
 // SeenCounter abstracts seen-count tracking for testability.
@@ -393,8 +398,8 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 }
 
 // findRegisteredTxids uses the cache and Aerospike to find which txids are registered.
-// Returns a map of txid → callbackURLs for all registered txids.
-func (p *Processor) findRegisteredTxids(txids []string) (map[string][]string, error) {
+// Returns a map of txid → []CallbackEntry (URL + token) for all registered txids.
+func (p *Processor) findRegisteredTxids(txids []string) (map[string][]store.CallbackEntry, error) {
 	var uncached, cachedRegistered []string
 
 	if p.regCache != nil {
@@ -404,7 +409,7 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]string, er
 	}
 
 	// 4.3: Batch lookup uncached txids in Aerospike.
-	var registeredFromStore map[string][]string
+	var registeredFromStore map[string][]store.CallbackEntry
 	if len(uncached) > 0 {
 		var err error
 		registeredFromStore, err = p.registrationStore.BatchGet(uncached)
@@ -428,13 +433,13 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]string, er
 		}
 	}
 
-	// Combine: start with uncached results (already have callbackURLs from BatchGet).
-	allRegistered := make(map[string][]string, len(cachedRegistered)+len(registeredFromStore))
-	for txid, urls := range registeredFromStore {
-		allRegistered[txid] = urls
+	// Combine: start with uncached results (already have CallbackEntry from BatchGet).
+	allRegistered := make(map[string][]store.CallbackEntry, len(cachedRegistered)+len(registeredFromStore))
+	for txid, entries := range registeredFromStore {
+		allRegistered[txid] = entries
 	}
 
-	// For cached-registered txids, fetch callbackURLs via BatchGet.
+	// For cached-registered txids, fetch CallbackEntry tuples via BatchGet.
 	//
 	// A failure here MUST surface as an error (F-056). The cache told us these
 	// txids are registered; if the backing store lookup fails we cannot
@@ -445,12 +450,12 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]string, er
 	// re-drives via handleTransientFailure (which leaves the dedup cache
 	// untouched).
 	if len(cachedRegistered) > 0 {
-		cachedURLs, err := p.registrationStore.BatchGet(cachedRegistered)
+		cachedEntries, err := p.registrationStore.BatchGet(cachedRegistered)
 		if err != nil {
 			return nil, fmt.Errorf("batch get callbackURLs for cached txids: %w", err)
 		}
-		for txid, urls := range cachedURLs {
-			allRegistered[txid] = urls
+		for txid, entries := range cachedEntries {
+			allRegistered[txid] = entries
 		}
 	}
 
@@ -476,7 +481,7 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]string, er
 // callbacks for the affected txids. Returning the error keeps the dedup
 // cache untouched (handleMessage gates that add on success) and routes the
 // work through handleTransientFailure for redelivery.
-func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string, subtreeID string) error {
+func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.CallbackEntry, subtreeID string) error {
 	if len(registeredTxids) == 0 {
 		return nil
 	}
@@ -487,11 +492,18 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string
 	// on this attempt).
 	var firstErr error
 
-	// Invert txid→callbackURLs to callbackURL→txids for SEEN_ON_NETWORK.
+	// Invert txid→[]CallbackEntry to callbackURL→txids for SEEN_ON_NETWORK,
+	// while remembering the latest token observed per URL. If multiple txids
+	// have the same URL with different tokens (mid-rotation), the non-empty
+	// token wins; in practice they all came through the same /watch payload.
 	seenGroups := make(map[string][]string)
-	for txid, callbackURLs := range registeredTxids {
-		for _, url := range callbackURLs {
-			seenGroups[url] = append(seenGroups[url], txid)
+	urlTokens := make(map[string]string)
+	for txid, entries := range registeredTxids {
+		for _, e := range entries {
+			seenGroups[e.URL] = append(seenGroups[e.URL], txid)
+			if existing, ok := urlTokens[e.URL]; !ok || (existing == "" && e.Token != "") {
+				urlTokens[e.URL] = e.Token
+			}
 		}
 	}
 
@@ -500,9 +512,10 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string
 	for callbackURL, txids := range seenGroups {
 		for _, chunk := range chunkTxIDs(txids, callbackBatchChunkSize) {
 			msg := &kafka.CallbackTopicMessage{
-				CallbackURL: callbackURL,
-				Type:        kafka.CallbackSeenOnNetwork,
-				TxIDs:       chunk,
+				CallbackURL:   callbackURL,
+				CallbackToken: urlTokens[callbackURL],
+				Type:          kafka.CallbackSeenOnNetwork,
+				TxIDs:         chunk,
 			}
 			data, err := msg.Encode()
 			if err != nil {
@@ -532,7 +545,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string
 	// keep iterating remaining txids so independent counters still get their
 	// best-effort increment + threshold callback on this attempt.
 	thresholdGroups := make(map[string][]string) // callbackURL → threshold-reached txids
-	for txid, callbackURLs := range registeredTxids {
+	for txid, entries := range registeredTxids {
 		result, err := p.seenCounterStore.Increment(txid, subtreeID)
 		if err != nil {
 			p.Logger.Error("failed to increment seen counter", "txid", txid, "subtreeID", subtreeID, "error", err)
@@ -542,8 +555,8 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string
 			continue
 		}
 		if result.ThresholdReached {
-			for _, url := range callbackURLs {
-				thresholdGroups[url] = append(thresholdGroups[url], txid)
+			for _, e := range entries {
+				thresholdGroups[e.URL] = append(thresholdGroups[e.URL], txid)
 			}
 		}
 	}
@@ -552,9 +565,10 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]string
 	for callbackURL, txids := range thresholdGroups {
 		for _, chunk := range chunkTxIDs(txids, callbackBatchChunkSize) {
 			msg := &kafka.CallbackTopicMessage{
-				CallbackURL: callbackURL,
-				Type:        kafka.CallbackSeenMultipleNodes,
-				TxIDs:       chunk,
+				CallbackURL:   callbackURL,
+				CallbackToken: urlTokens[callbackURL],
+				Type:          kafka.CallbackSeenMultipleNodes,
+				TxIDs:         chunk,
 			}
 			data, err := msg.Encode()
 			if err != nil {

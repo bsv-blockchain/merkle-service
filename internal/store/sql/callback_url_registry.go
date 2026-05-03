@@ -34,22 +34,24 @@ func newCallbackURLRegistry(db *sql.DB, d *dialect, retention time.Duration) *ca
 	return &callbackURLRegistry{db: db, d: d, retention: retention}
 }
 
-func (r *callbackURLRegistry) Add(callbackURL string) error {
+func (r *callbackURLRegistry) Add(callbackURL, callbackToken string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// On conflict we must refresh last_seen_at — otherwise a URL added once
 	// would expire even though it is being actively re-registered. We use a
 	// dialect-portable UPSERT shape (ON CONFLICT ... DO UPDATE) which both
-	// PostgreSQL and SQLite (>= 3.24) support.
+	// PostgreSQL and SQLite (>= 3.24) support. The token is also refreshed
+	// so a rotation in arcade's cfg.CallbackToken converges within one
+	// /watch round-trip.
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-		"INSERT INTO callback_urls (callback_url, last_seen_at) VALUES (%s, %s) "+
-			"ON CONFLICT (callback_url) DO UPDATE SET last_seen_at = %s",
-		r.d.placeholder(1), r.d.now, r.d.now)
-	_, err := r.db.ExecContext(ctx, q, callbackURL)
+		"INSERT INTO callback_urls (callback_url, last_seen_at, callback_token) VALUES (%s, %s, %s) "+
+			"ON CONFLICT (callback_url) DO UPDATE SET last_seen_at = %s, callback_token = EXCLUDED.callback_token",
+		r.d.placeholder(1), r.d.now, r.d.placeholder(2), r.d.now)
+	_, err := r.db.ExecContext(ctx, q, callbackURL, callbackToken)
 	return err
 }
 
-func (r *callbackURLRegistry) GetAll() ([]string, error) {
+func (r *callbackURLRegistry) GetAll() ([]storepkg.CallbackEntry, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -58,7 +60,7 @@ func (r *callbackURLRegistry) GetAll() ([]string, error) {
 	// or the next sweeper tick (which uses the same NULL-tolerant predicate).
 	cutoff := -int(r.retention / time.Second)
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-		"SELECT callback_url FROM callback_urls "+
+		"SELECT callback_url, callback_token FROM callback_urls "+
 			"WHERE last_seen_at IS NULL OR last_seen_at >= %s "+
 			"ORDER BY callback_url",
 		r.d.intervalSeconds(cutoff))
@@ -68,13 +70,13 @@ func (r *callbackURLRegistry) GetAll() ([]string, error) {
 		return nil, err
 	}
 	defer ensureRowsClosed(rows)
-	var out []string
+	var out []storepkg.CallbackEntry
 	for rows.Next() {
-		var u string
-		if err := rows.Scan(&u); err != nil {
+		var entry storepkg.CallbackEntry
+		if err := rows.Scan(&entry.URL, &entry.Token); err != nil {
 			return nil, err
 		}
-		out = append(out, u)
+		out = append(out, entry)
 	}
 	return out, rows.Err()
 }

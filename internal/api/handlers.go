@@ -14,15 +14,27 @@ import (
 
 var txidRegex = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 
+// maxCallbackTokenLen caps the bearer token we accept on /watch. Tokens are
+// short shared secrets (typically 32–64 bytes); rejecting absurd values is
+// cheap insurance against a buggy or hostile arcade deployment trying to
+// store arbitrary blobs in our registration record.
+const maxCallbackTokenLen = 4096
+
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(dashboardHTML)
 }
 
 // WatchRequest represents the POST /watch request body.
+//
+// CallbackToken is the bearer token arcade expects on its callback endpoint
+// (Authorization: Bearer <token>). The field is optional for backwards
+// compatibility with arcade deployments that haven't yet shipped the matching
+// token-passing change — empty token means "send no Authorization header".
 type WatchRequest struct {
-	TxID        string `json:"txid"`
-	CallbackURL string `json:"callbackUrl"`
+	TxID          string `json:"txid"`
+	CallbackURL   string `json:"callbackUrl"`
+	CallbackToken string `json:"callbackToken,omitempty"`
 }
 
 // WatchResponse represents the POST /watch response body.
@@ -87,8 +99,19 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Defensive cap on the optional bearer token. We don't validate the
+	// content (it's an opaque shared secret between merkle-service and
+	// arcade) but we refuse anything large enough to look like an attempt to
+	// stuff a payload into the registration record.
+	if len(req.CallbackToken) > maxCallbackTokenLen {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
+			Error: "invalid callbackToken: exceeds maximum length",
+		})
+		return
+	}
+
 	// Store registration
-	if err := s.regStore.Add(req.TxID, req.CallbackURL); err != nil {
+	if err := s.regStore.Add(req.TxID, req.CallbackURL, req.CallbackToken); err != nil {
 		// F-050: surface the per-txid callback cap as a 429 so the caller can
 		// distinguish a quota error from a transient backend failure and back
 		// off accordingly. The body still uses the standard ErrorResponse shape.
@@ -105,9 +128,11 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register callback URL in the broadcast registry.
+	// Register callback URL in the broadcast registry. The token is stored
+	// alongside so BLOCK_PROCESSED fan-out (which iterates urlRegistry rather
+	// than the per-txid map) can attach the same Authorization header.
 	if s.urlRegistry != nil {
-		if err := s.urlRegistry.Add(req.CallbackURL); err != nil {
+		if err := s.urlRegistry.Add(req.CallbackURL, req.CallbackToken); err != nil {
 			s.Logger.Warn("failed to add callback URL to registry", "url", req.CallbackURL, "error", err)
 		}
 	}
@@ -151,15 +176,16 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	urls, err := s.regStore.Get(txid)
+	entries, err := s.regStore.Get(txid)
 	if err != nil {
 		s.Logger.Error("failed to lookup registration", "txid", txid, "error", err)
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal server error"})
 		return
 	}
 
-	if urls == nil {
-		urls = []string{}
+	urls := make([]string, 0, len(entries))
+	for _, e := range entries {
+		urls = append(urls, e.URL)
 	}
 
 	writeJSON(w, http.StatusOK, LookupResponse{
