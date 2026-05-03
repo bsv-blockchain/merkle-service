@@ -86,11 +86,10 @@ func TestHandleMessage_HTTPFailureWithRetriesAvailable_RepublishesBeforeAck(t *t
 	ds, retryMock, dlqMock := newTestDeliveryService(t, cfg, server.Client())
 
 	msg := &kafka.CallbackTopicMessage{
-		CallbackURL:  server.URL + "/cb",
-		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
-		SubtreeIndex: 1,
-		RetryCount:   0,
+		CallbackURL: server.URL + "/cb",
+		Type:        kafka.CallbackSeenOnNetwork,
+		TxID:        "tx-retry",
+		RetryCount:  0,
 	}
 
 	if err := ds.handleMessage(context.Background(), encodeConsumerMessage(t, msg)); err != nil {
@@ -333,7 +332,7 @@ func TestHandleMessage_PermanentErrorRoutesToDLQBeforeAck(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/cb",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blk-perm",
+		BlockHash:    "00000000000000000000000000000000000000000000000000000000b1bcfee0",
 		SubtreeIndex: 2,
 		StumpRef:     "ref-never-stored",
 	}
@@ -380,7 +379,7 @@ func TestHandleMessage_StumpOrderingViaSamePartitionSerialization(t *testing.T) 
 	ds, _, _, stumpStore := newTestDeliveryServiceWithStumps(t, cfg, server.Client())
 
 	url := server.URL + "/cb"
-	blk := "block-seq"
+	blk := "0000000000000000000000000000000000000000000000000000000050a1b15e"
 	mustPut := func(b []byte) string {
 		ref, err := stumpStore.Put(b, 0)
 		if err != nil {

@@ -1203,7 +1203,7 @@ func TestHandleTransientFailure_RoutesToDLQAtMaxAttempts(t *testing.T) {
 	p.Logger = logger
 
 	subtreeMsg := &kafka.SubtreeMessage{
-		Hash:       "subtree-hash-abc",
+		Hash:       "0000000000000000000000000000000000000000000000000000000000abcabc",
 		DataHubURL: "http://datahub.example.com",
 	}
 	cause := errors.New("datahub 404")
@@ -1546,7 +1546,7 @@ func TestHandleMessage_CallbackPublishFailure_RoutesToRetry(t *testing.T) {
 	p.Logger = logger
 
 	subtreeMsg := &kafka.SubtreeMessage{
-		Hash:         "subtree-cb-fail",
+		Hash:         "00000000000000000000000000000000000000000000000000000000cbfa1100",
 		DataHubURL:   dataHubServer.URL,
 		AttemptCount: 0,
 	}
@@ -1677,7 +1677,7 @@ func TestHandleMessage_CachedLookupFailure_RoutesToRetryAndSkipsDedup(t *testing
 	p.Logger = logger
 
 	subtreeMsg := &kafka.SubtreeMessage{
-		Hash:         "subtree-cached-lookup-fail",
+		Hash:         "00000000000000000000000000000000000000000000000000000000cac1ed00",
 		DataHubURL:   dataHubServer.URL,
 		AttemptCount: 0,
 	}
@@ -1834,7 +1834,7 @@ func TestHandleMessage_SeenCounterIncrementFailure_RoutesToRetryAndSkipsDedup(t 
 	p.Logger = logger
 
 	subtreeMsg := &kafka.SubtreeMessage{
-		Hash:         "subtree-counter-fail",
+		Hash:         "0000000000000000000000000000000000000000000000000000000000c0fa11",
 		DataHubURL:   dataHubServer.URL,
 		AttemptCount: 0,
 	}
@@ -1917,7 +1917,7 @@ func TestHandleMessage_SeenCounterSuccess_UpdatesDedup(t *testing.T) {
 	p.Logger = logger
 
 	subtreeMsg := &kafka.SubtreeMessage{
-		Hash:         "subtree-counter-ok",
+		Hash:         "00000000000000000000000000000000000000000000000000000000000c0c00",
 		DataHubURL:   dataHubServer.URL,
 		AttemptCount: 0,
 	}

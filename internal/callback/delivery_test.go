@@ -177,7 +177,7 @@ func TestDeliverCallback_StumpSuccess(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash456",
+		BlockHash:    "00000000000000000000000000000000000000000000000000000000b10c0456",
 		SubtreeIndex: 3,
 		StumpRef:     stumpRef,
 	}
@@ -201,7 +201,7 @@ func TestDeliverCallback_StumpSuccess(t *testing.T) {
 	if payload.Type != "STUMP" {
 		t.Errorf("expected type 'STUMP', got %q", payload.Type)
 	}
-	if payload.BlockHash != "blockhash456" {
+	if payload.BlockHash != "00000000000000000000000000000000000000000000000000000000b10c0456" {
 		t.Errorf("expected blockHash 'blockhash456', got %q", payload.BlockHash)
 	}
 	if payload.SubtreeIndex != 3 {
@@ -281,7 +281,7 @@ func TestDeliverCallback_Non2xxReturnsError(t *testing.T) {
 			msg := &kafka.CallbackTopicMessage{
 				CallbackURL:  server.URL + "/callback",
 				Type:         kafka.CallbackStump,
-				BlockHash:    "blockhash",
+				BlockHash:    "00000000000000000000000000000000000000000000000000000000b10c0aa1",
 				SubtreeIndex: 1,
 			}
 
@@ -309,7 +309,7 @@ func TestDeliverCallback_2xxStatusesSucceed(t *testing.T) {
 			msg := &kafka.CallbackTopicMessage{
 				CallbackURL:  server.URL + "/callback",
 				Type:         kafka.CallbackStump,
-				BlockHash:    "blockhash",
+				BlockHash:    "00000000000000000000000000000000000000000000000000000000b10c0aa1",
 				SubtreeIndex: 1,
 			}
 
@@ -336,11 +336,10 @@ func TestProcessDelivery_RetriesViaKafkaRepublish(t *testing.T) {
 	ds, retryMock, _ := newTestDeliveryService(t, cfg, server.Client())
 
 	msg := &kafka.CallbackTopicMessage{
-		CallbackURL:  server.URL + "/callback",
-		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
-		SubtreeIndex: 1,
-		RetryCount:   0,
+		CallbackURL: server.URL + "/callback",
+		Type:        kafka.CallbackSeenOnNetwork,
+		TxID:        "tx-retry",
+		RetryCount:  0,
 	}
 
 	if err := ds.processDelivery(context.Background(), msg); err != nil {
@@ -380,7 +379,7 @@ func TestProcessDelivery_RetryRepublishFailureSurfacesError(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
+		BlockHash:    "00000000000000000000000000000000000000000000000000000000b10c0aa1",
 		SubtreeIndex: 1,
 	}
 
@@ -409,7 +408,7 @@ func TestProcessDelivery_PublishesToDLQAfterMaxRetries(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
+		BlockHash:    "00000000000000000000000000000000000000000000000000000000b10c0aa1",
 		SubtreeIndex: 1,
 		RetryCount:   3, // Already at max retries.
 	}
@@ -450,7 +449,7 @@ func TestProcessDelivery_DLQPublishFailureSurfacesError(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
+		BlockHash:    "00000000000000000000000000000000000000000000000000000000b10c0aa1",
 		SubtreeIndex: 1,
 	}
 
@@ -484,7 +483,7 @@ func TestProcessDelivery_MissingStumpBlobGoesStraightToDLQ(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash-missing",
+		BlockHash:    "0000000000000000000000000000000000000000000000000000000000111551",
 		SubtreeIndex: 7,
 		StumpRef:     "ref-that-was-never-stored",
 		RetryCount:   0,
@@ -545,7 +544,7 @@ func TestProcessDelivery_DedupSkipsDuplicate(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
+		BlockHash:    "00000000000000000000000000000000000000000000000000000000b10c0aa1",
 		SubtreeIndex: 3,
 	}
 
@@ -571,18 +570,18 @@ func TestBuildIdempotencyKey(t *testing.T) {
 			name: "BLOCK_PROCESSED uses blockHash",
 			msg: &kafka.CallbackTopicMessage{
 				Type:      kafka.CallbackBlockProcessed,
-				BlockHash: "blockhash123",
+				BlockHash: "0000000000000000000000000000000000000000000000000000000000b10c12",
 			},
-			expected: "blockhash123:BLOCK_PROCESSED",
+			expected: "0000000000000000000000000000000000000000000000000000000000b10c12:BLOCK_PROCESSED",
 		},
 		{
 			name: "STUMP uses blockHash and subtreeIndex",
 			msg: &kafka.CallbackTopicMessage{
 				Type:         kafka.CallbackStump,
-				BlockHash:    "blockhash",
+				BlockHash:    "00000000000000000000000000000000000000000000000000000000b10c0aa1",
 				SubtreeIndex: 3,
 			},
-			expected: "blockhash:3:STUMP",
+			expected: "00000000000000000000000000000000000000000000000000000000b10c0aa1:3:STUMP",
 		},
 		{
 			name: "batched SEEN_ON_NETWORK uses TxIDs hash",
@@ -637,18 +636,18 @@ func TestDedupKeyForMessage(t *testing.T) {
 			name: "BLOCK_PROCESSED uses blockHash",
 			msg: &kafka.CallbackTopicMessage{
 				Type:      kafka.CallbackBlockProcessed,
-				BlockHash: "block123",
+				BlockHash: "0000000000000000000000000000000000000000000000000000000000010c12",
 			},
-			expected: "block123",
+			expected: "0000000000000000000000000000000000000000000000000000000000010c12",
 		},
 		{
 			name: "STUMP uses blockHash and subtreeIndex",
 			msg: &kafka.CallbackTopicMessage{
 				Type:         kafka.CallbackStump,
-				BlockHash:    "blockhash",
+				BlockHash:    "00000000000000000000000000000000000000000000000000000000b10c0aa1",
 				SubtreeIndex: 3,
 			},
-			expected: "blockhash:3",
+			expected: "00000000000000000000000000000000000000000000000000000000b10c0aa1:3",
 		},
 		{
 			name: "batched SEEN uses TxIDs hash",
@@ -696,7 +695,7 @@ func TestDeliverCallback_BlockProcessedPayload(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL: server.URL + "/callback",
 		Type:        kafka.CallbackBlockProcessed,
-		BlockHash:   "block-abc",
+		BlockHash:   "000000000000000000000000000000000000000000000000000000000abcabcd",
 	}
 
 	err := ds.deliverCallback(context.Background(), msg)
@@ -712,7 +711,7 @@ func TestDeliverCallback_BlockProcessedPayload(t *testing.T) {
 	if payload.Type != "BLOCK_PROCESSED" {
 		t.Errorf("expected type BLOCK_PROCESSED, got %q", payload.Type)
 	}
-	if payload.BlockHash != "block-abc" {
+	if payload.BlockHash != "000000000000000000000000000000000000000000000000000000000abcabcd" {
 		t.Errorf("expected blockHash block-abc, got %q", payload.BlockHash)
 	}
 	if payload.TxID != "" {

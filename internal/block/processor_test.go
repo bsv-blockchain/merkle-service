@@ -74,13 +74,13 @@ func TestBlockProcessedMessage_CorrectFields(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL: "http://example.com/cb",
 		Type:        kafka.CallbackBlockProcessed,
-		BlockHash:   "blockhash-field-test",
+		BlockHash:   "00000000000000000000000000000000000000000000000000000000bf1e1d77",
 	}
 
 	if msg.Type != kafka.CallbackBlockProcessed {
 		t.Errorf("expected CallbackBlockProcessed, got %s", msg.Type)
 	}
-	if msg.BlockHash != "blockhash-field-test" {
+	if msg.BlockHash != "00000000000000000000000000000000000000000000000000000000bf1e1d77" {
 		t.Errorf("expected blockhash-field-test, got %s", msg.BlockHash)
 	}
 	if msg.TxID != "" {
@@ -102,8 +102,8 @@ func TestBlockProcessedMessage_CorrectFields(t *testing.T) {
 	if decoded.Type != kafka.CallbackBlockProcessed {
 		t.Errorf("decoded type: expected BLOCK_PROCESSED, got %s", decoded.Type)
 	}
-	if decoded.BlockHash != "blockhash-field-test" {
-		t.Errorf("decoded blockHash: expected blockhash-field-test, got %s", decoded.BlockHash)
+	if decoded.BlockHash != "00000000000000000000000000000000000000000000000000000000bf1e1d77" {
+		t.Errorf("decoded blockHash mismatch, got %s", decoded.BlockHash)
 	}
 	if decoded.CallbackURL != "http://example.com/cb" {
 		t.Errorf("decoded callbackURL: expected http://example.com/cb, got %s", decoded.CallbackURL)
@@ -118,10 +118,10 @@ func TestSubtreeWorkMessage_Published(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	workProducer := kafka.NewTestProducer(workMock, "subtree-work-test", logger)
 
-	subtreeHashes := []string{"subtree-a", "subtree-b", "subtree-c"}
+	subtreeHashes := []string{"00000000000000000000000000000000000000000000000000000000000000aa", "00000000000000000000000000000000000000000000000000000000000000bb", "00000000000000000000000000000000000000000000000000000000000000cc"}
 	for i, stHash := range subtreeHashes {
 		workMsg := &kafka.SubtreeWorkMessage{
-			BlockHash:    "block-123",
+			BlockHash:    "0000000000000000000000000000000000000000000000000000000000000123",
 			BlockHeight:  850000,
 			SubtreeHash:  stHash,
 			SubtreeIndex: i,
@@ -142,7 +142,7 @@ func TestSubtreeWorkMessage_Published(t *testing.T) {
 
 	for i, pm := range workMock.messages {
 		msg := decodeSubtreeWork(t, pm)
-		if msg.BlockHash != "block-123" {
+		if msg.BlockHash != "0000000000000000000000000000000000000000000000000000000000000123" {
 			t.Errorf("message %d: expected blockHash 'block-123', got %s", i, msg.BlockHash)
 		}
 		if msg.SubtreeHash != subtreeHashes[i] {

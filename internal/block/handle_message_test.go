@@ -173,7 +173,7 @@ func TestHandleMessage_HappyPath_AllPublished(t *testing.T) {
 	server := newDataHubServerWithSubtrees(t, 3)
 	defer server.Close()
 
-	const blockHash = "block-happy"
+	blockHash := testHashFromLabel("block-happy")
 	msg := &sarama.ConsumerMessage{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
@@ -210,7 +210,7 @@ func TestHandleMessage_PublishFailureMidLoop_StopsAndReturnsError(t *testing.T) 
 	server := newDataHubServerWithSubtrees(t, 4)
 	defer server.Close()
 
-	const blockHash = "block-publish-fail"
+	blockHash := testHashFromLabel("block-publish-fail")
 	msg := &sarama.ConsumerMessage{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
@@ -252,7 +252,7 @@ func TestHandleMessage_PublishFailureFirstMessage_NoMessagesLeak(t *testing.T) {
 	server := newDataHubServerWithSubtrees(t, 3)
 	defer server.Close()
 
-	const blockHash = "block-publish-fail-first"
+	blockHash := testHashFromLabel("block-publish-fail-first")
 	msg := &sarama.ConsumerMessage{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
@@ -282,7 +282,7 @@ func TestHandleMessage_RetryAfterPublishFailure_Republishes(t *testing.T) {
 	server := newDataHubServerWithSubtrees(t, 3)
 	defer server.Close()
 
-	const blockHash = "block-retry"
+	blockHash := testHashFromLabel("block-retry")
 	msg := &sarama.ConsumerMessage{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
@@ -325,7 +325,7 @@ func TestHandleMessage_CounterInitFailure_NoPublishNoDedup(t *testing.T) {
 	server := newDataHubServerWithSubtrees(t, 2)
 	defer server.Close()
 
-	const blockHash = "block-counter-fail"
+	blockHash := testHashFromLabel("block-counter-fail")
 	msg := &sarama.ConsumerMessage{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
@@ -351,7 +351,7 @@ func TestHandleMessage_NoSubtrees_DedupAdded(t *testing.T) {
 	server := newDataHubServerWithSubtrees(t, 0)
 	defer server.Close()
 
-	const blockHash = "block-empty"
+	blockHash := testHashFromLabel("block-empty")
 	msg := &sarama.ConsumerMessage{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}

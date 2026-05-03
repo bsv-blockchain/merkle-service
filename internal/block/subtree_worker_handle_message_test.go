@@ -249,7 +249,9 @@ func newWorkerForHandleMessage(
 }
 
 // makeWorkMessageBytes builds a SubtreeWorkMessage targeting the given DataHub
-// URL and returns the encoded bytes ready to feed into handleMessage.
+// URL and returns the encoded bytes ready to feed into handleMessage. The
+// hash arguments must be valid 64-char hex (use testHashFromLabel to derive
+// stable hashes from human-readable labels).
 func makeWorkMessageBytes(t *testing.T, blockHash, subtreeHash, dataHubURL string, attempt int) []byte {
 	t.Helper()
 	msg := &kafka.SubtreeWorkMessage{
@@ -374,8 +376,8 @@ func TestHandleMessage_CallbackPublishFailure_RetriesAndDoesNotDecrement(t *test
 	server := rawSubtreeServer(subtreePayload)
 	defer server.Close()
 
-	const blockHash = "block-cb-fail"
-	const subtreeHash = "subtree-cb-fail"
+	blockHash := testHashFromLabel("block-cb-fail")
+	subtreeHash := testHashFromLabel("subtree-cb-fail")
 
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
@@ -411,8 +413,10 @@ func TestHandleMessage_CallbackPublishFailure_AtMaxAttempts_DLQAndDecrement(t *t
 	retryMock := &callbackFailingProducer{}
 	dlqMock := &callbackFailingProducer{}
 
+	blockHash := testHashFromLabel("block-dlq")
+	subtreeHash := testHashFromLabel("subtree-dlq")
 	counter := newCountingSubtreeCounter()
-	_ = counter.Init("block-dlq", 1)
+	_ = counter.Init(blockHash, 1)
 	// Reset init bookkeeping after pre-seed so test assertions only count
 	// what handleMessage drives.
 	counter.initCalls = 0
@@ -427,7 +431,7 @@ func TestHandleMessage_CallbackPublishFailure_AtMaxAttempts_DLQAndDecrement(t *t
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, maxAttempts)
 
 	// AttemptCount = maxAttempts - 1 → next attempt is terminal → DLQ.
-	value := makeWorkMessageBytes(t, "block-dlq", "subtree-dlq", server.URL, maxAttempts-1)
+	value := makeWorkMessageBytes(t, blockHash, subtreeHash, server.URL, maxAttempts-1)
 	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
 	if err != nil {
 		t.Fatalf("handleMessage at max attempts: expected nil error after DLQ publish, got: %v", err)
@@ -454,8 +458,10 @@ func TestHandleMessage_HappyPath_DecrementsExactlyOnce(t *testing.T) {
 	retryMock := &callbackFailingProducer{}
 	dlqMock := &callbackFailingProducer{}
 
+	blockHash := testHashFromLabel("block-happy")
+	subtreeHash := testHashFromLabel("subtree-happy")
 	counter := newCountingSubtreeCounter()
-	_ = counter.Init("block-happy", 1)
+	_ = counter.Init(blockHash, 1)
 	counter.initCalls = 0
 
 	stumpStore := &stubStumpStore{}
@@ -466,7 +472,7 @@ func TestHandleMessage_HappyPath_DecrementsExactlyOnce(t *testing.T) {
 
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
-	value := makeWorkMessageBytes(t, "block-happy", "subtree-happy", server.URL, 0)
+	value := makeWorkMessageBytes(t, blockHash, subtreeHash, server.URL, 0)
 	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage happy path: expected nil error, got: %v", err)
 	}
@@ -502,7 +508,7 @@ func TestHandleMessage_StumpStoreFailure_RetriesAndDoesNotDecrement(t *testing.T
 
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
-	value := makeWorkMessageBytes(t, "block-blob-fail", "subtree-blob-fail", server.URL, 0)
+	value := makeWorkMessageBytes(t, testHashFromLabel("block-blob-fail"), testHashFromLabel("subtree-blob-fail"), server.URL, 0)
 	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage stump-store failure: expected nil error (retry path), got: %v", err)
 	}
@@ -531,7 +537,7 @@ func TestHandleMessage_DecrementFailureOnSuccessPath_RetriesAndPreservesCount(t 
 	retryMock := &callbackFailingProducer{}
 	dlqMock := &callbackFailingProducer{}
 
-	const blockHash = "block-dec-fail"
+	blockHash := testHashFromLabel("block-dec-fail")
 	counter := newCountingSubtreeCounter()
 	_ = counter.Init(blockHash, 3)
 	counter.initCalls = 0
@@ -545,7 +551,7 @@ func TestHandleMessage_DecrementFailureOnSuccessPath_RetriesAndPreservesCount(t 
 
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
-	value := makeWorkMessageBytes(t, blockHash, "subtree-dec-fail", server.URL, 0)
+	value := makeWorkMessageBytes(t, blockHash, testHashFromLabel("subtree-dec-fail"), server.URL, 0)
 	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
 	if err != nil {
 		// Below max attempts, handleTransientFailure re-publishes for retry
@@ -589,7 +595,7 @@ func TestHandleMessage_DecrementFailureOnDLQPath_ReturnsError(t *testing.T) {
 	retryMock := &callbackFailingProducer{}
 	dlqMock := &callbackFailingProducer{}
 
-	const blockHash = "block-dlq-dec-fail"
+	blockHash := testHashFromLabel("block-dlq-dec-fail")
 	counter := newCountingSubtreeCounter()
 	_ = counter.Init(blockHash, 1)
 	counter.initCalls = 0
@@ -604,7 +610,7 @@ func TestHandleMessage_DecrementFailureOnDLQPath_ReturnsError(t *testing.T) {
 	const maxAttempts = 3
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, maxAttempts)
 
-	value := makeWorkMessageBytes(t, blockHash, "subtree-dlq-dec-fail", server.URL, maxAttempts-1)
+	value := makeWorkMessageBytes(t, blockHash, testHashFromLabel("subtree-dlq-dec-fail"), server.URL, maxAttempts-1)
 	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
 	if err == nil {
 		t.Fatalf("expected non-nil error when Decrement fails on DLQ path so consumer redelivers, got nil")
@@ -638,7 +644,7 @@ func TestHandleMessage_HappyPath_DecrementToZeroEmitsBlockProcessed(t *testing.T
 	retryMock := &callbackFailingProducer{}
 	dlqMock := &callbackFailingProducer{}
 
-	const blockHash = "block-zero-emit"
+	blockHash := testHashFromLabel("block-zero-emit")
 	counter := newCountingSubtreeCounter()
 	// Pre-seed counter at 1 so the single subtree work item drives it to 0.
 	_ = counter.Init(blockHash, 1)
@@ -654,7 +660,7 @@ func TestHandleMessage_HappyPath_DecrementToZeroEmitsBlockProcessed(t *testing.T
 	// Wire up urlRegistry so emitBlockProcessed has somewhere to publish.
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
-	value := makeWorkMessageBytes(t, blockHash, "subtree-zero-emit", server.URL, 0)
+	value := makeWorkMessageBytes(t, blockHash, testHashFromLabel("subtree-zero-emit"), server.URL, 0)
 	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage happy path: expected nil error, got: %v", err)
 	}
@@ -705,7 +711,7 @@ func TestEmitBlockProcessed_PublishFailureReturnsError(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	err := s.emitBlockProcessed("blk-emit-fail")
+	err := s.emitBlockProcessed(testHashFromLabel("blk-emit-fail"))
 	if err == nil {
 		t.Fatalf("expected error from emitBlockProcessed when callback publish fails")
 	}
@@ -732,7 +738,7 @@ func TestEmitBlockProcessed_PartialFailureContinuesAndReturnsFirstError(t *testi
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	err := s.emitBlockProcessed("blk-partial")
+	err := s.emitBlockProcessed(testHashFromLabel("blk-partial"))
 	if err == nil {
 		t.Fatalf("expected non-nil error when BLOCK_PROCESSED publishes fail")
 	}
@@ -760,7 +766,7 @@ func TestEmitBlockProcessed_HappyPath(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	if err := s.emitBlockProcessed("blk-happy"); err != nil {
+	if err := s.emitBlockProcessed(testHashFromLabel("blk-happy")); err != nil {
 		t.Fatalf("expected nil error on happy path, got: %v", err)
 	}
 	if got := cbMock.sentCountOfType(kafka.CallbackBlockProcessed); got != 2 {
@@ -781,7 +787,7 @@ func TestEmitBlockProcessed_RegistryFailureReturnsError(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	if err := s.emitBlockProcessed("blk-registry-fail"); err == nil {
+	if err := s.emitBlockProcessed(testHashFromLabel("blk-registry-fail")); err == nil {
 		t.Fatalf("expected error when URL registry GetAll fails")
 	}
 	if got := cbMock.sentCount(); got != 0 {
@@ -805,7 +811,7 @@ func TestHandleMessage_BlockProcessedEmitFailure_RetriesAndDoesNotAck(t *testing
 	retryMock := &callbackFailingProducer{}
 	dlqMock := &callbackFailingProducer{}
 
-	const blockHash = "block-emit-fail"
+	blockHash := testHashFromLabel("block-emit-fail")
 	counter := newCountingSubtreeCounter()
 	// Pre-seed at 1 so the single subtree drives the counter to 0 → emit fires.
 	_ = counter.Init(blockHash, 1)
@@ -820,7 +826,7 @@ func TestHandleMessage_BlockProcessedEmitFailure_RetriesAndDoesNotAck(t *testing
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
-	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-fail", server.URL, 0)
+	value := makeWorkMessageBytes(t, blockHash, testHashFromLabel("subtree-emit-fail"), server.URL, 0)
 	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		// Below max attempts, handleTransientFailure re-publishes for retry
 		// and returns nil — the work item was redirected through the retry
@@ -860,7 +866,7 @@ func TestHandleMessage_BlockProcessedEmitRetry_ReEmitsOnRedelivery(t *testing.T)
 	retryMock := &callbackFailingProducer{}
 	dlqMock := &callbackFailingProducer{}
 
-	const blockHash = "block-emit-retry"
+	blockHash := testHashFromLabel("block-emit-retry")
 	counter := newCountingSubtreeCounter()
 	// Pre-seed at 0 to simulate a redelivery: a previous attempt already
 	// decremented to 0 (and either succeeded-emit or failed-emit). The
@@ -878,7 +884,7 @@ func TestHandleMessage_BlockProcessedEmitRetry_ReEmitsOnRedelivery(t *testing.T)
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
-	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-retry", server.URL, 1)
+	value := makeWorkMessageBytes(t, blockHash, testHashFromLabel("subtree-emit-retry"), server.URL, 1)
 	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage on redelivery: expected nil, got: %v", err)
 	}
@@ -917,7 +923,7 @@ func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsErr
 	retryMock := &callbackFailingProducer{}
 	dlqMock := &callbackFailingProducer{}
 
-	const blockHash = "block-emit-dlq"
+	blockHash := testHashFromLabel("block-emit-dlq")
 	counter := newCountingSubtreeCounter()
 	_ = counter.Init(blockHash, 1)
 	counter.initCalls = 0
@@ -933,7 +939,7 @@ func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsErr
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
 	// AttemptCount = maxAttempts - 1 → next attempt is terminal → DLQ.
-	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-dlq", server.URL, maxAttempts-1)
+	value := makeWorkMessageBytes(t, blockHash, testHashFromLabel("subtree-emit-dlq"), server.URL, maxAttempts-1)
 	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
 	if err == nil {
 		t.Fatalf("expected non-nil error so consumer redelivers when emit fails on DLQ path, got nil")
