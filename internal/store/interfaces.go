@@ -5,12 +5,23 @@ import (
 	"time"
 )
 
-// RegistrationStore maps a txid to the set of callback URLs registered for it.
-// Add is set-insert: duplicate (txid, url) pairs are silently deduplicated.
+// CallbackEntry is a (URL, token) tuple returned by the registration stores.
+// Token is "" for legacy registrations that predate the per-callback bearer
+// token (arcade /watch payloads without callbackToken). Deliveries should
+// only attach an Authorization header when Token is non-empty so empty-token
+// rollouts preserve today's no-auth behavior.
+type CallbackEntry struct {
+	URL   string
+	Token string
+}
+
+// RegistrationStore maps a txid to the set of callback (URL, token) entries
+// registered for it. Add is set-insert keyed on URL: re-registering the same
+// (txid, url) pair refreshes the token and is otherwise a no-op.
 type RegistrationStore interface {
-	Add(txid, callbackURL string) error
-	Get(txid string) ([]string, error)
-	BatchGet(txids []string) (map[string][]string, error)
+	Add(txid, callbackURL, callbackToken string) error
+	Get(txid string) ([]CallbackEntry, error)
+	BatchGet(txids []string) (map[string][]CallbackEntry, error)
 	UpdateTTL(txid string, ttl time.Duration) error
 	BatchUpdateTTL(txids []string, ttl time.Duration) error
 }
@@ -48,10 +59,12 @@ type CallbackDedupStore interface {
 	Claim(txid, callbackURL, statusType string, ttl time.Duration) (claimed bool, err error)
 }
 
-// CallbackURLRegistry enumerates every known callback URL. Add is set-insert.
+// CallbackURLRegistry enumerates every known callback URL alongside its
+// per-URL bearer token. Add is set-insert keyed on URL — re-registering an
+// existing URL refreshes its token and last-seen timestamp.
 type CallbackURLRegistry interface {
-	Add(callbackURL string) error
-	GetAll() ([]string, error)
+	Add(callbackURL, callbackToken string) error
+	GetAll() ([]CallbackEntry, error)
 }
 
 // CallbackAccumulatorStore aggregates per-block, per-URL callback data across

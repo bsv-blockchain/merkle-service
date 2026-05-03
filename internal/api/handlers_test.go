@@ -17,31 +17,31 @@ import (
 
 // fakeRegStore is a minimal RegistrationStore stub used by tests. When
 // addErr is non-nil, Add returns it (so error-mapping behavior can be
-// exercised). Otherwise Add records each (txid, url) pair in `added`.
+// exercised). Otherwise Add records each (txid, url, token) tuple in `added`.
 type fakeRegStore struct {
 	addErr error
-	added  []struct{ txid, url string }
+	added  []struct{ txid, url, token string }
 }
 
-func (f *fakeRegStore) Add(txid, url string) error {
+func (f *fakeRegStore) Add(txid, url, token string) error {
 	if f.addErr != nil {
 		return f.addErr
 	}
-	f.added = append(f.added, struct{ txid, url string }{txid, url})
+	f.added = append(f.added, struct{ txid, url, token string }{txid, url, token})
 	return nil
 }
 
-func (f *fakeRegStore) Get(string) ([]string, error) {
+func (f *fakeRegStore) Get(string) ([]store.CallbackEntry, error) {
 	return nil, nil
 }
 
-func (f *fakeRegStore) BatchGet([]string) (map[string][]string, error) {
+func (f *fakeRegStore) BatchGet([]string) (map[string][]store.CallbackEntry, error) {
 	return nil, nil
 }
 func (f *fakeRegStore) UpdateTTL(string, time.Duration) error        { return nil }
 func (f *fakeRegStore) BatchUpdateTTL([]string, time.Duration) error { return nil }
 
-func newTestRouterWithRegStore(rs store.RegistrationStore) (*chi.Mux, *Server) {
+func newTestRouterWithRegStore(rs store.RegistrationStore) *chi.Mux {
 	router := chi.NewRouter()
 	s := &Server{regStore: rs}
 	s.InitBase("test")
@@ -49,7 +49,7 @@ func newTestRouterWithRegStore(rs store.RegistrationStore) (*chi.Mux, *Server) {
 	router.Post("/watch", s.handleWatch)
 	router.Get("/health", s.handleHealth)
 	router.Get("/api/lookup/{txid}", s.handleLookup)
-	return router, s
+	return router
 }
 
 func newTestRouter() *chi.Mux {
@@ -163,7 +163,7 @@ func TestHandleDashboard(t *testing.T) {
 // translates store.ErrMaxCallbacksPerTxIDExceeded to HTTP 429 with a clear
 // JSON error body. F-050 / issue #27.
 func TestHandleWatch_MaxCallbacksReturns429(t *testing.T) {
-	router, _ := newTestRouterWithRegStore(&fakeRegStore{addErr: store.ErrMaxCallbacksPerTxIDExceeded})
+	router := newTestRouterWithRegStore(&fakeRegStore{addErr: store.ErrMaxCallbacksPerTxIDExceeded})
 	// IP literal avoids DNS lookup so the test runs in offline/sandbox
 	// environments. 1.1.1.1 is public and not on the SSRF deny-list.
 	w := postWatch(router, `{"txid":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","callbackUrl":"https://1.1.1.1/cb"}`)
@@ -247,6 +247,71 @@ func TestHandleWatch_RejectsBadScheme(t *testing.T) {
 				t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+// TestHandleWatch_AcceptsCallbackToken verifies that /watch threads the
+// optional callbackToken JSON field through to the registration store. The
+// store sees the exact bytes the caller sent.
+func TestHandleWatch_AcceptsCallbackToken(t *testing.T) {
+	fake := &fakeRegStore{}
+	router := newTestRouterWithRegStore(fake)
+	const txid = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	const token = "tok-arcade-mainnet-v1" //nolint:gosec // test fixture, not a real credential
+	body := `{"txid":"` + txid + `","callbackUrl":"https://1.1.1.1/cb","callbackToken":"` + token + `"}`
+	w := postWatch(router, body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if len(fake.added) != 1 {
+		t.Fatalf("expected 1 store.Add, got %d", len(fake.added))
+	}
+	if fake.added[0].token != token {
+		t.Fatalf("expected token %q persisted, got %q", token, fake.added[0].token)
+	}
+}
+
+// TestHandleWatch_EmptyCallbackTokenIsAccepted verifies that omitting
+// callbackToken is permitted and the store sees an empty string. Empty
+// token preserves today's no-Authorization behavior for arcade
+// deployments that haven't shipped the matching token-passing change.
+func TestHandleWatch_EmptyCallbackTokenIsAccepted(t *testing.T) {
+	fake := &fakeRegStore{}
+	router := newTestRouterWithRegStore(fake)
+	const txid = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	body := `{"txid":"` + txid + `","callbackUrl":"https://1.1.1.1/cb"}`
+	w := postWatch(router, body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if len(fake.added) != 1 {
+		t.Fatalf("expected 1 store.Add, got %d", len(fake.added))
+	}
+	if fake.added[0].token != "" {
+		t.Fatalf("expected empty token, got %q", fake.added[0].token)
+	}
+}
+
+// TestHandleWatch_OverlongCallbackTokenRejected verifies the defensive
+// length cap on callbackToken. Tokens are short shared secrets; refusing
+// absurd values keeps a buggy or hostile arcade deployment from stuffing
+// payloads into the registration record.
+func TestHandleWatch_OverlongCallbackTokenRejected(t *testing.T) {
+	fake := &fakeRegStore{}
+	router := newTestRouterWithRegStore(fake)
+	const txid = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	// One byte over the cap.
+	huge := make([]byte, maxCallbackTokenLen+1)
+	for i := range huge {
+		huge[i] = 'a'
+	}
+	body := `{"txid":"` + txid + `","callbackUrl":"https://1.1.1.1/cb","callbackToken":"` + string(huge) + `"}`
+	w := postWatch(router, body)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for overlong token, got %d", w.Code)
+	}
+	if len(fake.added) != 0 {
+		t.Fatalf("expected no store.Add on rejection, got %d", len(fake.added))
 	}
 }
 

@@ -17,6 +17,12 @@ const (
 	// sha256(url); the bin lets GetAll reconstruct the URL list during scan.
 	callbackURLBin = "u"
 
+	// callbackURLTokenBin holds the per-URL bearer token used for outbound
+	// HTTP delivery. Empty string ("") is a valid value and means "no
+	// Authorization header" — preserves today's behavior for deployments
+	// where arcade has not yet shipped the matching token-passing change.
+	callbackURLTokenBin = "t"
+
 	// defaultCallbackURLRegistryTTLSec is the eviction window applied to a
 	// registered callback URL when no explicit TTL is configured. URLs that
 	// haven't seen a fresh `Add` within this window are evicted by Aerospike's
@@ -71,9 +77,12 @@ func callbackURLKey(url string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// Add registers a callback URL in the registry. Repeat calls upsert the same
-// record and refresh its TTL, so an actively-watching URL never expires.
-func (r *aerospikeCallbackURLRegistry) Add(callbackURL string) error {
+// Add registers a callback URL + token in the registry. Repeat calls upsert
+// the same record (keyed by sha256(url)) and refresh its TTL, so an
+// actively-watching URL never expires; the token is rewritten on every Add
+// so a rotating arcade deployment converges on its current token within one
+// /watch round-trip.
+func (r *aerospikeCallbackURLRegistry) Add(callbackURL, callbackToken string) error {
 	key, err := as.NewKey(r.client.Namespace(), r.setName, callbackURLKey(callbackURL))
 	if err != nil {
 		return fmt.Errorf("failed to create key: %w", err)
@@ -85,7 +94,10 @@ func (r *aerospikeCallbackURLRegistry) Add(callbackURL string) error {
 		wp.Expiration = uint32(r.ttlSec) //nolint:gosec // ttlSec is config-validated and fits uint32
 	}
 
-	bins := as.BinMap{callbackURLBin: callbackURL}
+	bins := as.BinMap{
+		callbackURLBin:      callbackURL,
+		callbackURLTokenBin: callbackToken,
+	}
 	if err := r.client.Client().Put(wp, key, bins); err != nil {
 		// If TTL is rejected (namespace lacks nsup-period), retry without TTL.
 		// We log loudly because losing TTL re-introduces F-037's unbounded
@@ -108,12 +120,17 @@ func (r *aerospikeCallbackURLRegistry) Add(callbackURL string) error {
 	return nil
 }
 
-// GetAll returns every registered callback URL. Implemented as a ScanAll over
-// the registry set — the URL count is bounded by per-record TTL eviction
-// (typically <= a few thousand) and BLOCK_PROCESSED fan-out runs at most once
-// per block, so a scan-per-block is cheap relative to the actual callback
-// publish work.
-func (r *aerospikeCallbackURLRegistry) GetAll() ([]string, error) {
+// GetAll returns every registered (url, token) entry. Implemented as a
+// ScanAll over the registry set — the URL count is bounded by per-record TTL
+// eviction (typically <= a few thousand) and BLOCK_PROCESSED fan-out runs at
+// most once per block, so a scan-per-block is cheap relative to the actual
+// callback publish work.
+//
+// Records written before the token bin existed return Token = "" (the bin
+// will be missing, the type-assertion fails, and the zero value falls
+// through). That matches the dual-read invariant the registration store
+// holds and means a rolling deploy never produces a 401.
+func (r *aerospikeCallbackURLRegistry) GetAll() ([]CallbackEntry, error) {
 	sp := as.NewScanPolicy()
 	sp.IncludeBinData = true
 	// Bound the scan so a stalled node can't hang BLOCK_PROCESSED forever.
@@ -123,13 +140,13 @@ func (r *aerospikeCallbackURLRegistry) GetAll() ([]string, error) {
 	// flaky cluster — let the caller re-scan on the next block.
 	sp.MaxRetries = 0
 
-	rs, err := r.client.Client().ScanAll(sp, r.client.Namespace(), r.setName, callbackURLBin)
+	rs, err := r.client.Client().ScanAll(sp, r.client.Namespace(), r.setName, callbackURLBin, callbackURLTokenBin)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan callback URLs: %w", err)
 	}
 	defer func() { _ = rs.Close() }()
 
-	var urls []string
+	var entries []CallbackEntry
 	for res := range rs.Results() {
 		if res.Err != nil {
 			return nil, fmt.Errorf("scan error reading callback URLs: %w", res.Err)
@@ -137,11 +154,13 @@ func (r *aerospikeCallbackURLRegistry) GetAll() ([]string, error) {
 		if res.Record == nil {
 			continue
 		}
-		v, ok := res.Record.Bins[callbackURLBin].(string)
-		if !ok || v == "" {
+		url, ok := res.Record.Bins[callbackURLBin].(string)
+		if !ok || url == "" {
 			continue
 		}
-		urls = append(urls, v)
+		// Missing token bin (legacy record) or wrong type → empty token.
+		token, _ := res.Record.Bins[callbackURLTokenBin].(string)
+		entries = append(entries, CallbackEntry{URL: url, Token: token})
 	}
-	return urls, nil
+	return entries, nil
 }

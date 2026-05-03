@@ -17,13 +17,13 @@ func TestSweeper_CascadesRegistrationChildren(t *testing.T) {
 	r := newRegistrationStore(db, d, 0)
 
 	// Two txids: one we'll expire in the past, one fresh.
-	if err := r.Add("tx-old", "http://old1"); err != nil {
+	if err := r.Add("tx-old", "http://old1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Add("tx-old", "http://old2"); err != nil {
+	if err := r.Add("tx-old", "http://old2", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Add("tx-fresh", "http://fresh"); err != nil {
+	if err := r.Add("tx-fresh", "http://fresh", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -62,7 +62,7 @@ func TestSweeper_CascadesRegistrationChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(urls) != 1 || urls[0] != "http://fresh" {
+	if len(urls) != 1 || urls[0].URL != "http://fresh" {
 		t.Fatalf("fresh registration mutated: got %v", urls)
 	}
 }

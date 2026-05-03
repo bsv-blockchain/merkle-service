@@ -95,8 +95,8 @@ func TestAPIIntegration_WatchValidRequest(t *testing.T) {
 	if len(urls) != 1 {
 		t.Fatalf("expected 1 callback in store, got %d", len(urls))
 	}
-	if urls[0] != callbackURL {
-		t.Fatalf("expected callback %q, got %q", callbackURL, urls[0])
+	if urls[0].URL != callbackURL {
+		t.Fatalf("expected callback %q, got %q", callbackURL, urls[0].URL)
 	}
 }
 
@@ -170,8 +170,8 @@ func TestAPIIntegration_WatchMultipleCallbacksSameTxid(t *testing.T) {
 
 	// The store uses ordered list, so verify sorted order.
 	for i, u := range urls {
-		if u != callbacks[i] {
-			t.Errorf("callback[%d] = %q, want %q", i, u, callbacks[i])
+		if u.URL != callbacks[i] {
+			t.Errorf("callback[%d] = %q, want %q", i, u.URL, callbacks[i])
 		}
 	}
 }

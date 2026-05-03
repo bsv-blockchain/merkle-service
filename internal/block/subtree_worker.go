@@ -475,11 +475,12 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 	var firstErr error
 	for callbackURL := range result.CallbackGroups {
 		msg := &kafka.CallbackTopicMessage{
-			CallbackURL:  callbackURL,
-			Type:         kafka.CallbackStump,
-			BlockHash:    workMsg.BlockHash,
-			SubtreeIndex: workMsg.SubtreeIndex,
-			StumpRef:     stumpRef,
+			CallbackURL:   callbackURL,
+			CallbackToken: result.CallbackTokens[callbackURL],
+			Type:          kafka.CallbackStump,
+			BlockHash:     workMsg.BlockHash,
+			SubtreeIndex:  workMsg.SubtreeIndex,
+			StumpRef:      stumpRef,
 		}
 		data, encErr := msg.Encode()
 		if encErr != nil {
@@ -523,12 +524,12 @@ func (s *SubtreeWorkerService) emitBlockProcessed(blockHash string) error {
 		return nil
 	}
 
-	urls, err := s.urlRegistry.GetAll()
+	entries, err := s.urlRegistry.GetAll()
 	if err != nil {
 		s.Logger.Error("failed to get callback URLs for BLOCK_PROCESSED", "error", err)
 		return fmt.Errorf("getting callback URLs for BLOCK_PROCESSED on block %s: %w", blockHash, err)
 	}
-	if len(urls) == 0 {
+	if len(entries) == 0 {
 		return nil
 	}
 
@@ -538,30 +539,31 @@ func (s *SubtreeWorkerService) emitBlockProcessed(blockHash string) error {
 	// this attempt). Matches publishSubtreeCallbacks's partial-success
 	// pattern from PR #77.
 	var firstErr error
-	for _, callbackURL := range urls {
+	for _, entry := range entries {
 		msg := &kafka.CallbackTopicMessage{
-			CallbackURL: callbackURL,
-			Type:        kafka.CallbackBlockProcessed,
-			BlockHash:   blockHash,
+			CallbackURL:   entry.URL,
+			CallbackToken: entry.Token,
+			Type:          kafka.CallbackBlockProcessed,
+			BlockHash:     blockHash,
 		}
 		data, encErr := msg.Encode()
 		if encErr != nil {
 			s.Logger.Error("failed to encode BLOCK_PROCESSED message",
-				"callbackURL", callbackURL,
+				"callbackURL", entry.URL,
 				"error", encErr,
 			)
 			if firstErr == nil {
-				firstErr = fmt.Errorf("encoding BLOCK_PROCESSED for %s: %w", callbackURL, encErr)
+				firstErr = fmt.Errorf("encoding BLOCK_PROCESSED for %s: %w", entry.URL, encErr)
 			}
 			continue
 		}
-		if pubErr := s.callbackProducer.PublishWithHashKey(callbackURL, data); pubErr != nil {
+		if pubErr := s.callbackProducer.PublishWithHashKey(entry.URL, data); pubErr != nil {
 			s.Logger.Error("failed to publish BLOCK_PROCESSED callback",
-				"callbackURL", callbackURL,
+				"callbackURL", entry.URL,
 				"error", pubErr,
 			)
 			if firstErr == nil {
-				firstErr = fmt.Errorf("publishing BLOCK_PROCESSED for %s: %w", callbackURL, pubErr)
+				firstErr = fmt.Errorf("publishing BLOCK_PROCESSED for %s: %w", entry.URL, pubErr)
 			}
 		}
 	}
@@ -569,7 +571,7 @@ func (s *SubtreeWorkerService) emitBlockProcessed(blockHash string) error {
 	if firstErr == nil {
 		s.Logger.Info("emitted BLOCK_PROCESSED callbacks",
 			"blockHash", blockHash,
-			"callbackURLs", len(urls),
+			"callbackURLs", len(entries),
 		)
 	}
 	return firstErr

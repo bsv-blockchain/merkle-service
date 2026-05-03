@@ -44,7 +44,7 @@ func TestRegistrationStore_IdempotentAdd(t *testing.T) {
 	s := newRegistrationStore(db, d, 0)
 
 	for i := 0; i < 3; i++ {
-		if err := s.Add("tx1", "http://cb1"); err != nil {
+		if err := s.Add("tx1", "http://cb1", ""); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
 	}
@@ -52,21 +52,67 @@ func TestRegistrationStore_IdempotentAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if len(got) != 1 || got[0] != "http://cb1" {
+	if len(got) != 1 || got[0].URL != "http://cb1" {
 		t.Fatalf("got %v, want [http://cb1]", got)
+	}
+}
+
+// TestRegistrationStore_TokenRoundTrip verifies the new callback_token column
+// is persisted and retrieved on /watch round-trip, including the
+// "re-registration refreshes the token" semantics that let arcade rotate
+// without bouncing every txid.
+func TestRegistrationStore_TokenRoundTrip(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newRegistrationStore(db, d, 0)
+
+	if err := s.Add("tx1", "http://cb", "tok-v1"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	got, err := s.Get("tx1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got) != 1 || got[0].URL != "http://cb" || got[0].Token != "tok-v1" {
+		t.Fatalf("first round-trip: got %+v, want [{http://cb tok-v1}]", got)
+	}
+
+	// Re-register the same URL with a rotated token: Get should now return
+	// the new token (refresh-on-conflict).
+	if addErr := s.Add("tx1", "http://cb", "tok-v2"); addErr != nil {
+		t.Fatalf("Add (rotation): %v", addErr)
+	}
+	got, err = s.Get("tx1")
+	if err != nil {
+		t.Fatalf("Get after rotation: %v", err)
+	}
+	if len(got) != 1 || got[0].Token != "tok-v2" {
+		t.Fatalf("rotated round-trip: got %+v, want token tok-v2", got)
+	}
+
+	// Empty token is a valid value (back-compat: deployments where arcade
+	// hasn't shipped the matching change). Get returns Token = "".
+	if addErr := s.Add("tx2", "http://cb2", ""); addErr != nil {
+		t.Fatalf("Add empty token: %v", addErr)
+	}
+	got, err = s.Get("tx2")
+	if err != nil {
+		t.Fatalf("Get empty token: %v", err)
+	}
+	if len(got) != 1 || got[0].Token != "" {
+		t.Fatalf("empty-token round-trip: got %+v, want token \"\"", got)
 	}
 }
 
 func TestRegistrationStore_BatchGet(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newRegistrationStore(db, d, 0)
-	if err := s.Add("a", "u1"); err != nil {
+	if err := s.Add("a", "u1", "tok-a1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Add("a", "u2"); err != nil {
+	if err := s.Add("a", "u2", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Add("b", "u3"); err != nil {
+	if err := s.Add("b", "u3", "tok-b"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -79,6 +125,19 @@ func TestRegistrationStore_BatchGet(t *testing.T) {
 	}
 	if len(got["b"]) != 1 {
 		t.Fatalf("b urls = %v, want 1", got["b"])
+	}
+	// Locate u1 and verify token survived the batch fetch.
+	foundToken := false
+	for _, e := range got["a"] {
+		if e.URL == "u1" && e.Token == "tok-a1" {
+			foundToken = true
+		}
+	}
+	if !foundToken {
+		t.Fatalf("expected (u1, tok-a1) in got[\"a\"]: %+v", got["a"])
+	}
+	if got["b"][0].Token != "tok-b" {
+		t.Fatalf("got[\"b\"][0].Token = %q, want tok-b", got["b"][0].Token)
 	}
 	if _, ok := got["c"]; ok {
 		t.Fatalf("c should not be present")
@@ -96,13 +155,13 @@ func TestRegistrationStore_MaxCallbacksPerTxID(t *testing.T) {
 
 	// First `max` distinct URLs succeed.
 	for i := 0; i < max; i++ {
-		if err := s.Add("tx1", fmt.Sprintf("http://cb/%d", i)); err != nil {
+		if err := s.Add("tx1", fmt.Sprintf("http://cb/%d", i), ""); err != nil {
 			t.Fatalf("Add #%d: %v", i, err)
 		}
 	}
 
 	// (max+1)-th distinct URL is rejected with the sentinel.
-	err := s.Add("tx1", "http://cb/overflow")
+	err := s.Add("tx1", "http://cb/overflow", "")
 	if !errors.Is(err, storepkg.ErrMaxCallbacksPerTxIDExceeded) {
 		t.Fatalf("expected ErrMaxCallbacksPerTxIDExceeded, got %v", err)
 	}
@@ -117,7 +176,7 @@ func TestRegistrationStore_MaxCallbacksPerTxID(t *testing.T) {
 	}
 
 	// A different txid is unaffected by the first txid's cap.
-	if err := s.Add("tx2", "http://cb/tx2"); err != nil {
+	if err := s.Add("tx2", "http://cb/tx2", ""); err != nil {
 		t.Fatalf("unrelated txid Add: %v", err)
 	}
 }
@@ -130,22 +189,22 @@ func TestRegistrationStore_MaxCallbacksIdempotent(t *testing.T) {
 	const max = 2
 	s := newRegistrationStore(db, d, max)
 
-	if err := s.Add("tx1", "http://cb/a"); err != nil {
+	if err := s.Add("tx1", "http://cb/a", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Add("tx1", "http://cb/b"); err != nil {
+	if err := s.Add("tx1", "http://cb/b", ""); err != nil {
 		t.Fatal(err)
 	}
 
 	// At cap: re-adding either existing URL must succeed (idempotent set add).
 	for _, url := range []string{"http://cb/a", "http://cb/b"} {
-		if err := s.Add("tx1", url); err != nil {
+		if err := s.Add("tx1", url, ""); err != nil {
 			t.Fatalf("idempotent re-add of %q: %v", url, err)
 		}
 	}
 
 	// And a NEW URL still trips the cap.
-	if err := s.Add("tx1", "http://cb/c"); !errors.Is(err, storepkg.ErrMaxCallbacksPerTxIDExceeded) {
+	if err := s.Add("tx1", "http://cb/c", ""); !errors.Is(err, storepkg.ErrMaxCallbacksPerTxIDExceeded) {
 		t.Fatalf("expected ErrMaxCallbacksPerTxIDExceeded, got %v", err)
 	}
 
@@ -167,7 +226,7 @@ func TestRegistrationStore_MaxCallbacksDisabled(t *testing.T) {
 	s := newRegistrationStore(db, d, 0)
 
 	for i := 0; i < 25; i++ {
-		if err := s.Add("tx1", fmt.Sprintf("http://cb/%d", i)); err != nil {
+		if err := s.Add("tx1", fmt.Sprintf("http://cb/%d", i), ""); err != nil {
 			t.Fatalf("Add #%d: %v", i, err)
 		}
 	}
@@ -287,15 +346,15 @@ func TestCallbackURLRegistry_AddGetAll(t *testing.T) {
 	db, d := newTestDB(t)
 	r := newCallbackURLRegistry(db, d, time.Hour)
 
-	if err := r.Add("http://one"); err != nil {
+	if err := r.Add("http://one", "tok-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Add("http://two"); err != nil {
+	if err := r.Add("http://two", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Add("http://one"); err != nil {
+	if err := r.Add("http://one", "tok-1-rotated"); err != nil {
 		t.Fatal(err)
-	} // duplicate
+	} // duplicate URL — token refreshes
 
 	all, err := r.GetAll()
 	if err != nil {
@@ -303,6 +362,17 @@ func TestCallbackURLRegistry_AddGetAll(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("got %v, want 2 URLs", all)
+	}
+	// Verify token is preserved end-to-end and that re-Add rotates it.
+	tokenByURL := map[string]string{}
+	for _, e := range all {
+		tokenByURL[e.URL] = e.Token
+	}
+	if tokenByURL["http://one"] != "tok-1-rotated" {
+		t.Fatalf("expected http://one token tok-1-rotated, got %q", tokenByURL["http://one"])
+	}
+	if tokenByURL["http://two"] != "" {
+		t.Fatalf("expected http://two token \"\", got %q", tokenByURL["http://two"])
 	}
 }
 
@@ -314,7 +384,7 @@ func TestCallbackURLRegistry_RetentionWindow(t *testing.T) {
 	db, d := newTestDB(t)
 	r := newCallbackURLRegistry(db, d, time.Hour)
 
-	if err := r.Add("http://recent"); err != nil {
+	if err := r.Add("http://recent", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -332,18 +402,18 @@ func TestCallbackURLRegistry_RetentionWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAll: %v", err)
 	}
-	for _, u := range all {
-		if u == stale {
-			t.Fatalf("GetAll returned stale URL %q (retention window not enforced)", u)
+	for _, e := range all {
+		if e.URL == stale {
+			t.Fatalf("GetAll returned stale URL %q (retention window not enforced)", e.URL)
 		}
 	}
-	if len(all) != 1 || all[0] != "http://recent" {
+	if len(all) != 1 || all[0].URL != "http://recent" {
 		t.Fatalf("expected only http://recent, got %v", all)
 	}
 
 	// Re-Add the stale URL: that should refresh last_seen_at and bring it
 	// back into the active window.
-	if err = r.Add(stale); err != nil {
+	if err = r.Add(stale, ""); err != nil {
 		t.Fatalf("re-Add stale: %v", err)
 	}
 	all, err = r.GetAll()
@@ -363,7 +433,7 @@ func TestCallbackURLRegistry_SweeperEvicts(t *testing.T) {
 	db, d := newTestDB(t)
 	r := newCallbackURLRegistry(db, d, time.Hour)
 
-	if err := r.Add("http://recent"); err != nil {
+	if err := r.Add("http://recent", ""); err != nil {
 		t.Fatal(err)
 	}
 	stale := "http://ancient"

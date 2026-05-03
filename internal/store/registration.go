@@ -12,6 +12,12 @@ import (
 
 const (
 	callbacksBin = "callbacks"
+
+	// callbackEntryURLKey / callbackEntryTokenKey are the Aerospike CDT-map
+	// keys used by the new (url, token) entry shape stored in callbacksBin.
+	// Short single-character keys keep the on-wire payload small.
+	callbackEntryURLKey   = "u"
+	callbackEntryTokenKey = "t"
 )
 
 // ErrMaxCallbacksPerTxIDExceeded is returned by RegistrationStore.Add when
@@ -63,31 +69,32 @@ func NewRegistrationStore(client *AerospikeClient, setName string, maxRetries, r
 // loser finds the URL already present (idempotent success).
 const addCASMaxAttempts = 5
 
-// Add registers a callback URL for a txid using CDT list operations with the
-// UNIQUE flag for set semantics. When maxCallbacksPerTxID > 0, the read-and-
-// write is gated by an optimistic generation CAS so concurrent registrations
-// can't both observe (count == max-1) and both succeed past the cap.
-func (s *aerospikeRegistration) Add(txid, callbackURL string) error {
+// Add registers a (callbackURL, callbackToken) entry for a txid.
+//
+// Storage shape: callbacksBin holds an Aerospike CDT list of map entries
+// {u: url, t: token}. Set-semantics (one entry per URL) are enforced via a
+// read-modify-write under generation CAS rather than the previous
+// ListWriteFlagsAddUnique trick — Aerospike's UNIQUE flag matches on whole-
+// element equality, which broke once we promoted entries from bare strings
+// to maps (different tokens for the same URL would each be considered
+// distinct elements). The CAS loop keeps idempotent-on-URL semantics and
+// also lets a re-registration refresh the token.
+//
+// Backwards compatibility: the reader (Get / BatchGet) still accepts legacy
+// bare-string entries written by older deployments — those decode to a
+// CallbackEntry with Token = "". A re-registration of an existing URL
+// rewrites the entire list in the new map shape, migrating the record on
+// next /watch.
+//
+// Concurrency: the count + idempotency check + write all run under
+// EXPECT_GEN_EQUAL. A concurrent writer that wins our race trips
+// GENERATION_ERROR / KEY_EXISTS_ERROR and we re-read and re-decide.
+func (s *aerospikeRegistration) Add(txid, callbackURL, callbackToken string) error {
 	key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
 	if err != nil {
 		return fmt.Errorf("failed to create key: %w", err)
 	}
 
-	// Cap disabled: preserve the original best-effort append, which already
-	// honors set semantics via ListWriteFlagsAddUnique|NoFail.
-	if s.maxCallbacksPerTxID <= 0 {
-		wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
-		wp.RecordExistsAction = as.UPDATE
-		listPolicy := as.NewListPolicy(as.ListOrderOrdered, as.ListWriteFlagsAddUnique|as.ListWriteFlagsNoFail)
-		ops := []*as.Operation{as.ListAppendWithPolicyOp(listPolicy, callbacksBin, callbackURL)}
-		if _, err := s.client.Client().Operate(wp, key, ops...); err != nil {
-			return fmt.Errorf("failed to add registration: %w", err)
-		}
-		return nil
-	}
-
-	// Cap enabled: read current list + record generation, decide, then write
-	// under EXPECT_GEN_EQUAL. Loop on generation mismatch.
 	for attempt := 0; attempt < addCASMaxAttempts; attempt++ {
 		record, err := s.client.Client().Get(s.client.ReadPolicy(), key, callbacksBin)
 		if err != nil {
@@ -108,15 +115,27 @@ func (s *aerospikeRegistration) Add(txid, callbackURL string) error {
 			}
 		}
 
-		// Idempotent: already registered, nothing to do (and the cap doesn't apply).
-		for _, v := range existing {
-			if s, ok := v.(string); ok && s == callbackURL {
-				return nil
+		entries := parseCallbackEntries(existing)
+
+		// Build the next list. If the URL is already present, refresh its
+		// token (idempotent re-registration may rotate the token); otherwise
+		// append. This both migrates legacy bare-string entries to the new
+		// map shape and keeps set-on-URL semantics.
+		next := make([]interface{}, 0, len(entries)+1)
+		found := false
+		for _, e := range entries {
+			if e.URL == callbackURL {
+				found = true
+				next = append(next, encodeCallbackEntry(callbackURL, callbackToken))
+			} else {
+				next = append(next, encodeCallbackEntry(e.URL, e.Token))
 			}
 		}
-
-		if len(existing) >= s.maxCallbacksPerTxID {
-			return ErrMaxCallbacksPerTxIDExceeded
+		if !found {
+			if s.maxCallbacksPerTxID > 0 && len(entries) >= s.maxCallbacksPerTxID {
+				return ErrMaxCallbacksPerTxIDExceeded
+			}
+			next = append(next, encodeCallbackEntry(callbackURL, callbackToken))
 		}
 
 		wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
@@ -130,10 +149,8 @@ func (s *aerospikeRegistration) Add(txid, callbackURL string) error {
 			wp.Generation = generation
 		}
 
-		listPolicy := as.NewListPolicy(as.ListOrderOrdered, as.ListWriteFlagsAddUnique|as.ListWriteFlagsNoFail)
-		ops := []*as.Operation{as.ListAppendWithPolicyOp(listPolicy, callbacksBin, callbackURL)}
-
-		if _, err := s.client.Client().Operate(wp, key, ops...); err != nil {
+		bins := as.BinMap{callbacksBin: next}
+		if err := s.client.Client().Put(wp, key, bins); err != nil {
 			var asErr *as.AerospikeError
 			if errors.As(err, &asErr) {
 				if asErr.Matches(astypes.GENERATION_ERROR, astypes.KEY_EXISTS_ERROR) {
@@ -150,8 +167,47 @@ func (s *aerospikeRegistration) Add(txid, callbackURL string) error {
 	return fmt.Errorf("failed to add registration: generation contention after %d attempts", addCASMaxAttempts)
 }
 
-// Get returns all callback URLs registered for a txid.
-func (s *aerospikeRegistration) Get(txid string) ([]string, error) {
+// encodeCallbackEntry produces the Aerospike map-shape representation for a
+// (url, token) pair. Tokens are stored unconditionally (including ""); the
+// reader treats a missing or empty token field as Token = "".
+func encodeCallbackEntry(url, token string) map[interface{}]interface{} {
+	return map[interface{}]interface{}{
+		callbackEntryURLKey:   url,
+		callbackEntryTokenKey: token,
+	}
+}
+
+// parseCallbackEntries decodes a callbacksBin list into CallbackEntry values.
+// Accepts both the legacy bare-string shape (token = "") and the new map
+// shape {u: url, t: token}. Anything that doesn't match either shape is
+// skipped — a defensive choice for forward-compat with future schema changes.
+func parseCallbackEntries(list []interface{}) []CallbackEntry {
+	if len(list) == 0 {
+		return nil
+	}
+	entries := make([]CallbackEntry, 0, len(list))
+	for _, v := range list {
+		switch tv := v.(type) {
+		case string:
+			// Legacy bare-string entry: no token.
+			entries = append(entries, CallbackEntry{URL: tv})
+		case map[interface{}]interface{}:
+			url, _ := tv[callbackEntryURLKey].(string)
+			token, _ := tv[callbackEntryTokenKey].(string)
+			if url == "" {
+				continue
+			}
+			entries = append(entries, CallbackEntry{URL: url, Token: token})
+		}
+	}
+	return entries
+}
+
+// Get returns all (url, token) registrations for a txid. Accepts both the
+// new {u, t} map entry shape and the legacy bare-string shape (token = "")
+// so an in-flight rolling deploy never 401s a callback that hasn't been
+// rewritten yet.
+func (s *aerospikeRegistration) Get(txid string) ([]CallbackEntry, error) {
 	key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create key: %w", err)
@@ -175,19 +231,14 @@ func (s *aerospikeRegistration) Get(txid string) ([]string, error) {
 		return nil, fmt.Errorf("unexpected bin type for callbacks")
 	}
 
-	urls := make([]string, 0, len(list))
-	for _, v := range list {
-		if s, ok := v.(string); ok {
-			urls = append(urls, s)
-		}
-	}
-	return urls, nil
+	return parseCallbackEntries(list), nil
 }
 
-// BatchGet returns callback URLs for multiple txids in a single batch call.
-func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]string, error) {
+// BatchGet returns (url, token) registrations for multiple txids in a single
+// batch call. Same dual-shape parsing as Get.
+func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackEntry, error) {
 	if len(txids) == 0 {
-		return make(map[string][]string), nil
+		return make(map[string][]CallbackEntry), nil
 	}
 
 	keys := make([]*as.Key, len(txids))
@@ -205,7 +256,7 @@ func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]string, e
 		return nil, fmt.Errorf("batch get failed: %w", err)
 	}
 
-	result := make(map[string][]string)
+	result := make(map[string][]CallbackEntry)
 	for i, record := range records {
 		if record == nil {
 			continue
@@ -218,14 +269,9 @@ func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]string, e
 		if !ok {
 			continue
 		}
-		urls := make([]string, 0, len(list))
-		for _, v := range list {
-			if s, ok := v.(string); ok {
-				urls = append(urls, s)
-			}
-		}
-		if len(urls) > 0 {
-			result[txids[i]] = urls
+		entries := parseCallbackEntries(list)
+		if len(entries) > 0 {
+			result[txids[i]] = entries
 		}
 	}
 

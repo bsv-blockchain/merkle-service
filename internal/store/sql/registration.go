@@ -27,10 +27,10 @@ func newRegistrationStore(db *sql.DB, d *dialect, maxCallbacksPerTxID int) *regi
 	return &registrationStore{db: db, d: d, maxCallbacksPerTxID: maxCallbacksPerTxID}
 }
 
-// Add registers callbackURL for txid. Re-adding an already-known URL is a
-// no-op (set semantics, idempotent). When maxCallbacksPerTxID > 0, exceeding
-// the cap returns store.ErrMaxCallbacksPerTxIDExceeded — the API layer maps
-// this to HTTP 429.
+// Add registers callbackURL + callbackToken for txid. Re-adding an
+// already-known URL refreshes the token (set semantics on URL, idempotent
+// on the row). When maxCallbacksPerTxID > 0, exceeding the cap returns
+// store.ErrMaxCallbacksPerTxIDExceeded — the API layer maps this to HTTP 429.
 //
 // Concurrency: on Postgres we acquire a SELECT ... FOR UPDATE on the parent
 // `registrations` row before counting and inserting, so two concurrent Add
@@ -38,7 +38,7 @@ func newRegistrationStore(db *sql.DB, d *dialect, maxCallbacksPerTxID int) *regi
 // On SQLite the database serializes writers globally (BEGIN IMMEDIATE in the
 // driver), so the count-then-insert pair is already atomic without an
 // explicit lock.
-func (s *registrationStore) Add(txid, callbackURL string) error {
+func (s *registrationStore) Add(txid, callbackURL, callbackToken string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -66,15 +66,22 @@ func (s *registrationStore) Add(txid, callbackURL string) error {
 		}
 
 		// Idempotency probe: if the URL is already registered, re-adding is
-		// a no-op regardless of the cap. Otherwise enforce the limit.
+		// a no-op for the count check (regardless of the cap). The token is
+		// still refreshed via the ON CONFLICT DO UPDATE in the INSERT below.
 		probeQ := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 			"SELECT 1 FROM registration_urls WHERE txid = %s AND callback_url = %s",
 			s.d.placeholder(1), s.d.placeholder(2))
 		var exists int
 		switch err := tx.QueryRowContext(ctx, probeQ, txid, callbackURL).Scan(&exists); err {
 		case nil:
-			// URL already present — commit so the registrations row sticks
-			// (preserving prior behavior where the parent row is upserted).
+			// URL already present — refresh its token and commit. Without
+			// this UPDATE a token rotation would never propagate.
+			updateTokenQ := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+				"UPDATE registration_urls SET callback_token = %s WHERE txid = %s AND callback_url = %s",
+				s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3))
+			if _, updateErr := tx.ExecContext(ctx, updateTokenQ, callbackToken, txid, callbackURL); updateErr != nil {
+				return fmt.Errorf("refresh callback token: %w", updateErr)
+			}
 			return tx.Commit()
 		case sql.ErrNoRows:
 			// fall through to count + insert
@@ -92,38 +99,43 @@ func (s *registrationStore) Add(txid, callbackURL string) error {
 		}
 	}
 
+	// Cap-disabled / new-row path: upsert the (txid, callback_url) row,
+	// refreshing callback_token on conflict so a token rotation lands.
 	insertURL := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-		"INSERT INTO registration_urls (txid, callback_url) VALUES (%s, %s)%s",
-		s.d.placeholder(1), s.d.placeholder(2), s.d.onConflictDoNothing)
-	if _, err := tx.ExecContext(ctx, insertURL, txid, callbackURL); err != nil {
+		"INSERT INTO registration_urls (txid, callback_url, callback_token) VALUES (%s, %s, %s) "+
+			"ON CONFLICT (txid, callback_url) DO UPDATE SET callback_token = EXCLUDED.callback_token",
+		s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3))
+	if _, err := tx.ExecContext(ctx, insertURL, txid, callbackURL, callbackToken); err != nil {
 		return fmt.Errorf("insert registration url: %w", err)
 	}
 	return tx.Commit()
 }
 
-func (s *registrationStore) Get(txid string) ([]string, error) {
+func (s *registrationStore) Get(txid string) ([]storepkg.CallbackEntry, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	q := fmt.Sprintf("SELECT callback_url FROM registration_urls WHERE txid = %s ORDER BY callback_url", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"SELECT callback_url, callback_token FROM registration_urls WHERE txid = %s ORDER BY callback_url",
+		s.d.placeholder(1))
 	rows, err := s.db.QueryContext(ctx, q, txid)
 	if err != nil {
 		return nil, err
 	}
 	defer ensureRowsClosed(rows)
-	var out []string
+	var out []storepkg.CallbackEntry
 	for rows.Next() {
-		var u string
-		if err := rows.Scan(&u); err != nil {
+		var entry storepkg.CallbackEntry
+		if err := rows.Scan(&entry.URL, &entry.Token); err != nil {
 			return nil, err
 		}
-		out = append(out, u)
+		out = append(out, entry)
 	}
 	return out, rows.Err()
 }
 
-func (s *registrationStore) BatchGet(txids []string) (map[string][]string, error) {
+func (s *registrationStore) BatchGet(txids []string) (map[string][]storepkg.CallbackEntry, error) {
 	if len(txids) == 0 {
-		return map[string][]string{}, nil
+		return map[string][]storepkg.CallbackEntry{}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -135,7 +147,7 @@ func (s *registrationStore) BatchGet(txids []string) (map[string][]string, error
 		args[i] = t
 	}
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-		"SELECT txid, callback_url FROM registration_urls WHERE txid IN (%s)",
+		"SELECT txid, callback_url, callback_token FROM registration_urls WHERE txid IN (%s)",
 		strings.Join(placeholders, ", "))
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -143,13 +155,14 @@ func (s *registrationStore) BatchGet(txids []string) (map[string][]string, error
 	}
 	defer ensureRowsClosed(rows)
 
-	result := map[string][]string{}
+	result := map[string][]storepkg.CallbackEntry{}
 	for rows.Next() {
-		var txid, url string
-		if err := rows.Scan(&txid, &url); err != nil {
+		var txid string
+		var entry storepkg.CallbackEntry
+		if err := rows.Scan(&txid, &entry.URL, &entry.Token); err != nil {
 			return nil, err
 		}
-		result[txid] = append(result[txid], url)
+		result[txid] = append(result[txid], entry)
 	}
 	return result, rows.Err()
 }
