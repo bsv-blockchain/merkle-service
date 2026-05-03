@@ -180,53 +180,106 @@ func TestRegistrationStore_MaxCallbacksDisabled(t *testing.T) {
 	}
 }
 
-func TestCallbackDedup_RecordAndExists(t *testing.T) {
+func TestCallbackDedup_ClaimIsAtomic(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newCallbackDedup(db, d)
 
-	ok, err := s.Exists("tx", "url", "MINED")
+	// First call wins the claim.
+	claimed, err := s.Claim("tx", "url", "MINED", 1*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok {
-		t.Fatal("Exists=true before Record")
+	if !claimed {
+		t.Fatal("first Claim should succeed")
 	}
 
-	if err = s.Record("tx", "url", "MINED", 1*time.Hour); err != nil {
-		t.Fatal(err)
+	// Subsequent calls observe the existing claim and return false (duplicate).
+	for i := 0; i < 3; i++ {
+		claimed, err = s.Claim("tx", "url", "MINED", 1*time.Hour)
+		if err != nil {
+			t.Fatalf("repeat Claim error: %v", err)
+		}
+		if claimed {
+			t.Fatalf("repeat Claim #%d should report duplicate", i)
+		}
 	}
-	ok, err = s.Exists("tx", "url", "MINED")
+
+	// Distinct tuple is independent.
+	claimed, err = s.Claim("tx", "url", "STUMP", 1*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok {
-		t.Fatal("Exists=false after Record")
-	}
-
-	// Idempotent re-record.
-	if err := s.Record("tx", "url", "MINED", 1*time.Hour); err != nil {
-		t.Fatalf("re-record: %v", err)
+	if !claimed {
+		t.Fatal("Claim for distinct statusType should succeed")
 	}
 }
 
-func TestCallbackDedup_TTLExpiry(t *testing.T) {
+func TestCallbackDedup_TTLExpiryAllowsReclaim(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newCallbackDedup(db, d)
 
-	// 1-second TTL so the check-clause can observe the expiry without
-	// needing the sweeper goroutine to run.
-	if err := s.Record("tx", "url", "MINED", 1*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	// Wait past the TTL. SQLite's CURRENT_TIMESTAMP has second precision so
-	// we pad by 2s.
-	time.Sleep(2100 * time.Millisecond)
-	ok, err := s.Exists("tx", "url", "MINED")
+	// 1-second TTL so we can observe expiry without waiting for the sweeper.
+	claimed, err := s.Claim("tx", "url", "MINED", 1*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok {
-		t.Fatal("Exists should be false after TTL elapses")
+	if !claimed {
+		t.Fatal("initial Claim should succeed")
+	}
+
+	// Immediately re-claim → duplicate, still within TTL.
+	claimed, err = s.Claim("tx", "url", "MINED", 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("Claim within TTL should be marked duplicate")
+	}
+
+	// SQLite's CURRENT_TIMESTAMP has second precision; pad by 2s past TTL.
+	time.Sleep(2100 * time.Millisecond)
+
+	// Expired row should be evicted by Claim's pre-INSERT cleanup, so the
+	// next claim wins again.
+	claimed, err = s.Claim("tx", "url", "MINED", 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("Claim after TTL expiry should succeed")
+	}
+}
+
+func TestCallbackDedup_ConcurrentClaimsAtMostOneWins(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newCallbackDedup(db, d)
+
+	const workers = 16
+	var wg sync.WaitGroup
+	wins := make(chan bool, workers)
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			ok, err := s.Claim("race-tx", "race-url", "MINED", 1*time.Hour)
+			if err != nil {
+				t.Errorf("Claim error: %v", err)
+				return
+			}
+			wins <- ok
+		}()
+	}
+	wg.Wait()
+	close(wins)
+
+	winCount := 0
+	for w := range wins {
+		if w {
+			winCount++
+		}
+	}
+	if winCount != 1 {
+		t.Fatalf("expected exactly 1 winning Claim across %d workers, got %d", workers, winCount)
 	}
 }
 
@@ -522,12 +575,12 @@ func TestSweeper_DeletesExpiredRows(t *testing.T) {
 	db, d := newTestDB(t)
 	dedup := newCallbackDedup(db, d)
 
-	// Record one entry with a short TTL (will expire) and one with a long TTL.
-	if err := dedup.Record("tx-expired", "u", "MINED", 1*time.Second); err != nil {
-		t.Fatal(err)
+	// Claim one entry with a short TTL (will expire) and one with a long TTL.
+	if claimed, err := dedup.Claim("tx-expired", "u", "MINED", 1*time.Second); err != nil || !claimed {
+		t.Fatalf("claim tx-expired: claimed=%v err=%v", claimed, err)
 	}
-	if err := dedup.Record("tx-fresh", "u", "MINED", 1*time.Hour); err != nil {
-		t.Fatal(err)
+	if claimed, err := dedup.Claim("tx-fresh", "u", "MINED", 1*time.Hour); err != nil || !claimed {
+		t.Fatalf("claim tx-fresh: claimed=%v err=%v", claimed, err)
 	}
 
 	// Wait for the first entry to expire, then sweep.
@@ -536,8 +589,8 @@ func TestSweeper_DeletesExpiredRows(t *testing.T) {
 	sw.sweepOnce(context.Background())
 
 	// Verify the expired row is gone at the row level (not just filtered by
-	// the expires_at check). Count via SELECT so we don't rely on Exists'
-	// own expiry filter.
+	// the expires_at check). Count via SELECT so we don't rely on Claim's
+	// own expiry-cleanup behavior.
 	var count int
 	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM callback_dedup WHERE dedup_key = ?",
 		dedupKey("tx-expired", "u", "MINED")).Scan(&count); err != nil {
@@ -547,13 +600,13 @@ func TestSweeper_DeletesExpiredRows(t *testing.T) {
 		t.Fatalf("expired row still present after sweep: count=%d", count)
 	}
 
-	// Fresh entry still exists.
-	ok, err := dedup.Exists("tx-fresh", "u", "MINED")
+	// Fresh entry still claimed → second Claim returns duplicate.
+	claimed, err := dedup.Claim("tx-fresh", "u", "MINED", 1*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok {
-		t.Fatal("fresh entry was deleted")
+	if claimed {
+		t.Fatal("fresh entry should still be claimed (duplicate Claim)")
 	}
 }
 

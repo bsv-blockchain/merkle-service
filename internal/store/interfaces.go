@@ -35,9 +35,17 @@ type SubtreeStore interface {
 
 // CallbackDedupStore tracks whether a (txid, url, statusType) combination has
 // already been delivered so retries don't double-fire callbacks.
+//
+// Claim atomically reserves a dedup slot. It returns claimed=true iff this
+// caller is the first to record the (txid, url, statusType) tuple — meaning
+// the caller is responsible for delivering the callback. claimed=false
+// indicates the tuple was already recorded by a prior delivery (or a
+// concurrent racer that won the claim) and the caller MUST skip delivery to
+// avoid double-firing. Combining the prior Exists+Record pair into a single
+// atomic operation closes the read-modify-write race that allowed two
+// concurrent workers to both observe "not exists" and double-deliver.
 type CallbackDedupStore interface {
-	Exists(txid, callbackURL, statusType string) (bool, error)
-	Record(txid, callbackURL, statusType string, ttl time.Duration) error
+	Claim(txid, callbackURL, statusType string, ttl time.Duration) (claimed bool, err error)
 }
 
 // CallbackURLRegistry enumerates every known callback URL. Add is set-insert.

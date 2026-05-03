@@ -540,7 +540,8 @@ func TestProcessDelivery_DedupSkipsDuplicate(t *testing.T) {
 
 	cfg := defaultTestConfig()
 	ds, _, _ := newTestDeliveryService(t, cfg, server.Client())
-	ds.dedupStore = &mockDedupStore{exists: true}
+	// claimResult=false → Claim returns "already claimed" → dedup-skip path.
+	ds.dedupStore = &mockDedupStore{claimResult: false}
 
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
@@ -720,15 +721,21 @@ func TestDeliverCallback_BlockProcessedPayload(t *testing.T) {
 	}
 }
 
-// mockDedupStore implements CallbackDeduper for testing.
+// mockDedupStore implements CallbackDeduper for testing. claimResult drives
+// the (claimed, err) tuple returned from Claim — tests for the "duplicate
+// arrived after a prior delivery" path set claimResult=false (no error,
+// nothing claimed) so processDelivery follows the dedup-skip branch. claimErr
+// is OR'd in when set so tests can simulate a backend outage.
 type mockDedupStore struct {
-	exists bool
+	claimResult bool
+	claimErr    error
+	calls       int
 }
 
-func (m *mockDedupStore) Exists(txid, callbackURL, statusType string) (bool, error) {
-	return m.exists, nil
-}
-
-func (m *mockDedupStore) Record(txid, callbackURL, statusType string, ttl time.Duration) error {
-	return nil
+func (m *mockDedupStore) Claim(txid, callbackURL, statusType string, ttl time.Duration) (bool, error) {
+	m.calls++
+	if m.claimErr != nil {
+		return false, m.claimErr
+	}
+	return m.claimResult, nil
 }
