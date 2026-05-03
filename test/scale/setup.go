@@ -41,7 +41,7 @@ func preloadRegistrations(manifest *Manifest, txids [][]byte, regStore *store.Re
 					copy(h[:], txids[j])
 					txidStr := h.String()
 
-					if err := regStore.Add(txidStr, arcade.CallbackURL); err != nil {
+					if err := regStore.Add(txidStr, arcade.CallbackURL, ""); err != nil {
 						mu.Lock()
 						if firstErr == nil {
 							firstErr = fmt.Errorf("adding registration for txid index %d: %w", j, err)
@@ -69,7 +69,7 @@ func preloadRegistrations(manifest *Manifest, txids [][]byte, regStore *store.Re
 // preloadCallbackURLRegistry adds all callback URLs to the broadcast registry.
 func preloadCallbackURLRegistry(manifest *Manifest, urlRegistry *store.CallbackURLRegistry) error {
 	for _, arcade := range manifest.ArcadeInstances {
-		if err := urlRegistry.Add(arcade.CallbackURL); err != nil {
+		if err := urlRegistry.Add(arcade.CallbackURL, ""); err != nil {
 			return fmt.Errorf("adding callback URL for arcade %d: %w", arcade.Index, err)
 		}
 	}

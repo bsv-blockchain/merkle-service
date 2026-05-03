@@ -146,16 +146,20 @@ func (h *Handlers) handleLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	urls, err := h.regStore.Get(txid)
+	entries, err := h.regStore.Get(txid)
 
 	data := h.newHomeData()
 	data.LookupTxid = txid
 
 	if err != nil {
 		data.LookupErr = fmt.Sprintf("Error querying Aerospike: %v", err)
-	} else if len(urls) == 0 {
+	} else if len(entries) == 0 {
 		data.LookupErr = "No registrations found"
 	} else {
+		urls := make([]string, 0, len(entries))
+		for _, e := range entries {
+			urls = append(urls, e.URL)
+		}
 		data.LookupURLs = urls
 		// Track this txid if not already tracked.
 		h.txidTracker.Add(txid, urls)
@@ -169,8 +173,12 @@ func (h *Handlers) handleRegistrations(w http.ResponseWriter, r *http.Request) {
 	// Refresh callback URLs from Aerospike for all tracked txids.
 	tracked := h.txidTracker.GetAll()
 	for _, t := range tracked {
-		urls, err := h.regStore.Get(t.Txid)
-		if err == nil && len(urls) > 0 {
+		entries, err := h.regStore.Get(t.Txid)
+		if err == nil && len(entries) > 0 {
+			urls := make([]string, 0, len(entries))
+			for _, e := range entries {
+				urls = append(urls, e.URL)
+			}
 			h.txidTracker.UpdateCallbackURLs(t.Txid, urls)
 		}
 	}

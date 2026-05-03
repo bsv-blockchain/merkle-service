@@ -131,7 +131,7 @@ func determineNamespace(t *testing.T) string {
 		}
 		// Try a write to verify the namespace is usable.
 		regStore := store.NewRegistrationStore(client, "ns_probe", 1, 50, 0, testLogger())
-		if err := regStore.Add("probe_txid", "http://probe"); err != nil {
+		if err := regStore.Add("probe_txid", "http://probe", ""); err != nil {
 			client.Close()
 			continue
 		}
@@ -222,7 +222,7 @@ func TestSeenOnNetworkCallback(t *testing.T) {
 	defer mockServer.Close()
 
 	callbackURL := mockServer.URL + "/callback"
-	if err := regStore.Add(txid, callbackURL); err != nil {
+	if err := regStore.Add(txid, callbackURL, ""); err != nil {
 		t.Fatalf("failed to register txid: %v", err)
 	}
 
@@ -286,7 +286,7 @@ func TestMinedCallbackWithSTUMP(t *testing.T) {
 	defer mockServer.Close()
 
 	callbackURL := mockServer.URL + "/mined-callback"
-	if err := regStore.Add(txid, callbackURL); err != nil {
+	if err := regStore.Add(txid, callbackURL, ""); err != nil {
 		t.Fatalf("failed to register txid: %v", err)
 	}
 
@@ -361,10 +361,10 @@ func TestMultipleCallbacks(t *testing.T) {
 	callbackURL1 := mockServer1.URL + "/cb1"
 	callbackURL2 := mockServer2.URL + "/cb2"
 
-	if err := regStore.Add(txid, callbackURL1); err != nil {
+	if err := regStore.Add(txid, callbackURL1, ""); err != nil {
 		t.Fatalf("failed to register txid with callback1: %v", err)
 	}
-	if err := regStore.Add(txid, callbackURL2); err != nil {
+	if err := regStore.Add(txid, callbackURL2, ""); err != nil {
 		t.Fatalf("failed to register txid with callback2: %v", err)
 	}
 
@@ -439,7 +439,7 @@ func TestSeenMultipleNodes(t *testing.T) {
 	defer mockServer.Close()
 
 	callbackURL := mockServer.URL + "/seen-multi"
-	if err := regStore.Add(txid, callbackURL); err != nil {
+	if err := regStore.Add(txid, callbackURL, ""); err != nil {
 		t.Fatalf("failed to register txid: %v", err)
 	}
 

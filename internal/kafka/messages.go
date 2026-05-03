@@ -40,16 +40,23 @@ type BlockMessage struct {
 
 // CallbackTopicMessage is the message published to the callback Kafka topic.
 // It wraps the Arcade CallbackMessage fields plus delivery metadata.
+//
+// CallbackToken is the optional bearer token that the delivery service
+// attaches as `Authorization: Bearer <token>` on the outbound HTTP POST.
+// Empty / missing means "send no Authorization header" — preserves today's
+// behavior for any deployment that hasn't shipped arcade's matching
+// /watch token-passing change.
 type CallbackTopicMessage struct {
-	CallbackURL  string       `json:"callbackUrl"`
-	Type         CallbackType `json:"type"`
-	TxID         string       `json:"txid,omitempty"`
-	TxIDs        []string     `json:"txids,omitempty"`
-	BlockHash    string       `json:"blockHash,omitempty"`
-	SubtreeIndex int          `json:"subtreeIndex,omitempty"`
-	StumpRef     string       `json:"stumpRef,omitempty"`
-	RetryCount   int          `json:"retryCount,omitempty"`
-	NextRetryAt  time.Time    `json:"nextRetryAt,omitempty"`
+	CallbackURL   string       `json:"callbackUrl"`
+	CallbackToken string       `json:"callbackToken,omitempty"`
+	Type          CallbackType `json:"type"`
+	TxID          string       `json:"txid,omitempty"`
+	TxIDs         []string     `json:"txids,omitempty"`
+	BlockHash     string       `json:"blockHash,omitempty"`
+	SubtreeIndex  int          `json:"subtreeIndex,omitempty"`
+	StumpRef      string       `json:"stumpRef,omitempty"`
+	RetryCount    int          `json:"retryCount,omitempty"`
+	NextRetryAt   time.Time    `json:"nextRetryAt,omitempty"`
 }
 
 func (m *SubtreeMessage) Encode() ([]byte, error) {

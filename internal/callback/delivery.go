@@ -529,7 +529,12 @@ func (d *DeliveryService) heartbeat(ctx context.Context) {
 	}
 }
 
-// deliverCallback makes an HTTP POST to the callback URL with the CallbackMessage payload.
+// deliverCallback makes an HTTP POST to the callback URL with the
+// CallbackMessage payload. When msg.CallbackToken is non-empty the request
+// carries `Authorization: Bearer <token>` — arcade's callback endpoint
+// requires this header. An empty token sends the request unauthenticated,
+// preserving today's behavior for deployments where arcade has not yet
+// shipped its matching token-passing change.
 func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.CallbackTopicMessage) error {
 	payload := callbackPayload{
 		Type:         string(msg.Type),
@@ -572,6 +577,13 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 	idempotencyKey := buildIdempotencyKey(msg)
 	if idempotencyKey != "" {
 		req.Header.Set("X-Idempotency-Key", idempotencyKey)
+	}
+
+	// Bearer token authentication when arcade configured one for this URL.
+	// Empty token → no Authorization header so older deployments without the
+	// matching arcade-side token check continue to work.
+	if msg.CallbackToken != "" {
+		req.Header.Set("Authorization", "Bearer "+msg.CallbackToken)
 	}
 
 	start := time.Now()
