@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -14,7 +15,7 @@ type BaseService struct {
 	Logger  *slog.Logger
 	ctx     context.Context
 	cancel  context.CancelFunc
-	started bool
+	started atomic.Bool
 }
 
 // NewLogger creates a JSON slog.Logger at the given level writing to stdout.
@@ -32,7 +33,7 @@ func (b *BaseService) InitBase(name string) {
 		b.Logger = NewLogger(slog.LevelInfo).With("service", name)
 	}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
-	b.started = false
+	b.started.Store(false)
 }
 
 // Context returns the service's context.
@@ -49,12 +50,12 @@ func (b *BaseService) Cancel() {
 
 // IsStarted returns whether the service has been started.
 func (b *BaseService) IsStarted() bool {
-	return b.started
+	return b.started.Load()
 }
 
 // SetStarted sets the started state of the service.
 func (b *BaseService) SetStarted(started bool) {
-	b.started = started
+	b.started.Store(started)
 }
 
 // WaitForShutdown blocks until a SIGTERM or SIGINT signal is received,
