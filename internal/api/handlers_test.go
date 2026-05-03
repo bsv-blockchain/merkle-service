@@ -41,7 +41,7 @@ func (f *fakeRegStore) BatchGet([]string) (map[string][]store.CallbackEntry, err
 func (f *fakeRegStore) UpdateTTL(string, time.Duration) error        { return nil }
 func (f *fakeRegStore) BatchUpdateTTL([]string, time.Duration) error { return nil }
 
-func newTestRouterWithRegStore(rs store.RegistrationStore) (*chi.Mux, *Server) {
+func newTestRouterWithRegStore(rs store.RegistrationStore) *chi.Mux {
 	router := chi.NewRouter()
 	s := &Server{regStore: rs}
 	s.InitBase("test")
@@ -49,7 +49,7 @@ func newTestRouterWithRegStore(rs store.RegistrationStore) (*chi.Mux, *Server) {
 	router.Post("/watch", s.handleWatch)
 	router.Get("/health", s.handleHealth)
 	router.Get("/api/lookup/{txid}", s.handleLookup)
-	return router, s
+	return router
 }
 
 func newTestRouter() *chi.Mux {
@@ -163,7 +163,7 @@ func TestHandleDashboard(t *testing.T) {
 // translates store.ErrMaxCallbacksPerTxIDExceeded to HTTP 429 with a clear
 // JSON error body. F-050 / issue #27.
 func TestHandleWatch_MaxCallbacksReturns429(t *testing.T) {
-	router, _ := newTestRouterWithRegStore(&fakeRegStore{addErr: store.ErrMaxCallbacksPerTxIDExceeded})
+	router := newTestRouterWithRegStore(&fakeRegStore{addErr: store.ErrMaxCallbacksPerTxIDExceeded})
 	// IP literal avoids DNS lookup so the test runs in offline/sandbox
 	// environments. 1.1.1.1 is public and not on the SSRF deny-list.
 	w := postWatch(router, `{"txid":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","callbackUrl":"https://1.1.1.1/cb"}`)
@@ -255,7 +255,7 @@ func TestHandleWatch_RejectsBadScheme(t *testing.T) {
 // store sees the exact bytes the caller sent.
 func TestHandleWatch_AcceptsCallbackToken(t *testing.T) {
 	fake := &fakeRegStore{}
-	router, _ := newTestRouterWithRegStore(fake)
+	router := newTestRouterWithRegStore(fake)
 	const txid = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	const token = "tok-arcade-mainnet-v1" //nolint:gosec // test fixture, not a real credential
 	body := `{"txid":"` + txid + `","callbackUrl":"https://1.1.1.1/cb","callbackToken":"` + token + `"}`
@@ -277,7 +277,7 @@ func TestHandleWatch_AcceptsCallbackToken(t *testing.T) {
 // deployments that haven't shipped the matching token-passing change.
 func TestHandleWatch_EmptyCallbackTokenIsAccepted(t *testing.T) {
 	fake := &fakeRegStore{}
-	router, _ := newTestRouterWithRegStore(fake)
+	router := newTestRouterWithRegStore(fake)
 	const txid = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	body := `{"txid":"` + txid + `","callbackUrl":"https://1.1.1.1/cb"}`
 	w := postWatch(router, body)
@@ -298,7 +298,7 @@ func TestHandleWatch_EmptyCallbackTokenIsAccepted(t *testing.T) {
 // payloads into the registration record.
 func TestHandleWatch_OverlongCallbackTokenRejected(t *testing.T) {
 	fake := &fakeRegStore{}
-	router, _ := newTestRouterWithRegStore(fake)
+	router := newTestRouterWithRegStore(fake)
 	const txid = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	// One byte over the cap.
 	huge := make([]byte, maxCallbackTokenLen+1)
