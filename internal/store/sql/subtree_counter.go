@@ -3,6 +3,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -56,6 +57,18 @@ func (s *subtreeCounter) Init(blockHash string, count int) error {
 //     because modernc.org/sqlite ignores it unless the connection was
 //     opened with the `_txlock=immediate` URL parameter, and the rest of
 //     the codebase opens connections without it.
+//
+// Missing rows: if the counter row does not exist (sql.ErrNoRows), Decrement
+// returns (0, nil) rather than propagating the error. The row may legitimately
+// be absent because the sweeper purged an expired counter, an Init never ran
+// (e.g. process crash between Init and message publish), or the row was
+// already consumed by an earlier successful Decrement that lost its return
+// value. Treating "missing" as "already drained" lets the F-013 DLQ path ack
+// its work item and lets BLOCK_PROCESSED fire; the alternative (propagate
+// ErrNoRows forever) wedges the partition on a redelivery loop because the
+// DLQ-path Decrement also fails, so the message is never ack'd. Receiver-side
+// dedup at the callback delivery service deduplicates any extra
+// BLOCK_PROCESSED that this might trigger, keyed by (blockHash, callbackURL).
 func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -66,6 +79,9 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 			s.d.placeholder(1))
 		var remaining int
 		if err := s.db.QueryRowContext(ctx, q, blockHash).Scan(&remaining); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, nil
+			}
 			return 0, err
 		}
 		return remaining, nil
@@ -94,6 +110,9 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	var remaining int
 	qSel := fmt.Sprintf("SELECT remaining FROM subtree_counters WHERE block_hash = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
 	if err := conn.QueryRowContext(ctx, qSel, blockHash).Scan(&remaining); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
 		return 0, err
 	}
 	remaining--

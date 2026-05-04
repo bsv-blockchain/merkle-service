@@ -562,6 +562,48 @@ func TestSubtreeCounter_InitAndDecrement(t *testing.T) {
 	}
 }
 
+// TestSubtreeCounter_DecrementMissingRow verifies that Decrement returns
+// (0, nil) — not sql.ErrNoRows — when the counter row doesn't exist. This is
+// the production scenario where an Init never ran (or the sweeper purged the
+// row before all subtrees finished). Propagating ErrNoRows from this path
+// wedges the F-013 DLQ branch in subtree_worker.go: that branch republishes
+// the work item to the DLQ topic and then calls Decrement to drive
+// BLOCK_PROCESSED, but if Decrement keeps failing the message is never
+// ack'd and the partition gets stuck in an infinite redelivery loop.
+// Treating the missing row as "already drained" lets the DLQ branch ack and
+// the partition advance.
+func TestSubtreeCounter_DecrementMissingRow(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newSubtreeCounter(db, d, 600)
+
+	got, err := s.Decrement("nonexistent-block")
+	if err != nil {
+		t.Fatalf("Decrement on missing row should not return error, got: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("Decrement on missing row = %d, want 0", got)
+	}
+
+	// Sanity check: real ErrNoRows must not leak through even after an
+	// underlying failure has been observed once.
+	if err := s.Init("real-blk", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decrement("real-blk"); err != nil {
+		t.Fatalf("Decrement on existing row: %v", err)
+	}
+	got, err = s.Decrement("still-nonexistent")
+	if err != nil {
+		t.Fatalf("Decrement on missing row should not return error, got: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("Decrement on missing row = %d, want 0", got)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Decrement leaked sql.ErrNoRows for missing row")
+	}
+}
+
 func TestSubtreeCounter_ConcurrentDecrement(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)
