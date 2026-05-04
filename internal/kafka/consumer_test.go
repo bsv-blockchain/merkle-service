@@ -217,6 +217,155 @@ func TestNewConsumerConfig_InitialOffsetOldest(t *testing.T) {
 	}
 }
 
+// fakeGroup is a stand-in for sarama.ConsumerGroup used by the Start tests
+// below. It lets each test script the behaviour of Consume(): fire Setup
+// (by closing the handler's ready channel), return an error, block until
+// the context is cancelled, etc.
+type fakeGroup struct {
+	consume func(ctx context.Context, topics []string, handler sarama.ConsumerGroupHandler) error
+	closed  chan struct{}
+}
+
+func newFakeGroup(fn func(ctx context.Context, topics []string, handler sarama.ConsumerGroupHandler) error) *fakeGroup {
+	return &fakeGroup{consume: fn, closed: make(chan struct{})}
+}
+
+func (f *fakeGroup) Consume(ctx context.Context, topics []string, handler sarama.ConsumerGroupHandler) error {
+	return f.consume(ctx, topics, handler)
+}
+func (f *fakeGroup) Errors() <-chan error                   { return nil }
+func (f *fakeGroup) Pause(map[string][]int32)               {}
+func (f *fakeGroup) Resume(map[string][]int32)              {}
+func (f *fakeGroup) PauseAll()                              {}
+func (f *fakeGroup) ResumeAll()                             {}
+func (f *fakeGroup) Close() error {
+	select {
+	case <-f.closed:
+	default:
+		close(f.closed)
+	}
+	return nil
+}
+
+// newTestConsumer wires a Consumer around a fakeGroup so we can drive the
+// Start lifecycle without a real broker.
+func newTestConsumer(group sarama.ConsumerGroup) *Consumer {
+	return &Consumer{
+		group:   group,
+		topics:  []string{"test"},
+		handler: func(_ context.Context, _ *sarama.ConsumerMessage) error { return nil },
+		logger:  discardLogger(),
+		ready:   make(chan struct{}),
+	}
+}
+
+// TestStart_ReadyOnSetup is the happy path: Consume drives Setup, which
+// closes c.ready, and Start returns nil.
+func TestStart_ReadyOnSetup(t *testing.T) {
+	group := newFakeGroup(func(ctx context.Context, _ []string, handler sarama.ConsumerGroupHandler) error {
+		// Mimic sarama: call Setup so the ready channel is closed, then
+		// block until the parent context is cancelled.
+		if err := handler.Setup(nil); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return nil
+	})
+
+	c := newTestConsumer(group)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.Start(ctx) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not return after Setup fired")
+	}
+
+	if err := c.Stop(); err != nil {
+		t.Errorf("Stop returned error: %v", err)
+	}
+}
+
+// TestStart_SetupErrorUnblocks is the F-029 regression test. If Consume
+// returns an error before Setup fires, Start must NOT hang on <-c.ready.
+// Instead it must surface the error via the errCh branch of the select.
+func TestStart_SetupErrorUnblocks(t *testing.T) {
+	wantErr := errors.New("broker unreachable")
+	group := newFakeGroup(func(_ context.Context, _ []string, _ sarama.ConsumerGroupHandler) error {
+		// Setup never runs; surface a setup-time failure on every call.
+		return wantErr
+	})
+
+	c := newTestConsumer(group)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.Start(ctx) }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("Start error: got %v, want wrapping %v", err, wantErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start hung waiting on c.ready despite Consume error (F-029 regression)")
+	}
+
+	if err := c.Stop(); err != nil {
+		t.Errorf("Stop returned error: %v", err)
+	}
+}
+
+// TestStart_ContextCancelUnblocks verifies that Start exits via ctx.Done()
+// even when neither Setup fires nor Consume errors out (e.g. a hung broker
+// connection that swallows the context internally for a while). Without the
+// ctx.Done() branch added in F-029 this would block until the goroutine
+// noticed cancellation and exited, which can be unbounded.
+func TestStart_ContextCancelUnblocks(t *testing.T) {
+	// Consume blocks until the context is cancelled and never calls Setup.
+	group := newFakeGroup(func(ctx context.Context, _ []string, _ sarama.ConsumerGroupHandler) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	c := newTestConsumer(group)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- c.Start(ctx) }()
+
+	// Let Start install its derived context, then cancel.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		// Either ctx.Err() directly or the wrapped Consume error are
+		// acceptable: both mean Start unblocked rather than hanging on
+		// <-c.ready.
+		if err == nil {
+			t.Fatalf("Start returned nil; expected cancellation error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start hung after context cancel (F-029 regression)")
+	}
+
+	if err := c.Stop(); err != nil {
+		t.Errorf("Stop returned error: %v", err)
+	}
+}
+
 // TestConsumeClaim_ContextCancelled verifies the loop exits cleanly when the
 // session context is canceled mid-flight (Stop / rebalance path).
 func TestConsumeClaim_ContextCancelled(t *testing.T) {
