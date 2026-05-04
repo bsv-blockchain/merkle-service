@@ -87,6 +87,15 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Validate --concurrency: must be >= 1. A zero value would create an
+	// unbuffered semaphore that never lets goroutines proceed (wg.Wait hangs);
+	// a negative value would panic inside make().
+	if err := validateConcurrency(flagConcurrency); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		usage()
+		os.Exit(2)
+	}
+
 	client := &http.Client{Timeout: flagTimeout}
 	ctx := context.Background()
 
@@ -159,6 +168,17 @@ func runBulk(ctx context.Context, client *http.Client) {
 	if succeeded < len(txids) {
 		os.Exit(1)
 	}
+}
+
+// validateConcurrency returns an error if n is not a usable concurrency
+// value. The semaphore in runBulk is sized from this value; a zero value
+// produces an unbuffered channel that deadlocks wg.Wait, and a negative
+// value panics inside make().
+func validateConcurrency(n int) error {
+	if n < 1 {
+		return fmt.Errorf("--concurrency must be >= 1")
+	}
+	return nil
 }
 
 // validateTxid returns an error if s is not a 64-character hex string.

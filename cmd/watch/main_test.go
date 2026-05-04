@@ -9,6 +9,39 @@ import (
 	"testing"
 )
 
+// --- validateConcurrency ---
+
+func TestValidateConcurrency_Valid(t *testing.T) {
+	for _, n := range []int{1, 2, 10, 1000} {
+		if err := validateConcurrency(n); err != nil {
+			t.Errorf("validateConcurrency(%d) unexpected error: %v", n, err)
+		}
+	}
+}
+
+func TestValidateConcurrency_Zero(t *testing.T) {
+	err := validateConcurrency(0)
+	if err == nil {
+		t.Fatal("expected error for concurrency=0 (would deadlock on unbuffered semaphore)")
+	}
+	if !strings.Contains(err.Error(), "--concurrency must be >= 1") {
+		t.Errorf("error message should mention '--concurrency must be >= 1', got: %v", err)
+	}
+}
+
+func TestValidateConcurrency_Negative(t *testing.T) {
+	for _, n := range []int{-1, -10, -1 << 20} {
+		err := validateConcurrency(n)
+		if err == nil {
+			t.Errorf("expected error for concurrency=%d (would panic make()), got nil", n)
+			continue
+		}
+		if !strings.Contains(err.Error(), "--concurrency must be >= 1") {
+			t.Errorf("error message should mention '--concurrency must be >= 1', got: %v", err)
+		}
+	}
+}
+
 // --- validateTxid ---
 
 func TestValidateTxid_Valid(t *testing.T) {

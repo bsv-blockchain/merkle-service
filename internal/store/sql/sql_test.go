@@ -144,6 +144,58 @@ func TestRegistrationStore_BatchGet(t *testing.T) {
 	}
 }
 
+// TestRegistrationStore_BatchChunking is the regression test for the Postgres
+// "extended protocol limited to 65535 parameters" failure. Subtrees can carry
+// 2^17+ txids; before chunking, BatchGet/BatchUpdateTTL emitted one bind
+// parameter per txid in a single statement and Postgres rejected the prepared
+// statement, sending the subtree to DLQ after maxAttempts retries. The fix
+// chunks both calls into batches of batchParamChunkSize. SQLite has no
+// parameter cap, so this test exercises the chunking logic by passing
+// 2*batchParamChunkSize+1 txids and verifying results merge correctly across
+// chunks.
+func TestRegistrationStore_BatchChunking(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newRegistrationStore(db, d, 0)
+
+	const total = 2*batchParamChunkSize + 1
+	// Register half of the txids so BatchGet has both hits and misses to merge.
+	registered := make(map[string]bool, total/2)
+	for i := 0; i < total; i += 2 {
+		txid := fmt.Sprintf("tx%06d", i)
+		if err := s.Add(txid, fmt.Sprintf("http://cb/%d", i), fmt.Sprintf("tok-%d", i)); err != nil {
+			t.Fatalf("Add %s: %v", txid, err)
+		}
+		registered[txid] = true
+	}
+
+	txids := make([]string, total)
+	for i := 0; i < total; i++ {
+		txids[i] = fmt.Sprintf("tx%06d", i)
+	}
+
+	got, err := s.BatchGet(txids)
+	if err != nil {
+		t.Fatalf("BatchGet across chunks: %v", err)
+	}
+	if len(got) != len(registered) {
+		t.Fatalf("BatchGet returned %d txids, want %d", len(got), len(registered))
+	}
+	for txid := range registered {
+		entries, ok := got[txid]
+		if !ok {
+			t.Fatalf("missing txid %s in BatchGet result", txid)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("txid %s: %d entries, want 1", txid, len(entries))
+		}
+	}
+
+	// BatchUpdateTTL must also chunk without erroring out.
+	if err := s.BatchUpdateTTL(txids, time.Hour); err != nil {
+		t.Fatalf("BatchUpdateTTL across chunks: %v", err)
+	}
+}
+
 // TestRegistrationStore_MaxCallbacksPerTxID covers F-050: once the per-txid
 // callback URL cap is reached, further Add calls return the sentinel error,
 // the row count in registration_urls is exactly the cap, and existing rows
