@@ -133,6 +133,13 @@ func (s *registrationStore) Get(txid string) ([]storepkg.CallbackEntry, error) {
 	return out, rows.Err()
 }
 
+// batchParamChunkSize bounds how many txids we bind per query. The Postgres
+// extended wire protocol caps bind parameters at 65535 per statement, and a
+// single block subtree can carry 2^17+ txids (issue surfaced when a 131k-leaf
+// subtree was DLQ'd with "extended protocol limited to 65535 parameters").
+// 10000 leaves comfortable headroom and still amortizes round-trip cost.
+const batchParamChunkSize = 10000
+
 func (s *registrationStore) BatchGet(txids []string) (map[string][]storepkg.CallbackEntry, error) {
 	if len(txids) == 0 {
 		return map[string][]storepkg.CallbackEntry{}, nil
@@ -140,31 +147,45 @@ func (s *registrationStore) BatchGet(txids []string) (map[string][]storepkg.Call
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	placeholders := make([]string, len(txids))
-	args := make([]interface{}, len(txids))
-	for i, t := range txids {
-		placeholders[i] = s.d.placeholder(i + 1)
-		args[i] = t
+	result := map[string][]storepkg.CallbackEntry{}
+	for start := 0; start < len(txids); start += batchParamChunkSize {
+		end := start + batchParamChunkSize
+		if end > len(txids) {
+			end = len(txids)
+		}
+		chunk := txids[start:end]
+
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, len(chunk))
+		for i, t := range chunk {
+			placeholders[i] = s.d.placeholder(i + 1)
+			args[i] = t
+		}
+		q := fmt.Sprintf(
+			"SELECT txid, callback_url, callback_token FROM registration_urls WHERE txid IN (%s)",
+			strings.Join(placeholders, ", "))
+		if err := s.batchGetChunk(ctx, q, args, result); err != nil {
+			return nil, err
+		}
 	}
-	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-		"SELECT txid, callback_url, callback_token FROM registration_urls WHERE txid IN (%s)",
-		strings.Join(placeholders, ", "))
+	return result, nil
+}
+
+func (s *registrationStore) batchGetChunk(ctx context.Context, q string, args []interface{}, result map[string][]storepkg.CallbackEntry) error {
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer ensureRowsClosed(rows)
-
-	result := map[string][]storepkg.CallbackEntry{}
 	for rows.Next() {
 		var txid string
 		var entry storepkg.CallbackEntry
 		if err := rows.Scan(&txid, &entry.URL, &entry.Token); err != nil {
-			return nil, err
+			return err
 		}
 		result[txid] = append(result[txid], entry)
 	}
-	return result, rows.Err()
+	return rows.Err()
 }
 
 func (s *registrationStore) UpdateTTL(txid string, ttl time.Duration) error {
@@ -183,15 +204,27 @@ func (s *registrationStore) BatchUpdateTTL(txids []string, ttl time.Duration) er
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	placeholders := make([]string, len(txids))
-	args := make([]interface{}, len(txids))
-	for i, t := range txids {
-		placeholders[i] = s.d.placeholder(i + 1)
-		args[i] = t
+
+	intervalExpr := s.d.intervalSeconds(int(ttl.Seconds()))
+	for start := 0; start < len(txids); start += batchParamChunkSize {
+		end := start + batchParamChunkSize
+		if end > len(txids) {
+			end = len(txids)
+		}
+		chunk := txids[start:end]
+
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, len(chunk))
+		for i, t := range chunk {
+			placeholders[i] = s.d.placeholder(i + 1)
+			args[i] = t
+		}
+		q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+			"UPDATE registrations SET expires_at = %s WHERE txid IN (%s)",
+			intervalExpr, strings.Join(placeholders, ", "))
+		if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
+			return err
+		}
 	}
-	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-		"UPDATE registrations SET expires_at = %s WHERE txid IN (%s)",
-		s.d.intervalSeconds(int(ttl.Seconds())), strings.Join(placeholders, ", "))
-	_, err := s.db.ExecContext(ctx, q, args...)
-	return err
+	return nil
 }

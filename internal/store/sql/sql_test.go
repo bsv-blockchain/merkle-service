@@ -144,6 +144,58 @@ func TestRegistrationStore_BatchGet(t *testing.T) {
 	}
 }
 
+// TestRegistrationStore_BatchChunking is the regression test for the Postgres
+// "extended protocol limited to 65535 parameters" failure. Subtrees can carry
+// 2^17+ txids; before chunking, BatchGet/BatchUpdateTTL emitted one bind
+// parameter per txid in a single statement and Postgres rejected the prepared
+// statement, sending the subtree to DLQ after maxAttempts retries. The fix
+// chunks both calls into batches of batchParamChunkSize. SQLite has no
+// parameter cap, so this test exercises the chunking logic by passing
+// 2*batchParamChunkSize+1 txids and verifying results merge correctly across
+// chunks.
+func TestRegistrationStore_BatchChunking(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newRegistrationStore(db, d, 0)
+
+	const total = 2*batchParamChunkSize + 1
+	// Register half of the txids so BatchGet has both hits and misses to merge.
+	registered := make(map[string]bool, total/2)
+	for i := 0; i < total; i += 2 {
+		txid := fmt.Sprintf("tx%06d", i)
+		if err := s.Add(txid, fmt.Sprintf("http://cb/%d", i), fmt.Sprintf("tok-%d", i)); err != nil {
+			t.Fatalf("Add %s: %v", txid, err)
+		}
+		registered[txid] = true
+	}
+
+	txids := make([]string, total)
+	for i := 0; i < total; i++ {
+		txids[i] = fmt.Sprintf("tx%06d", i)
+	}
+
+	got, err := s.BatchGet(txids)
+	if err != nil {
+		t.Fatalf("BatchGet across chunks: %v", err)
+	}
+	if len(got) != len(registered) {
+		t.Fatalf("BatchGet returned %d txids, want %d", len(got), len(registered))
+	}
+	for txid := range registered {
+		entries, ok := got[txid]
+		if !ok {
+			t.Fatalf("missing txid %s in BatchGet result", txid)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("txid %s: %d entries, want 1", txid, len(entries))
+		}
+	}
+
+	// BatchUpdateTTL must also chunk without erroring out.
+	if err := s.BatchUpdateTTL(txids, time.Hour); err != nil {
+		t.Fatalf("BatchUpdateTTL across chunks: %v", err)
+	}
+}
+
 // TestRegistrationStore_MaxCallbacksPerTxID covers F-050: once the per-txid
 // callback URL cap is reached, further Add calls return the sentinel error,
 // the row count in registration_urls is exactly the cap, and existing rows
@@ -600,6 +652,86 @@ func TestSubtreeCounter_ConcurrentDecrement(t *testing.T) {
 		if !seen[want] {
 			t.Fatalf("missing result %d", want)
 		}
+	}
+}
+
+// TestSubtreeCounter_ConcurrentDecrementMultiConn is the F-052 regression
+// test. The previous implementation opened the SQLite transaction with the
+// default deferred isolation, so two connections could both run the
+// SELECT before either ran the UPDATE — each saw the same `remaining`
+// value and wrote back the same decremented value, silently losing a
+// decrement. The fix opens the txn with sql.LevelSerializable, which
+// modernc.org/sqlite implements as BEGIN IMMEDIATE: the second connection
+// blocks at BEGIN until the first commits, so the read+write pair is
+// serialized.
+//
+// To actually exercise the race we configure the pool with multiple
+// connections (the shared newTestDB helper pins MaxOpenConns to 1 and
+// trivially serializes everything through the single conn).
+func TestSubtreeCounter_ConcurrentDecrementMultiConn(t *testing.T) {
+	tmp := t.TempDir() + "/subtree_race.db"
+	db, err := sql.Open("sqlite", "file:"+tmp+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.SetMaxOpenConns(8)
+	t.Cleanup(func() { _ = db.Close() })
+
+	d := sqliteDialect()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := runMigrations(context.Background(), db, d, logger); err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+
+	s := newSubtreeCounter(db, d, 600)
+	const initial = 64
+	if err := s.Init("blk", initial); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	results := make([]int, initial)
+	start := make(chan struct{})
+	for i := 0; i < initial; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			v, err := s.Decrement("blk")
+			if err != nil {
+				t.Errorf("Decrement: %v", err)
+				return
+			}
+			results[i] = v
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	// Every result in [0, initial-1] must appear exactly once. Pre-fix this
+	// would fail with duplicates and missing values when two goroutines
+	// raced through the SELECT-then-UPDATE.
+	seen := map[int]bool{}
+	for _, r := range results {
+		if seen[r] {
+			t.Fatalf("F-052 regression: duplicate Decrement result %d (lost a decrement)", r)
+		}
+		seen[r] = true
+	}
+	for want := 0; want < initial; want++ {
+		if !seen[want] {
+			t.Fatalf("F-052 regression: missing Decrement result %d", want)
+		}
+	}
+
+	// Final stored value must be 0, not some larger value left behind by
+	// clobbered writes.
+	var remaining int
+	if err := db.QueryRowContext(context.Background(), "SELECT remaining FROM subtree_counters WHERE block_hash = ?", "blk").Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("final remaining = %d, want 0", remaining)
 	}
 }
 
