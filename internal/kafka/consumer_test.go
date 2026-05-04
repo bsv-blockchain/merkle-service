@@ -217,6 +217,18 @@ func TestNewConsumerConfig_InitialOffsetOldest(t *testing.T) {
 	}
 }
 
+// TestNewConsumerConfig_ReturnErrors is the regression test for F-053. With
+// Consumer.Return.Errors=false (sarama default) every error during consumption
+// is silently dropped, producing zombie consumers where the pod stays Running
+// but the broker reports the group as Empty. Start() must drain group.Errors()
+// and surface them, which requires this flag.
+func TestNewConsumerConfig_ReturnErrors(t *testing.T) {
+	cfg := newConsumerConfig()
+	if !cfg.Consumer.Return.Errors {
+		t.Error("Consumer.Return.Errors = false (sarama default), want true; without it sarama silently drops all session errors and we cannot detect zombie consumers (F-053)")
+	}
+}
+
 // TestConsumeClaim_ContextCancelled verifies the loop exits cleanly when the
 // session context is canceled mid-flight (Stop / rebalance path).
 func TestConsumeClaim_ContextCancelled(t *testing.T) {

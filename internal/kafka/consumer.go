@@ -4,10 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	"github.com/IBM/sarama"
 )
+
+// exitFunc is the process-termination hook used when the consumer goroutine
+// exits unexpectedly. Indirected through a package variable so tests can
+// substitute it without taking down the test runner.
+var exitFunc = func(code int) { os.Exit(code) }
 
 // MessageHandler is called for each consumed message.
 type MessageHandler func(ctx context.Context, msg *sarama.ConsumerMessage) error
@@ -24,6 +30,12 @@ func newConsumerConfig() *sarama.Config {
 	// environment) still processes the durable backlog instead of silently
 	// jumping to the topic head and dropping queued work.
 	config.Consumer.Offsets.Initial = sarama.OffsetOldest
+	// F-053: surface sarama-level errors (broker disconnects, heartbeat
+	// failures, generation expiration) on group.Errors(). The default of
+	// false silently drops these and is the root cause of zombie consumers
+	// where the pod stays Running but the broker reports the group as
+	// Empty. Start() drains the channel and logs every error.
+	config.Consumer.Return.Errors = true
 	return config
 }
 
@@ -70,9 +82,40 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 func (c *Consumer) Start(ctx context.Context) error {
 	ctx, c.cancel = context.WithCancel(ctx)
 
+	// Drain group.Errors(). With Consumer.Return.Errors=true (set in
+	// newConsumerConfig), every sarama-level error is surfaced here. Without
+	// a reader, the channel buffer fills and sarama back-pressures or drops;
+	// either way the operator gets no signal that the session is unhealthy.
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case err, ok := <-c.group.Errors():
+				if !ok {
+					return
+				}
+				c.logger.Error("sarama consumer group error", "error", err)
+			}
+		}
+	}()
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		// F-053: if this goroutine exits without our context being canceled,
+		// the consumer is no longer running but the process is. That's a
+		// zombie state — the broker drops us from the group, no messages
+		// are consumed, and k8s sees a Running pod with no restarts. Crash
+		// the process so the orchestrator restarts a healthy replica.
+		defer func() {
+			if ctx.Err() == nil {
+				c.logger.Error("consumer goroutine exited without context cancel; crashing process so k8s restarts the pod")
+				exitFunc(1)
+			}
+		}()
 		for {
 			handler := &consumerGroupHandler{
 				handler: c.handler,

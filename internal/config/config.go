@@ -62,6 +62,18 @@ type StoreSQLConfig struct {
 	SweeperInterval string `yaml:"sweeperInterval" mapstructure:"sweeperinterval"`
 	MaxOpenConns    int    `yaml:"maxOpenConns"    mapstructure:"maxopenconns"`
 	MaxIdleConns    int    `yaml:"maxIdleConns"    mapstructure:"maxidleconns"`
+	// ConnMaxIdleTimeSec, if >0, calls db.SetConnMaxIdleTime so idle
+	// connections are closed after this many seconds even when within the
+	// MaxIdleConns budget. The Go database/sql default is 0 (no idle reaping),
+	// which lets pods retain dead connections across long quiet periods and
+	// pile up against PostgreSQL's max_connections under fan-out. Recommended
+	// 60 in production. 0 disables.
+	ConnMaxIdleTimeSec int `yaml:"connMaxIdleTimeSec" mapstructure:"connmaxidletimesec"`
+	// ConnMaxLifetimeSec, if >0, calls db.SetConnMaxLifetime so any
+	// connection — idle or in use — is recycled after this many seconds.
+	// Useful for environments where the server reaps idle backends or where
+	// load-balanced backends rotate. 0 disables. Recommended 900 (15m).
+	ConnMaxLifetimeSec int `yaml:"connMaxLifetimeSec" mapstructure:"connmaxlifetimesec"`
 	// CallbackURLRegistryRetention bounds the SQL callback URL registry. URLs
 	// whose last `Add` is older than this are dropped by the TTL sweeper.
 	// Format: any time.ParseDuration string ("168h", "7d" is NOT supported).

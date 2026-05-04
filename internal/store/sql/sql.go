@@ -45,6 +45,12 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 	if n := cfg.Store.SQL.MaxIdleConns; n > 0 {
 		db.SetMaxIdleConns(n)
 	}
+	if s := cfg.Store.SQL.ConnMaxIdleTimeSec; s > 0 {
+		db.SetConnMaxIdleTime(time.Duration(s) * time.Second)
+	}
+	if s := cfg.Store.SQL.ConnMaxLifetimeSec; s > 0 {
+		db.SetConnMaxLifetime(time.Duration(s) * time.Second)
+	}
 
 	if err = db.PingContext(ctx); err != nil {
 		_ = db.Close()

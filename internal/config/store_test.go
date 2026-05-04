@@ -57,7 +57,10 @@ func TestStoreBackend_ExplicitSQL(t *testing.T) {
 		"  sql:\n" +
 		"    driver: sqlite\n" +
 		"    dsn: \":memory:\"\n" +
-		"    maxOpenConns: 5\n"
+		"    maxOpenConns: 5\n" +
+		"    maxIdleConns: 2\n" +
+		"    connMaxIdleTimeSec: 60\n" +
+		"    connMaxLifetimeSec: 900\n"
 	cfg, err := loadWith(t, nil, yaml)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -73,6 +76,15 @@ func TestStoreBackend_ExplicitSQL(t *testing.T) {
 	}
 	if cfg.Store.SQL.MaxOpenConns != 5 {
 		t.Fatalf("maxOpenConns = %d, want 5", cfg.Store.SQL.MaxOpenConns)
+	}
+	if cfg.Store.SQL.MaxIdleConns != 2 {
+		t.Fatalf("maxIdleConns = %d, want 2", cfg.Store.SQL.MaxIdleConns)
+	}
+	if cfg.Store.SQL.ConnMaxIdleTimeSec != 60 {
+		t.Fatalf("connMaxIdleTimeSec = %d, want 60", cfg.Store.SQL.ConnMaxIdleTimeSec)
+	}
+	if cfg.Store.SQL.ConnMaxLifetimeSec != 900 {
+		t.Fatalf("connMaxLifetimeSec = %d, want 900", cfg.Store.SQL.ConnMaxLifetimeSec)
 	}
 }
 
