@@ -302,7 +302,7 @@ func TestMinedCallbackWithSTUMP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to put stump: %v", err)
 	}
-	blockHash := "00000000000000000abc123def456789"
+	blockHash := "00000000000000000abc123def4567890000000000000000000000000000ffff"
 
 	cbMsg := &kafka.CallbackTopicMessage{
 		CallbackURL:  callbackURL,

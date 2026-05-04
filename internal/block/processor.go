@@ -141,8 +141,19 @@ func (p *Processor) Health() service.HealthStatus {
 func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
 	blockMsg, err := kafka.DecodeBlockMessage(msg.Value)
 	if err != nil {
-		p.Logger.Error("failed to decode block message", "error", err)
-		return err
+		// Malformed bytes (or a message that fails post-decode validation, e.g.
+		// missing/invalid hash or DataHub URL) cannot be recovered by re-driving
+		// — log and ack so the partition can advance. F-032 makes the decoder
+		// return ErrInvalidMessage for poison-pill payloads instead of letting
+		// them flow into HTTP fetches and downstream stores. Matches the same
+		// drop-on-decode-error pattern used by the subtree-fetcher and
+		// subtree-worker consumers.
+		p.Logger.Error("failed to decode block message, dropping",
+			"offset", msg.Offset,
+			"partition", msg.Partition,
+			"error", err,
+		)
+		return nil
 	}
 
 	p.Logger.Info("processing block announcement",

@@ -1,13 +1,22 @@
 package kafka
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
 
+// Stable, valid 64-char hex hashes used across tests.
+const (
+	validHash1 = "0000000000000000000000000000000000000000000000000000000000000001"
+	validHash2 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	validHash3 = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+)
+
 func TestSubtreeMessage_EncodeDecode(t *testing.T) {
 	msg := &SubtreeMessage{
-		Hash:       "subtree-hash-123",
+		Hash:       validHash1,
 		DataHubURL: "https://datahub.example.com/subtree/123",
 		PeerID:     "peer1",
 		ClientName: "teranode-v1",
@@ -39,7 +48,7 @@ func TestSubtreeMessage_EncodeDecode(t *testing.T) {
 
 func TestBlockMessage_EncodeDecode(t *testing.T) {
 	msg := &BlockMessage{
-		Hash:       "blockhash123",
+		Hash:       validHash2,
 		Height:     200,
 		Header:     "0100000000000000",
 		Coinbase:   "01000000010000",
@@ -77,9 +86,9 @@ func TestBlockMessage_EncodeDecode(t *testing.T) {
 
 func TestSubtreeWorkMessage_EncodeDecode(t *testing.T) {
 	msg := &SubtreeWorkMessage{
-		BlockHash:    "blockhash789",
+		BlockHash:    validHash2,
 		BlockHeight:  850000,
-		SubtreeHash:  "subtree-hash-456",
+		SubtreeHash:  validHash3,
 		SubtreeIndex: 2,
 		DataHubURL:   "https://datahub.example.com/subtree/456",
 	}
@@ -147,7 +156,7 @@ func TestCallbackTopicMessage_Stump(t *testing.T) {
 		CallbackURL:  "https://example.com/cb",
 		Type:         CallbackStump,
 		TxID:         "txid1",
-		BlockHash:    "blockhash123",
+		BlockHash:    validHash1,
 		SubtreeIndex: 5,
 		StumpRef:     stumpRef,
 	}
@@ -168,7 +177,7 @@ func TestCallbackTopicMessage_Stump(t *testing.T) {
 	if decoded.TxID != "txid1" {
 		t.Errorf("txid mismatch: got %s", decoded.TxID)
 	}
-	if decoded.BlockHash != "blockhash123" {
+	if decoded.BlockHash != validHash1 {
 		t.Errorf("blockHash mismatch: got %s", decoded.BlockHash)
 	}
 	if decoded.SubtreeIndex != 5 {
@@ -240,7 +249,7 @@ func TestCallbackTopicMessage_BlockProcessed(t *testing.T) {
 	msg := &CallbackTopicMessage{
 		CallbackURL: "https://arcade.example.com/callback",
 		Type:        CallbackBlockProcessed,
-		BlockHash:   "000000000000000003a2d78e5f7c9012",
+		BlockHash:   validHash2,
 	}
 
 	data, err := msg.Encode()
@@ -267,5 +276,259 @@ func TestCallbackTopicMessage_BlockProcessed(t *testing.T) {
 	}
 	if decoded.StumpRef != "" {
 		t.Errorf("expected empty stumpRef, got %v", decoded.StumpRef)
+	}
+}
+
+// --- Validation (F-032) -------------------------------------------------
+
+// TestDecodeSubtreeMessage_Validation covers all the SubtreeMessage rejection
+// paths so a poison-pill message can never flow through the decoder.
+func TestDecodeSubtreeMessage_Validation(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		errField string
+	}{
+		{
+			name:     "empty hash",
+			raw:      `{"hash":"","dataHubUrl":"https://datahub.example.com/x"}`,
+			errField: "hash",
+		},
+		{
+			name:     "non-hex hash",
+			raw:      `{"hash":"zzzz000000000000000000000000000000000000000000000000000000000000","dataHubUrl":"https://datahub.example.com/x"}`,
+			errField: "hash",
+		},
+		{
+			name:     "short hash",
+			raw:      `{"hash":"deadbeef","dataHubUrl":"https://datahub.example.com/x"}`,
+			errField: "hash",
+		},
+		{
+			name:     "empty dataHubUrl",
+			raw:      `{"hash":"` + validHash1 + `","dataHubUrl":""}`,
+			errField: "dataHubUrl",
+		},
+		{
+			name:     "non-http dataHubUrl",
+			raw:      `{"hash":"` + validHash1 + `","dataHubUrl":"ftp://example.com/x"}`,
+			errField: "dataHubUrl",
+		},
+		{
+			name:     "garbage dataHubUrl",
+			raw:      `{"hash":"` + validHash1 + `","dataHubUrl":"::not a url::"}`,
+			errField: "dataHubUrl",
+		},
+		{
+			name:     "negative attemptCount",
+			raw:      `{"hash":"` + validHash1 + `","dataHubUrl":"https://example.com/x","attemptCount":-1}`,
+			errField: "attemptCount",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeSubtreeMessage([]byte(tc.raw))
+			assertInvalidMessageContains(t, err, tc.errField)
+		})
+	}
+}
+
+func TestDecodeBlockMessage_Validation(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		errField string
+	}{
+		{
+			name:     "empty hash",
+			raw:      `{"hash":"","dataHubUrl":"https://example.com/x"}`,
+			errField: "hash",
+		},
+		{
+			name:     "bad hex hash",
+			raw:      `{"hash":"not-a-hash","dataHubUrl":"https://example.com/x"}`,
+			errField: "hash",
+		},
+		{
+			name:     "empty dataHubUrl",
+			raw:      `{"hash":"` + validHash2 + `","dataHubUrl":""}`,
+			errField: "dataHubUrl",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeBlockMessage([]byte(tc.raw))
+			assertInvalidMessageContains(t, err, tc.errField)
+		})
+	}
+}
+
+func TestDecodeSubtreeWorkMessage_Validation(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		errField string
+	}{
+		{
+			name:     "empty blockHash",
+			raw:      `{"blockHash":"","subtreeHash":"` + validHash1 + `","dataHubUrl":"https://example.com/x"}`,
+			errField: "blockHash",
+		},
+		{
+			name:     "empty subtreeHash",
+			raw:      `{"blockHash":"` + validHash2 + `","subtreeHash":"","dataHubUrl":"https://example.com/x"}`,
+			errField: "subtreeHash",
+		},
+		{
+			name:     "bad subtreeHash hex",
+			raw:      `{"blockHash":"` + validHash2 + `","subtreeHash":"not-hex-not-hex-not-hex-not-hex-not-hex-not-hex-not-hex-not-hexx","dataHubUrl":"https://example.com/x"}`,
+			errField: "subtreeHash",
+		},
+		{
+			name:     "empty dataHubUrl",
+			raw:      `{"blockHash":"` + validHash2 + `","subtreeHash":"` + validHash1 + `","dataHubUrl":""}`,
+			errField: "dataHubUrl",
+		},
+		{
+			name:     "negative subtreeIndex",
+			raw:      `{"blockHash":"` + validHash2 + `","subtreeHash":"` + validHash1 + `","dataHubUrl":"https://example.com/x","subtreeIndex":-1}`,
+			errField: "subtreeIndex",
+		},
+		{
+			name:     "negative attemptCount",
+			raw:      `{"blockHash":"` + validHash2 + `","subtreeHash":"` + validHash1 + `","dataHubUrl":"https://example.com/x","attemptCount":-5}`,
+			errField: "attemptCount",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeSubtreeWorkMessage([]byte(tc.raw))
+			assertInvalidMessageContains(t, err, tc.errField)
+		})
+	}
+}
+
+func TestDecodeCallbackTopicMessage_Validation(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		errField string
+	}{
+		{
+			name:     "empty callbackUrl",
+			raw:      `{"callbackUrl":"","type":"SEEN_ON_NETWORK","txid":"t1"}`,
+			errField: "callbackUrl",
+		},
+		{
+			name:     "non-http callbackUrl",
+			raw:      `{"callbackUrl":"javascript:alert(1)","type":"SEEN_ON_NETWORK","txid":"t1"}`,
+			errField: "callbackUrl",
+		},
+		{
+			name:     "unknown type",
+			raw:      `{"callbackUrl":"https://example.com/cb","type":"NOT_A_REAL_TYPE","txid":"t1"}`,
+			errField: "type",
+		},
+		{
+			name:     "empty type",
+			raw:      `{"callbackUrl":"https://example.com/cb","type":"","txid":"t1"}`,
+			errField: "type",
+		},
+		{
+			name:     "negative retryCount",
+			raw:      `{"callbackUrl":"https://example.com/cb","type":"SEEN_ON_NETWORK","txid":"t1","retryCount":-1}`,
+			errField: "retryCount",
+		},
+		{
+			name:     "SEEN without txid or txids",
+			raw:      `{"callbackUrl":"https://example.com/cb","type":"SEEN_ON_NETWORK"}`,
+			errField: "type",
+		},
+		{
+			name:     "STUMP missing blockHash",
+			raw:      `{"callbackUrl":"https://example.com/cb","type":"STUMP","stumpRef":"abc"}`,
+			errField: "blockHash",
+		},
+		{
+			name:     "STUMP missing stumpRef",
+			raw:      `{"callbackUrl":"https://example.com/cb","type":"STUMP","blockHash":"` + validHash1 + `"}`,
+			errField: "stumpRef",
+		},
+		{
+			name:     "STUMP malformed blockHash",
+			raw:      `{"callbackUrl":"https://example.com/cb","type":"STUMP","blockHash":"deadbeef","stumpRef":"abc"}`,
+			errField: "blockHash",
+		},
+		{
+			name:     "BLOCK_PROCESSED missing blockHash",
+			raw:      `{"callbackUrl":"https://example.com/cb","type":"BLOCK_PROCESSED"}`,
+			errField: "blockHash",
+		},
+		{
+			name:     "BLOCK_PROCESSED malformed blockHash",
+			raw:      `{"callbackUrl":"https://example.com/cb","type":"BLOCK_PROCESSED","blockHash":"deadbeef"}`,
+			errField: "blockHash",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeCallbackTopicMessage([]byte(tc.raw))
+			assertInvalidMessageContains(t, err, tc.errField)
+		})
+	}
+}
+
+// TestDecodeCallbackTopicMessage_AcceptsBatchedSeen guards against regressing
+// to a stricter validator that would reject the batched (TxIDs-only) form
+// callers actually emit.
+func TestDecodeCallbackTopicMessage_AcceptsBatchedSeen(t *testing.T) {
+	raw := `{"callbackUrl":"https://example.com/cb","type":"SEEN_ON_NETWORK","txids":["t1","t2"]}`
+	if _, err := DecodeCallbackTopicMessage([]byte(raw)); err != nil {
+		t.Fatalf("expected batched SEEN to validate, got %v", err)
+	}
+}
+
+// TestDecodeReturnsErrInvalidMessage verifies callers can switch on the
+// sentinel via errors.Is so they can distinguish poison-pill from JSON-parse
+// failures (both are poison in practice; the consumer paths log+ack either
+// way).
+func TestDecodeReturnsErrInvalidMessage(t *testing.T) {
+	_, err := DecodeSubtreeMessage([]byte(`{"hash":"","dataHubUrl":""}`))
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("expected error to wrap ErrInvalidMessage, got %v", err)
+	}
+}
+
+// TestDecodeRejectsMalformedJSON confirms json.Unmarshal errors also surface
+// as a non-nil error from the decoder (the existing behavior must be
+// preserved).
+func TestDecodeRejectsMalformedJSON(t *testing.T) {
+	if _, err := DecodeSubtreeMessage([]byte(`not-json`)); err == nil {
+		t.Fatal("expected JSON unmarshal error, got nil")
+	}
+	if _, err := DecodeBlockMessage([]byte(`{`)); err == nil {
+		t.Fatal("expected JSON unmarshal error, got nil")
+	}
+	if _, err := DecodeSubtreeWorkMessage([]byte(`[]`)); err == nil {
+		t.Fatal("expected JSON unmarshal error, got nil")
+	}
+	if _, err := DecodeCallbackTopicMessage([]byte(`{"type":}`)); err == nil {
+		t.Fatal("expected JSON unmarshal error, got nil")
+	}
+}
+
+func assertInvalidMessageContains(t *testing.T, err error, field string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected validation error mentioning %q, got nil", field)
+	}
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("expected error to wrap ErrInvalidMessage, got %v", err)
+	}
+	if !strings.Contains(err.Error(), field) {
+		t.Errorf("expected error to mention field %q, got %v", field, err)
 	}
 }

@@ -94,7 +94,7 @@ func TestHandleSubtreeMessage_ValidMessage(t *testing.T) {
 	client, mockProducer, _ := newTestClient(t)
 
 	msg := teranode.SubtreeMessage{
-		Hash:       "subtree-abc",
+		Hash:       "00000000000000000000000000000000000000000000000000000000000000ab",
 		DataHubURL: "https://datahub.example.com/subtree/abc",
 		PeerID:     "peer1",
 		ClientName: "teranode-v1",
@@ -114,7 +114,7 @@ func TestHandleSubtreeMessage_ValidMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to encode key: %v", err)
 	}
-	if string(keyBytes) != "subtree-abc" {
+	if string(keyBytes) != "00000000000000000000000000000000000000000000000000000000000000ab" {
 		t.Errorf("expected key 'subtree-abc', got %q", string(keyBytes))
 	}
 
@@ -127,7 +127,7 @@ func TestHandleSubtreeMessage_ValidMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to decode published subtree message: %v", err)
 	}
-	if decoded.Hash != "subtree-abc" {
+	if decoded.Hash != "00000000000000000000000000000000000000000000000000000000000000ab" {
 		t.Errorf("expected hash 'subtree-abc', got %q", decoded.Hash)
 	}
 	if decoded.DataHubURL != "https://datahub.example.com/subtree/abc" {
@@ -163,7 +163,7 @@ func TestHandleBlockMessage_ValidMessage(t *testing.T) {
 	client, _, mockProducer := newTestClient(t)
 
 	msg := teranode.BlockMessage{
-		Hash:       "00000000abc123",
+		Hash:       "00000000abc1230000000000000000000000000000000000000000000000abc1",
 		Height:     800000,
 		Header:     "0100000000000000",
 		Coinbase:   "01000000010000",
@@ -186,7 +186,7 @@ func TestHandleBlockMessage_ValidMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to encode key: %v", err)
 	}
-	if string(keyBytes) != "00000000abc123" {
+	if string(keyBytes) != "00000000abc1230000000000000000000000000000000000000000000000abc1" {
 		t.Errorf("expected key '00000000abc123', got %q", string(keyBytes))
 	}
 
@@ -199,7 +199,7 @@ func TestHandleBlockMessage_ValidMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to decode published block message: %v", err)
 	}
-	if decoded.Hash != "00000000abc123" {
+	if decoded.Hash != "00000000abc1230000000000000000000000000000000000000000000000abc1" {
 		t.Errorf("expected hash '00000000abc123', got %q", decoded.Hash)
 	}
 	if decoded.Height != 800000 {

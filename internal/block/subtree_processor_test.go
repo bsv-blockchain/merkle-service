@@ -2,6 +2,8 @@ package block
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,6 +24,15 @@ import (
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// testHashFromLabel deterministically converts a human-readable test label
+// into a 64-char hex hash that satisfies the F-032 decoder validator. Tests
+// that previously used opaque placeholder strings (e.g. "block-happy") are
+// kept readable while still emitting messages the kafka decoder will accept.
+func testHashFromLabel(label string) string {
+	sum := sha256.Sum256([]byte(label))
+	return hex.EncodeToString(sum[:])
 }
 
 // buildRawSubtreeBytes creates raw DataHub-format subtree data (concatenated 32-byte hashes).
@@ -301,7 +312,7 @@ func TestStumpCallbackMessageEncoding(t *testing.T) {
 		CallbackURL:  "http://example.com/callback",
 		Type:         kafka.CallbackStump,
 		TxID:         "txid1",
-		BlockHash:    "blockhash123",
+		BlockHash:    "00000000000000000000000000000000000000000000000000000000b10cca12",
 		SubtreeIndex: 3,
 		StumpRef:     "deadbeef",
 	}
@@ -325,7 +336,7 @@ func TestStumpCallbackMessageEncoding(t *testing.T) {
 	if decoded.TxID != "txid1" {
 		t.Errorf("expected txid1, got %s", decoded.TxID)
 	}
-	if decoded.BlockHash != "blockhash123" {
+	if decoded.BlockHash != "00000000000000000000000000000000000000000000000000000000b10cca12" {
 		t.Errorf("unexpected block hash: %s", decoded.BlockHash)
 	}
 	if decoded.SubtreeIndex != 3 {
