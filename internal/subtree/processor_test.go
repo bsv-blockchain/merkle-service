@@ -22,6 +22,11 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
+const (
+	testTx1 = "tx1"
+	testTx2 = "tx2"
+)
+
 // startRawSubtreeServer serves a raw 32-byte-hash subtree payload at any path,
 // satisfying the merkle-service's DataHub fetch in tests that exercise
 // handleMessage end-to-end.
@@ -1008,9 +1013,9 @@ func TestBatchedSeenCallbacks_SingleCallbackURL(t *testing.T) {
 	p, mockProd := newTestProcessor(t, regStore, &mockSeenCounter{})
 
 	registered := map[string][]string{
-		"tx1": {"http://arcade.example.com/cb"},
-		"tx2": {"http://arcade.example.com/cb"},
-		"tx3": {"http://arcade.example.com/cb"},
+		testTx1: {"http://arcade.example.com/cb"},
+		testTx2: {"http://arcade.example.com/cb"},
+		"tx3":   {"http://arcade.example.com/cb"},
 	}
 
 	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
@@ -1037,7 +1042,7 @@ func TestBatchedSeenCallbacks_SingleCallbackURL(t *testing.T) {
 	for _, id := range cb.TxIDs {
 		txSet[id] = true
 	}
-	if !txSet["tx1"] || !txSet["tx2"] || !txSet["tx3"] {
+	if !txSet[testTx1] || !txSet[testTx2] || !txSet["tx3"] {
 		t.Errorf("missing txids in batch: %v", cb.TxIDs)
 	}
 }
@@ -1048,9 +1053,9 @@ func TestBatchedSeenCallbacks_MultipleCallbackURLs(t *testing.T) {
 	p, mockProd := newTestProcessor(t, regStore, &mockSeenCounter{})
 
 	registered := map[string][]string{
-		"tx1": {"http://url-A/cb"},
-		"tx2": {"http://url-B/cb"},
-		"tx3": {"http://url-A/cb"},
+		testTx1: {"http://url-A/cb"},
+		testTx2: {"http://url-B/cb"},
+		"tx3":   {"http://url-A/cb"},
 	}
 
 	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
@@ -1073,7 +1078,7 @@ func TestBatchedSeenCallbacks_MultipleCallbackURLs(t *testing.T) {
 		t.Errorf("expected 2 txids for url-A, got %v", msgA)
 	}
 	msgB := byURL["http://url-B/cb"]
-	if msgB == nil || len(msgB.TxIDs) != 1 || msgB.TxIDs[0] != "tx2" {
+	if msgB == nil || len(msgB.TxIDs) != 1 || msgB.TxIDs[0] != testTx2 {
 		t.Errorf("expected [tx2] for url-B, got %v", msgB)
 	}
 }
@@ -1089,8 +1094,8 @@ func TestBatchedSeenCallbacks_PropagatesCallbackToken(t *testing.T) {
 	const url = "http://arcade.example.com/cb"
 	const token = "tok-arcade-mainnet-v1" //nolint:gosec // test fixture, not a real credential
 	registered := map[string][]string{
-		"tx1": {url},
-		"tx2": {url},
+		testTx1: {url},
+		testTx2: {url},
 	}
 	if err := p.emitBatchedSeenCallbacks(toEntries(registered, map[string]string{url: token}), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
@@ -1128,8 +1133,8 @@ func TestBatchedSeenCallbacks_SeenMultipleNodesThreshold(t *testing.T) {
 	p, mockProd := newTestProcessor(t, regStore, sc)
 
 	registered := map[string][]string{
-		"tx1": {"http://arcade/cb"},
-		"tx2": {"http://arcade/cb"},
+		testTx1: {"http://arcade/cb"},
+		testTx2: {"http://arcade/cb"},
 	}
 
 	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
@@ -1163,14 +1168,14 @@ func TestBatchedSeenCallbacks_SeenMultipleNodesThreshold(t *testing.T) {
 func TestBatchedSeenCallbacks_PartialThreshold(t *testing.T) {
 	// Threshold=2: tx1 has already been seen once (will reach threshold), tx2 hasn't.
 	sc := newMockIdempotentSeenCounter(2)
-	_, _ = sc.Increment("tx1", "subtree-PREV") // pre-seen once
+	_, _ = sc.Increment(testTx1, "subtree-PREV") // pre-seen once
 
 	regStore := &mockRegStore{registrations: map[string][]string{}}
 	p, mockProd := newTestProcessor(t, regStore, sc)
 
 	registered := map[string][]string{
-		"tx1": {"http://arcade/cb"},
-		"tx2": {"http://arcade/cb"},
+		testTx1: {"http://arcade/cb"},
+		testTx2: {"http://arcade/cb"},
 	}
 
 	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
@@ -1186,7 +1191,7 @@ func TestBatchedSeenCallbacks_PartialThreshold(t *testing.T) {
 	for _, pm := range msgs {
 		cb := decodeCallbackMsg(t, pm)
 		if cb.Type == kafka.CallbackSeenMultipleNodes {
-			if len(cb.TxIDs) != 1 || cb.TxIDs[0] != "tx1" {
+			if len(cb.TxIDs) != 1 || cb.TxIDs[0] != testTx1 {
 				t.Errorf("expected SEEN_MULTIPLE_NODES with [tx1], got %v", cb.TxIDs)
 			}
 		}
@@ -1479,8 +1484,8 @@ func TestEmitBatchedSeenCallbacks_HappyPathReturnsNil(t *testing.T) {
 	p, mockProd := newTestProcessor(t, regStore, &mockSeenCounter{})
 
 	registered := map[string][]string{
-		"tx1": {"http://url-A/cb"},
-		"tx2": {"http://url-B/cb"},
+		testTx1: {"http://url-A/cb"},
+		testTx2: {"http://url-B/cb"},
 	}
 
 	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-happy"); err != nil {
@@ -1506,8 +1511,8 @@ func TestEmitBatchedSeenCallbacks_PublishFailureReturnsError(t *testing.T) {
 	p.Logger = logger
 
 	registered := map[string][]string{
-		"tx1": {"http://url-A/cb"},
-		"tx2": {"http://url-B/cb"},
+		testTx1: {"http://url-A/cb"},
+		testTx2: {"http://url-B/cb"},
 	}
 
 	err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-fail")
@@ -1541,8 +1546,8 @@ func TestEmitBatchedSeenCallbacks_PartialFailureStillAttemptsOtherURLs(t *testin
 	p.Logger = logger
 
 	registered := map[string][]string{
-		"tx1": {failingURL},
-		"tx2": {okURL},
+		testTx1: {failingURL},
+		testTx2: {okURL},
 	}
 
 	err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-partial")
@@ -1816,8 +1821,8 @@ func TestEmitBatchedSeenCallbacks_IncrementFailureReturnsError(t *testing.T) {
 	p, mockProd := newTestProcessor(t, regStore, sc)
 
 	registered := map[string][]string{
-		"tx1": {"http://url-A/cb"},
-		"tx2": {"http://url-B/cb"},
+		testTx1: {"http://url-A/cb"},
+		testTx2: {"http://url-B/cb"},
 	}
 
 	err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-counter-fail")

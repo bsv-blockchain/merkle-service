@@ -20,6 +20,8 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
+const testBlockHash = "blockhash"
+
 // mockSyncProducer implements sarama.SyncProducer for testing.
 type mockSyncProducer struct {
 	mu       sync.Mutex
@@ -281,7 +283,7 @@ func TestDeliverCallback_Non2xxReturnsError(t *testing.T) {
 			msg := &kafka.CallbackTopicMessage{
 				CallbackURL:  server.URL + "/callback",
 				Type:         kafka.CallbackStump,
-				BlockHash:    "blockhash",
+				BlockHash:    testBlockHash,
 				SubtreeIndex: 1,
 			}
 
@@ -309,7 +311,7 @@ func TestDeliverCallback_2xxStatusesSucceed(t *testing.T) {
 			msg := &kafka.CallbackTopicMessage{
 				CallbackURL:  server.URL + "/callback",
 				Type:         kafka.CallbackStump,
-				BlockHash:    "blockhash",
+				BlockHash:    testBlockHash,
 				SubtreeIndex: 1,
 			}
 
@@ -338,7 +340,7 @@ func TestProcessDelivery_RetriesViaKafkaRepublish(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
+		BlockHash:    testBlockHash,
 		SubtreeIndex: 1,
 		RetryCount:   0,
 	}
@@ -380,7 +382,7 @@ func TestProcessDelivery_RetryRepublishFailureSurfacesError(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
+		BlockHash:    testBlockHash,
 		SubtreeIndex: 1,
 	}
 
@@ -409,7 +411,7 @@ func TestProcessDelivery_PublishesToDLQAfterMaxRetries(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
+		BlockHash:    testBlockHash,
 		SubtreeIndex: 1,
 		RetryCount:   3, // Already at max retries.
 	}
@@ -450,7 +452,7 @@ func TestProcessDelivery_DLQPublishFailureSurfacesError(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
+		BlockHash:    testBlockHash,
 		SubtreeIndex: 1,
 	}
 
@@ -545,7 +547,7 @@ func TestProcessDelivery_DedupSkipsDuplicate(t *testing.T) {
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
+		BlockHash:    testBlockHash,
 		SubtreeIndex: 3,
 	}
 
@@ -579,7 +581,7 @@ func TestBuildIdempotencyKey(t *testing.T) {
 			name: "STUMP uses blockHash and subtreeIndex",
 			msg: &kafka.CallbackTopicMessage{
 				Type:         kafka.CallbackStump,
-				BlockHash:    "blockhash",
+				BlockHash:    testBlockHash,
 				SubtreeIndex: 3,
 			},
 			expected: "blockhash:3:STUMP",
@@ -645,7 +647,7 @@ func TestDedupKeyForMessage(t *testing.T) {
 			name: "STUMP uses blockHash and subtreeIndex",
 			msg: &kafka.CallbackTopicMessage{
 				Type:         kafka.CallbackStump,
-				BlockHash:    "blockhash",
+				BlockHash:    testBlockHash,
 				SubtreeIndex: 3,
 			},
 			expected: "blockhash:3",

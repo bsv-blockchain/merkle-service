@@ -586,11 +586,11 @@ func TestSubtreeCounter_DecrementMissingRow(t *testing.T) {
 
 	// Sanity check: real ErrNoRows must not leak through even after an
 	// underlying failure has been observed once.
-	if err := s.Init("real-blk", 1); err != nil {
-		t.Fatal(err)
+	if initErr := s.Init("real-blk", 1); initErr != nil {
+		t.Fatal(initErr)
 	}
-	if _, err := s.Decrement("real-blk"); err != nil {
-		t.Fatalf("Decrement on existing row: %v", err)
+	if _, decErr := s.Decrement("real-blk"); decErr != nil {
+		t.Fatalf("Decrement on existing row: %v", decErr)
 	}
 	got, err = s.Decrement("still-nonexistent")
 	if err != nil {

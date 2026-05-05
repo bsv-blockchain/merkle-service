@@ -88,7 +88,7 @@ func TestHandleMessage_HTTPFailureWithRetriesAvailable_RepublishesBeforeAck(t *t
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/cb",
 		Type:         kafka.CallbackStump,
-		BlockHash:    "blockhash",
+		BlockHash:    testBlockHash,
 		SubtreeIndex: 1,
 		RetryCount:   0,
 	}
