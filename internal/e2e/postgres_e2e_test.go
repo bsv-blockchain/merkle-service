@@ -126,13 +126,13 @@ func TestPostgres_RegistrationRoundTrip(t *testing.T) {
 	txids := make([]string, 100)
 	for i := range txids {
 		txids[i] = fmt.Sprintf("tx%064d", i)
-		if err := reg1.Registration.Add(txids[i], "http://cb-one"); err != nil {
+		if err := reg1.Registration.Add(txids[i], "http://cb-one", ""); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
-		if err := reg1.Registration.Add(txids[i], "http://cb-two"); err != nil {
+		if err := reg1.Registration.Add(txids[i], "http://cb-two", ""); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
-		if err := reg1.Registration.Add(txids[i], "http://cb-one"); err != nil { // duplicate
+		if err := reg1.Registration.Add(txids[i], "http://cb-one", ""); err != nil { // duplicate
 			t.Fatalf("Add dup: %v", err)
 		}
 	}
