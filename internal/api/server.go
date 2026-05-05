@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -95,12 +97,25 @@ func (s *Server) Init(cfg interface{}) error {
 	return nil
 }
 
+// Start binds the configured TCP listener and begins serving HTTP requests in
+// a background goroutine. The bind step is performed synchronously so that
+// failures such as "port already in use" or "permission denied" are returned
+// to the caller as an error instead of being swallowed asynchronously. Once
+// the listener is established, Serve runs in its own goroutine and any
+// post-startup errors (other than http.ErrServerClosed from a clean shutdown)
+// are logged.
 func (s *Server) Start(ctx context.Context) error {
+	addr := s.httpServer.Addr
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
+	}
+
 	s.SetStarted(true)
 	s.Logger.Info("starting API server", "port", s.cfg.Port)
 
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.Logger.Error("HTTP server error", "error", err)
 		}
 	}()
