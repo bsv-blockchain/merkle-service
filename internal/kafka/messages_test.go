@@ -269,3 +269,69 @@ func TestCallbackTopicMessage_BlockProcessed(t *testing.T) {
 		t.Errorf("expected empty stumpRef, got %v", decoded.StumpRef)
 	}
 }
+
+// TestCallbackTopicMessage_PartitionKey is the F-059 regression test. The
+// previous PublishWithHashKey(callbackURL) strategy collapsed every callback
+// for a deployment with a single registered URL onto one Kafka partition,
+// leaving N-1 callback-delivery pods idle. PartitionKey() now scatters
+// callbacks across partitions by message scope (subtree or block) while
+// preserving (scope, URL) co-location for downstream ordering.
+//
+// The test asserts:
+//   - Same SubtreeHash + same URL → same key (co-located)
+//   - Different SubtreeHash, same URL → different keys (scattered)
+//   - Same URL across SEEN / SEEN_MULTIPLE_NODES / STUMP for one subtree → all same key
+//   - BLOCK_PROCESSED uses BlockHash, not SubtreeHash
+//   - Pre-fix message shape (only CallbackURL set) still produces a non-empty key
+func TestCallbackTopicMessage_PartitionKey(t *testing.T) {
+	const url = "https://arcade.example.com/callback"
+	const otherURL = "https://other.example.com/callback"
+
+	seenA := &CallbackTopicMessage{
+		CallbackURL: url, Type: CallbackSeenOnNetwork, SubtreeHash: "subtree-A", TxIDs: []string{"tx1"},
+	}
+	seenB := &CallbackTopicMessage{
+		CallbackURL: url, Type: CallbackSeenOnNetwork, SubtreeHash: "subtree-B", TxIDs: []string{"tx2"},
+	}
+	multipleA := &CallbackTopicMessage{
+		CallbackURL: url, Type: CallbackSeenMultipleNodes, SubtreeHash: "subtree-A", TxIDs: []string{"tx1"},
+	}
+	stumpA := &CallbackTopicMessage{
+		CallbackURL: url, Type: CallbackStump, SubtreeHash: "subtree-A", BlockHash: "blk-1", SubtreeIndex: 3,
+	}
+	blockProc := &CallbackTopicMessage{
+		CallbackURL: url, Type: CallbackBlockProcessed, BlockHash: "blk-1",
+	}
+
+	if k := seenA.PartitionKey(); k == seenB.PartitionKey() {
+		t.Errorf("F-059 regression: different subtrees produced the same partition key %q — would collapse onto one partition with a single registered URL", k)
+	}
+	if seenA.PartitionKey() != multipleA.PartitionKey() {
+		t.Errorf("same subtree, different SEEN type produced different keys: %q vs %q — breaks per-(subtree,URL) ordering", seenA.PartitionKey(), multipleA.PartitionKey())
+	}
+	if seenA.PartitionKey() != stumpA.PartitionKey() {
+		t.Errorf("same subtree, different type produced different keys: %q vs %q", seenA.PartitionKey(), stumpA.PartitionKey())
+	}
+	if blockProc.PartitionKey() == seenA.PartitionKey() {
+		t.Errorf("BLOCK_PROCESSED reused a subtree-scoped key %q; expected block-level scope", blockProc.PartitionKey())
+	}
+	// Different URL must produce a different key even with the same scope.
+	seenAOther := &CallbackTopicMessage{
+		CallbackURL: otherURL, Type: CallbackSeenOnNetwork, SubtreeHash: "subtree-A", TxIDs: []string{"tx1"},
+	}
+	if seenAOther.PartitionKey() == seenA.PartitionKey() {
+		t.Errorf("same subtree, different URL produced the same key %q — would route to the same partition for unrelated targets", seenA.PartitionKey())
+	}
+	// Pre-fix shape: only CallbackURL set. Must not produce empty.
+	prefix := &CallbackTopicMessage{CallbackURL: url, Type: CallbackSeenOnNetwork}
+	if k := prefix.PartitionKey(); k == "" {
+		t.Errorf("PartitionKey on pre-fix message returned empty; producer requires a non-empty key for hash partitioning")
+	}
+	// STUMP fallback (no SubtreeHash, only BlockHash + SubtreeIndex) must
+	// still scatter when SubtreeIndex differs.
+	stump1 := &CallbackTopicMessage{CallbackURL: url, Type: CallbackStump, BlockHash: "blk-1", SubtreeIndex: 0}
+	stump2 := &CallbackTopicMessage{CallbackURL: url, Type: CallbackStump, BlockHash: "blk-1", SubtreeIndex: 1}
+	if stump1.PartitionKey() == stump2.PartitionKey() {
+		t.Errorf("STUMP fallback path: BlockHash+SubtreeIndex 0 and 1 produced the same key %q", stump1.PartitionKey())
+	}
+}

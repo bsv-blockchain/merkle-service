@@ -479,6 +479,7 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 			CallbackToken: result.CallbackTokens[callbackURL],
 			Type:          kafka.CallbackStump,
 			BlockHash:     workMsg.BlockHash,
+			SubtreeHash:   workMsg.SubtreeHash,
 			SubtreeIndex:  workMsg.SubtreeIndex,
 			StumpRef:      stumpRef,
 		}
@@ -491,7 +492,7 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 			}
 			continue
 		}
-		if pubErr := s.callbackProducer.PublishWithHashKey(callbackURL, data); pubErr != nil {
+		if pubErr := s.callbackProducer.PublishWithHashKey(msg.PartitionKey(), data); pubErr != nil {
 			s.Logger.Error("failed to publish STUMP callback",
 				"callbackURL", callbackURL, "error", pubErr)
 			if firstErr == nil {
@@ -557,7 +558,7 @@ func (s *SubtreeWorkerService) emitBlockProcessed(blockHash string) error {
 			}
 			continue
 		}
-		if pubErr := s.callbackProducer.PublishWithHashKey(entry.URL, data); pubErr != nil {
+		if pubErr := s.callbackProducer.PublishWithHashKey(msg.PartitionKey(), data); pubErr != nil {
 			s.Logger.Error("failed to publish BLOCK_PROCESSED callback",
 				"callbackURL", entry.URL,
 				"error", pubErr,

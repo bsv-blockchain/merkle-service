@@ -515,6 +515,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 				CallbackURL:   callbackURL,
 				CallbackToken: urlTokens[callbackURL],
 				Type:          kafka.CallbackSeenOnNetwork,
+				SubtreeHash:   subtreeID,
 				TxIDs:         chunk,
 			}
 			data, err := msg.Encode()
@@ -525,7 +526,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 				}
 				continue
 			}
-			if err := p.callbackProducer.PublishWithHashKey(callbackURL, data); err != nil {
+			if err := p.callbackProducer.PublishWithHashKey(msg.PartitionKey(), data); err != nil {
 				p.Logger.Error("failed to publish batched SEEN_ON_NETWORK", "callbackURL", callbackURL, "error", err)
 				if firstErr == nil {
 					firstErr = fmt.Errorf("publishing SEEN_ON_NETWORK for %s: %w", callbackURL, err)
@@ -568,6 +569,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 				CallbackURL:   callbackURL,
 				CallbackToken: urlTokens[callbackURL],
 				Type:          kafka.CallbackSeenMultipleNodes,
+				SubtreeHash:   subtreeID,
 				TxIDs:         chunk,
 			}
 			data, err := msg.Encode()
@@ -578,7 +580,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 				}
 				continue
 			}
-			if err := p.callbackProducer.PublishWithHashKey(callbackURL, data); err != nil {
+			if err := p.callbackProducer.PublishWithHashKey(msg.PartitionKey(), data); err != nil {
 				p.Logger.Error("failed to publish batched SEEN_MULTIPLE_NODES", "callbackURL", callbackURL, "error", err)
 				if firstErr == nil {
 					firstErr = fmt.Errorf("publishing SEEN_MULTIPLE_NODES for %s: %w", callbackURL, err)

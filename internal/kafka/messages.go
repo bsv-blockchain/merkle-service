@@ -53,10 +53,82 @@ type CallbackTopicMessage struct {
 	TxID          string       `json:"txid,omitempty"`
 	TxIDs         []string     `json:"txids,omitempty"`
 	BlockHash     string       `json:"blockHash,omitempty"`
-	SubtreeIndex  int          `json:"subtreeIndex,omitempty"`
-	StumpRef      string       `json:"stumpRef,omitempty"`
-	RetryCount    int          `json:"retryCount,omitempty"`
-	NextRetryAt   time.Time    `json:"nextRetryAt,omitempty"`
+	// SubtreeHash identifies the subtree this callback originated from. Used
+	// for Kafka partitioning so callbacks for one subtree co-locate on one
+	// partition (preserving STUMP / SEEN_* / SEEN_MULTIPLE_NODES ordering)
+	// while different subtrees spread across the topic. Required for
+	// SEEN_ON_NETWORK and SEEN_MULTIPLE_NODES (which don't carry BlockHash);
+	// optional for STUMP (where BlockHash + SubtreeIndex already identify
+	// the scope) and unset for BLOCK_PROCESSED (block-scoped). Unknown to
+	// the receiver — it's a producer-side hint and is not part of the
+	// arcade CallbackMessage contract.
+	SubtreeHash  string    `json:"subtreeHash,omitempty"`
+	SubtreeIndex int       `json:"subtreeIndex,omitempty"`
+	StumpRef     string    `json:"stumpRef,omitempty"`
+	RetryCount   int       `json:"retryCount,omitempty"`
+	NextRetryAt  time.Time `json:"nextRetryAt,omitempty"`
+}
+
+// PartitionKey returns the Kafka partition key for this callback message.
+// Scope-based: callbacks for the same (subtree, URL) or (block, URL) co-locate,
+// while different subtrees and blocks spread across partitions.
+//
+// Hashing on CallbackURL alone (the previous strategy) collapsed every
+// callback for a deployment with one registered URL onto a single partition,
+// leaving N-1 callback-delivery pods idle while one drowned (F-059). This
+// scope-based key spreads the work across partitions while preserving
+// per-(scope, URL) ordering downstream consumers rely on.
+//
+// Choice of scope by message Type:
+//   - STUMP / SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES: subtree-scoped, so the
+//     key is SubtreeHash (preferred) or BlockHash:SubtreeIndex as a fallback
+//     for messages produced before SubtreeHash was added.
+//   - BLOCK_PROCESSED: block-scoped — one message per (block, URL).
+//   - Anything else (or missing scope): falls back to CallbackURL so the
+//     producer never returns an empty key (Kafka requires non-empty for
+//     hash partitioning).
+func (m *CallbackTopicMessage) PartitionKey() string {
+	var scope string
+	switch {
+	case m.SubtreeHash != "":
+		scope = m.SubtreeHash
+	case m.Type == CallbackBlockProcessed && m.BlockHash != "":
+		scope = m.BlockHash
+	case m.BlockHash != "":
+		// STUMP messages produced before SubtreeHash was added still have
+		// BlockHash + SubtreeIndex, which is sufficient to scatter.
+		scope = m.BlockHash + "#" + itoa(m.SubtreeIndex)
+	default:
+		scope = m.CallbackURL
+	}
+	if scope == m.CallbackURL {
+		return scope
+	}
+	return scope + "|" + m.CallbackURL
+}
+
+// itoa avoids importing strconv just for one int-to-string. Inlined to
+// keep messages.go's import surface unchanged.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
 }
 
 func (m *SubtreeMessage) Encode() ([]byte, error) {

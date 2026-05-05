@@ -447,9 +447,11 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 }
 
 // republishForRetry encodes cbMsg and publishes it back to the callback
-// topic via the retry producer. The partition key is the callback URL so the
-// retry lands on the same partition as the original — preserving STUMP →
-// BLOCK_PROCESSED ordering for the same (block, callbackURL).
+// topic via the retry producer. The partition key is derived from the
+// message's scope (subtree or block, plus URL) so retries land on the same
+// partition as the original — preserving STUMP → BLOCK_PROCESSED ordering
+// for the same (subtree, callbackURL) — while still scattering across
+// partitions when there's a single registered URL (F-059).
 //
 // Returning nil means the publish was acknowledged by Kafka and the source
 // message can now be safely ack'd. A non-nil return means the publish failed
@@ -459,7 +461,7 @@ func (d *DeliveryService) republishForRetry(cbMsg *kafka.CallbackTopicMessage, r
 	if err != nil {
 		return fmt.Errorf("encode callback message for retry republish (%s): %w", reason, err)
 	}
-	if err := d.retryProducer.PublishWithHashKey(cbMsg.CallbackURL, data); err != nil {
+	if err := d.retryProducer.PublishWithHashKey(cbMsg.PartitionKey(), data); err != nil {
 		d.Logger.Error("retry republish failed, leaving Kafka offset uncommitted",
 			"callbackUrl", cbMsg.CallbackURL,
 			"txid", cbMsg.TxID,
@@ -743,7 +745,7 @@ func (d *DeliveryService) publishToDLQ(msg *kafka.CallbackTopicMessage) error {
 		return fmt.Errorf("failed to encode callback message for DLQ: %w", err)
 	}
 
-	if err := d.dlqProducer.PublishWithHashKey(msg.CallbackURL, data); err != nil {
+	if err := d.dlqProducer.PublishWithHashKey(msg.PartitionKey(), data); err != nil {
 		return fmt.Errorf("failed to publish to DLQ: %w", err)
 	}
 
