@@ -268,24 +268,29 @@ func TestPostgres_CallbackDedupTTL(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = registry.Close() })
 
-	// 1s TTL. The expiry filter inside Exists should observe it as gone after 2s.
-	if err := registry.CallbackDedup.Record("tx-x", "u", "MINED", 1*time.Second); err != nil {
-		t.Fatalf("Record: %v", err)
+	// 1s TTL. After expiry the next Claim should win again because the
+	// pre-INSERT expired-row eviction inside Claim clears the stale row.
+	claimed, err := registry.CallbackDedup.Claim("tx-x", "u", "MINED", 1*time.Second)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
 	}
-	ok, err := registry.CallbackDedup.Exists("tx-x", "u", "MINED")
+	if !claimed {
+		t.Fatal("first Claim should win")
+	}
+	dup, err := registry.CallbackDedup.Claim("tx-x", "u", "MINED", 1*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok {
-		t.Fatal("Exists=false immediately after Record")
+	if dup {
+		t.Fatal("second Claim within TTL should be duplicate")
 	}
 	time.Sleep(2 * time.Second)
-	ok, err = registry.CallbackDedup.Exists("tx-x", "u", "MINED")
+	reclaim, err := registry.CallbackDedup.Claim("tx-x", "u", "MINED", 1*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok {
-		t.Fatal("Exists=true after TTL elapsed")
+	if !reclaim {
+		t.Fatal("Claim after TTL elapsed should succeed again")
 	}
 
 	// Sweeper runs every 200ms per our cfg — give it a window to physically delete.
