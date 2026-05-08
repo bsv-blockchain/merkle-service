@@ -8,6 +8,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/block"
 	"github.com/bsv-blockchain/merkle-service/internal/callback"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
+	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/p2p"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
@@ -45,9 +46,22 @@ func main() {
 
 	apiServer := api.NewServer(cfg.API, registry.Registration, registry.CallbackURLRegistry, registry.Health, logger)
 	apiServer.SetAllowPrivateCallbackIPs(cfg.Callback.AllowPrivateIPs)
+	apiServer.SetReprocessDeps(&api.ReprocessDeps{
+		DataHubRegistry: registry.DataHubRegistry,
+		DataHubClient: datahub.NewClientWithSSRFGuard(
+			cfg.DataHub.TimeoutSec,
+			cfg.DataHub.MaxRetries,
+			cfg.DataHub.MaxBlockBytes,
+			cfg.DataHub.MaxSubtreeBytes,
+			cfg.DataHub.AllowPrivateIPs,
+			logger,
+		),
+		BlockProducer:       blockProducer,
+		FallbackDataHubURLs: cfg.DataHub.FallbackURLs,
+	})
 	p2pClient := p2p.NewClient(cfg.P2P, subtreeProducer, blockProducer, logger)
 	subtreeFetcher := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree)
-	blockProcessor := block.NewProcessor(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.CallbackURLRegistry, registry.SubtreeCounter, logger)
+	blockProcessor := block.NewProcessor(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.CallbackURLRegistry, registry.DataHubRegistry, registry.SubtreeCounter, logger)
 	subtreeWorker := block.NewSubtreeWorkerService(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.Stump, registry.CallbackURLRegistry, registry.SubtreeCounter, logger)
 	callbackDelivery := callback.NewDeliveryService(cfg, registry.CallbackDedup, registry.Stump)
 

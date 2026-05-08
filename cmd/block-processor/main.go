@@ -28,7 +28,7 @@ func main() {
 
 	processor := block.NewProcessor(
 		cfg.Kafka, cfg.Block, cfg.DataHub,
-		registry.Registration, registry.Subtree, registry.CallbackURLRegistry, registry.SubtreeCounter,
+		registry.Registration, registry.Subtree, registry.CallbackURLRegistry, registry.DataHubRegistry, registry.SubtreeCounter,
 		logger,
 	)
 

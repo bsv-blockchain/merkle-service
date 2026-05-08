@@ -728,7 +728,7 @@ func TestEmitBlockProcessed_PublishFailureReturnsError(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	err := s.emitBlockProcessed("blk-emit-fail")
+	err := s.emitBlockProcessed("blk-emit-fail", "", "")
 	if err == nil {
 		t.Fatalf("expected error from emitBlockProcessed when callback publish fails")
 	}
@@ -755,7 +755,7 @@ func TestEmitBlockProcessed_PartialFailureContinuesAndReturnsFirstError(t *testi
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	err := s.emitBlockProcessed("blk-partial")
+	err := s.emitBlockProcessed("blk-partial", "", "")
 	if err == nil {
 		t.Fatalf("expected non-nil error when BLOCK_PROCESSED publishes fail")
 	}
@@ -783,7 +783,7 @@ func TestEmitBlockProcessed_HappyPath(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	if err := s.emitBlockProcessed("blk-happy"); err != nil {
+	if err := s.emitBlockProcessed("blk-happy", "", ""); err != nil {
 		t.Fatalf("expected nil error on happy path, got: %v", err)
 	}
 	if got := cbMock.sentCountOfType(kafka.CallbackBlockProcessed); got != 2 {
@@ -804,7 +804,7 @@ func TestEmitBlockProcessed_RegistryFailureReturnsError(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	if err := s.emitBlockProcessed("blk-registry-fail"); err == nil {
+	if err := s.emitBlockProcessed("blk-registry-fail", "", ""); err == nil {
 		t.Fatalf("expected error when URL registry GetAll fails")
 	}
 	if got := cbMock.sentCount(); got != 0 {

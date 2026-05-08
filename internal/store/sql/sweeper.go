@@ -121,7 +121,30 @@ func (s *sweeper) sweepOnce(ctx context.Context) {
 		} else if rows > 0 && s.logger != nil {
 			s.logger.Debug("ttl sweeper: expired callback URLs deleted", "rows", rows)
 		}
+		rows, err = s.sweepDataHubURLs(ctx)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Warn("ttl sweeper: datahub_urls delete failed", "error", err)
+			}
+		} else if rows > 0 && s.logger != nil {
+			s.logger.Debug("ttl sweeper: expired DataHub URLs deleted", "rows", rows)
+		}
 	}
+}
+
+// sweepDataHubURLs deletes DataHub URLs whose last_seen_at is older than the
+// configured retention. Same recency model as sweepCallbackURLs.
+func (s *sweeper) sweepDataHubURLs(ctx context.Context) (int64, error) {
+	cutoff := -int(s.urlRetention / time.Second)
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"DELETE FROM datahub_urls WHERE last_seen_at IS NOT NULL AND last_seen_at < %s",
+		s.d.intervalSeconds(cutoff))
+	res, err := s.db.ExecContext(ctx, q)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // sweepCallbackURLs deletes URLs whose last_seen_at is older than the

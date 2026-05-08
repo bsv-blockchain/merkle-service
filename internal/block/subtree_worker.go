@@ -274,6 +274,8 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.Co
 		s.regCache,
 		s.batchSem,
 		s.blockCfg.PostMineTTLSec,
+		workMsg.OverrideCallbackURL,
+		workMsg.OverrideCallbackToken,
 		s.Logger,
 	)
 	if err != nil {
@@ -300,7 +302,7 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.Co
 	// so the work item is redelivered and the decrement is re-attempted; we
 	// must not ack with a non-decremented counter, or BLOCK_PROCESSED will
 	// never fire for this block (F-013).
-	if err := s.decrementCounterAndMaybeEmit(workMsg.BlockHash); err != nil {
+	if err := s.decrementCounterAndMaybeEmit(workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken); err != nil {
 		return s.handleTransientFailure(workMsg, fmt.Errorf("decrementing subtree counter: %w", err))
 	}
 	return nil
@@ -350,7 +352,7 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 		// the consumer redelivers and we re-attempt; the DLQ publish above
 		// will repeat, but that's preferable to silently acking with the
 		// counter still > 0 and BLOCK_PROCESSED never firing (F-013).
-		if decErr := s.decrementCounterAndMaybeEmit(workMsg.BlockHash); decErr != nil {
+		if decErr := s.decrementCounterAndMaybeEmit(workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken); decErr != nil {
 			s.Logger.Error("ALERT: subtree counter decrement failed on DLQ path; BLOCK_PROCESSED delayed until counter store recovers",
 				"subtreeHash", workMsg.SubtreeHash,
 				"blockHash", workMsg.BlockHash,
@@ -403,14 +405,21 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 // at most one BLOCK_PROCESSED per (block, callbackURL) pair.
 //
 // If no counter store is configured (test/dry-run), this is a no-op.
-func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash string) error {
+//
+// overrideURL/overrideToken are propagated from a /reprocess request. When
+// overrideURL is non-empty, the counter is keyed by (blockHash|overrideURL)
+// so reprocess and live processing don't share state, and the
+// BLOCK_PROCESSED emission targets only that one URL/token.
+func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideURL, overrideToken string) error {
 	if s.subtreeCounter == nil {
 		return nil
 	}
-	remaining, err := s.subtreeCounter.Decrement(blockHash)
+	counterKey := SubtreeCounterKey(blockHash, overrideURL)
+	remaining, err := s.subtreeCounter.Decrement(counterKey)
 	if err != nil {
 		s.Logger.Error("failed to decrement subtree counter",
 			"blockHash", blockHash,
+			"counterKey", counterKey,
 			"error", err,
 		)
 		return err
@@ -421,7 +430,7 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash string) er
 	// drive the counter negative; we still need to emit so the notification is
 	// not silently lost. Receiver-side dedup handles the duplicate.
 	if remaining <= 0 {
-		if emitErr := s.emitBlockProcessed(blockHash); emitErr != nil {
+		if emitErr := s.emitBlockProcessed(blockHash, overrideURL, overrideToken); emitErr != nil {
 			s.Logger.Error("failed to emit BLOCK_PROCESSED; work item will be redelivered",
 				"blockHash", blockHash,
 				"remaining", remaining,
@@ -520,15 +529,23 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 // On retry, the redelivered work item drives the counter past zero and
 // emit fires again; duplicate BLOCK_PROCESSED messages are deduplicated at
 // the callback delivery service (keyed by blockHash + callbackURL + type).
-func (s *SubtreeWorkerService) emitBlockProcessed(blockHash string) error {
-	if s.urlRegistry == nil {
-		return nil
-	}
-
-	entries, err := s.urlRegistry.GetAll()
-	if err != nil {
-		s.Logger.Error("failed to get callback URLs for BLOCK_PROCESSED", "error", err)
-		return fmt.Errorf("getting callback URLs for BLOCK_PROCESSED on block %s: %w", blockHash, err)
+func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overrideToken string) error {
+	// /reprocess: deliver BLOCK_PROCESSED to exactly the requesting arcade,
+	// bypassing the global broadcast registry. Other arcades must not learn
+	// about this past block via the reprocess flow.
+	var entries []store.CallbackEntry
+	if overrideURL != "" {
+		entries = []store.CallbackEntry{{URL: overrideURL, Token: overrideToken}}
+	} else {
+		if s.urlRegistry == nil {
+			return nil
+		}
+		var err error
+		entries, err = s.urlRegistry.GetAll()
+		if err != nil {
+			s.Logger.Error("failed to get callback URLs for BLOCK_PROCESSED", "error", err)
+			return fmt.Errorf("getting callback URLs for BLOCK_PROCESSED on block %s: %w", blockHash, err)
+		}
 	}
 	if len(entries) == 0 {
 		return nil

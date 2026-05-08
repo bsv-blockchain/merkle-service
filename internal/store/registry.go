@@ -10,6 +10,7 @@ type Registry struct {
 	Subtree             SubtreeStore
 	CallbackDedup       CallbackDedupStore
 	CallbackURLRegistry CallbackURLRegistry
+	DataHubRegistry     DataHubRegistry
 	CallbackAccumulator CallbackAccumulatorStore
 	SeenCounter         SeenCounterStore
 	SubtreeCounter      SubtreeCounterStore

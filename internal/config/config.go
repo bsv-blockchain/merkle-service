@@ -110,8 +110,17 @@ type AerospikeConfig struct {
 	SubtreeCounterTTLSec      int    `yaml:"subtreeCounterTTLSec" mapstructure:"subtreecounterttlsec"`
 	CallbackAccumulatorSet    string `yaml:"callbackAccumulatorSet"    mapstructure:"callbackaccumulatorset"`
 	CallbackAccumulatorTTLSec int    `yaml:"callbackAccumulatorTTLSec" mapstructure:"callbackaccumulatorttlsec"`
-	MaxRetries                int    `yaml:"maxRetries"  mapstructure:"maxretries"`
-	RetryBaseMs               int    `yaml:"retryBaseMs" mapstructure:"retrybasems"`
+	// DataHubRegistry is the Aerospike set name for the on-demand /reprocess
+	// DataHub URL pool. Block-processor adds an entry whenever it successfully
+	// fetches block metadata, so the pool reflects DataHubs known to be
+	// healthy for this network.
+	DataHubRegistry string `yaml:"dataHubRegistry" mapstructure:"datahubregistry"`
+	// DataHubRegistryTTLSec bounds the DataHub URL registry — entries older
+	// than this are evicted by the per-record TTL. Default 7 days; tune down
+	// for clusters where DataHub fleet membership rotates more aggressively.
+	DataHubRegistryTTLSec int `yaml:"dataHubRegistryTTLSec" mapstructure:"datahubregistryttlsec"`
+	MaxRetries            int `yaml:"maxRetries"  mapstructure:"maxretries"`
+	RetryBaseMs           int `yaml:"retryBaseMs" mapstructure:"retrybasems"`
 	// ConnectionQueueSize is the per-node connection pool size. The Aerospike
 	// Go client default is 100; under bursty BatchGet load (e.g. 14+ subtrees
 	// processed in parallel during block-time, each fanning out thousands of
@@ -292,6 +301,14 @@ type DataHubConfig struct {
 	// this to true. The guard against 0.0.0.0/multicast destinations
 	// remains in force regardless. See finding F-028.
 	AllowPrivateIPs bool `yaml:"allowPrivateIPs" mapstructure:"allowprivateips"`
+
+	// FallbackURLs lists operator-trusted DataHub endpoints used by the
+	// /reprocess flow. The API server probes these (alongside any URLs
+	// observed via P2P and persisted in the DataHubRegistry) to find one
+	// that serves the requested block. The first entry to return metadata
+	// for the block hash wins and is used for the entire reprocess. Order
+	// matters: configured entries are tried before discovered ones.
+	FallbackURLs []string `yaml:"fallbackUrls" mapstructure:"fallbackurls"`
 }
 
 // registerDefaults sets all default values in the Viper instance.
@@ -326,6 +343,8 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.subtreecounterttlsec", 600)
 	v.SetDefault("aerospike.callbackaccumulatorset", "merkle_callback_accum")
 	v.SetDefault("aerospike.callbackaccumulatorttlsec", 600)
+	v.SetDefault("aerospike.datahubregistry", "merkle_datahub_urls")
+	v.SetDefault("aerospike.datahubregistryttlsec", 7*24*60*60)
 	v.SetDefault("aerospike.maxretries", 3)
 	v.SetDefault("aerospike.retrybasems", 100)
 	v.SetDefault("aerospike.connectionqueuesize", 256)
@@ -404,6 +423,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("datahub.maxsubtreebytes", int64(1*1024*1024*1024))
 	// SSRF guard default: deny private/loopback/link-local destinations.
 	v.SetDefault("datahub.allowprivateips", false)
+	v.SetDefault("datahub.fallbackurls", []string{})
 
 	// Registry
 	v.SetDefault("registry.maxcallbackspertxid", 10)
@@ -449,6 +469,8 @@ func bindEnvVars(v *viper.Viper) {
 		"aerospike.subtreecounterttlsec":        "AEROSPIKE_SUBTREE_COUNTER_TTL_SEC",
 		"aerospike.callbackaccumulatorset":      "AEROSPIKE_CALLBACK_ACCUMULATOR_SET",
 		"aerospike.callbackaccumulatorttlsec":   "AEROSPIKE_CALLBACK_ACCUMULATOR_TTL_SEC",
+		"aerospike.datahubregistry":             "AEROSPIKE_DATAHUB_REGISTRY",
+		"aerospike.datahubregistryttlsec":       "AEROSPIKE_DATAHUB_REGISTRY_TTL_SEC",
 		"aerospike.maxretries":                  "AEROSPIKE_MAX_RETRIES",
 		"aerospike.retrybasems":                 "AEROSPIKE_RETRY_BASE_MS",
 		"aerospike.connectionqueuesize":         "AEROSPIKE_CONNECTION_QUEUE_SIZE",
@@ -522,6 +544,7 @@ func bindEnvVars(v *viper.Viper) {
 		"datahub.maxblockbytes":   "DATAHUB_MAX_BLOCK_BYTES",
 		"datahub.maxsubtreebytes": "DATAHUB_MAX_SUBTREE_BYTES",
 		"datahub.allowprivateips": "DATAHUB_ALLOW_PRIVATE_IPS",
+		"datahub.fallbackurls":    "DATAHUB_FALLBACK_URLS",
 
 		// Registry
 		"registry.maxcallbackspertxid": "REGISTRY_MAX_CALLBACKS_PER_TXID",

@@ -19,6 +19,14 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 )
 
+// ErrNotFound is returned wrapped by the fetch methods when the DataHub
+// returned a 404 for the requested resource. Distinguishing 404 from other
+// failures lets callers (notably the /reprocess flow probing multiple
+// candidates) tell "every DataHub knows the block is missing" from "every
+// DataHub failed for transport reasons" and choose the right HTTP status
+// to surface back to the API caller.
+var ErrNotFound = errors.New("datahub: not found")
+
 // Default per-endpoint response body caps. They are intentionally generous so
 // healthy traffic is never rejected, but tight enough that a malicious or
 // malfunctioning DataHub endpoint cannot exhaust process memory by streaming
@@ -378,7 +386,7 @@ func (c *Client) doGetWithRetry(ctx context.Context, url string, maxBytes int64)
 		_ = resp.Body.Close()
 
 		if resp.StatusCode == http.StatusNotFound {
-			return nil, fmt.Errorf("not found: %s (HTTP 404)", url)
+			return nil, fmt.Errorf("%w: %s (HTTP 404)", ErrNotFound, url)
 		}
 
 		if resp.StatusCode != http.StatusOK {

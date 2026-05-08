@@ -76,6 +76,11 @@ func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Lo
 			cfg.Aerospike.CallbackURLRegistryTTLSec,
 			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
 		),
+		DataHubRegistry: NewDataHubRegistry(
+			asClient, cfg.Aerospike.DataHubRegistry,
+			cfg.Aerospike.DataHubRegistryTTLSec,
+			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
+		),
 		CallbackAccumulator: NewCallbackAccumulatorStore(
 			asClient, cfg.Aerospike.CallbackAccumulatorSet, cfg.Aerospike.CallbackAccumulatorTTLSec,
 			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,

@@ -1,13 +1,17 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/bsv-blockchain/merkle-service/internal/datahub"
+	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
@@ -192,6 +196,217 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		TxID:         txid,
 		CallbackUrls: urls,
 	})
+}
+
+// blockHashRegex is the same shape as txidRegex (64-hex) but named for
+// clarity at the /reprocess call site.
+var blockHashRegex = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
+
+// reprocessProbeTimeout caps the per-DataHub block-metadata probe inside
+// /reprocess so a single unhealthy DataHub can't hold the API request
+// past the surrounding HTTP write timeout.
+const reprocessProbeTimeout = 5 * time.Second
+
+// ReprocessRequest represents the POST /reprocess request body.
+//
+// CallbackURL/Token are scoped to this single reprocess: STUMPs and
+// BLOCK_PROCESSED for the requested block flow only to this URL/token,
+// independent of whatever URLs are registered globally via /watch. Tokens
+// are optional for back-compat with arcade deployments that haven't
+// shipped the matching token-passing change.
+type ReprocessRequest struct {
+	BlockHash     string `json:"blockHash"`
+	CallbackURL   string `json:"callbackUrl"`
+	CallbackToken string `json:"callbackToken,omitempty"`
+}
+
+// ReprocessResponse represents the 202 ACK body for POST /reprocess.
+type ReprocessResponse struct {
+	Status     string `json:"status"`
+	BlockHash  string `json:"blockHash"`
+	DataHubURL string `json:"dataHubUrl"`
+}
+
+func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
+	if s.dataHubClient == nil || s.blockProducer == nil {
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+			Error: "reprocess endpoint not configured on this server",
+		})
+		return
+	}
+
+	var req ReprocessRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return
+	}
+
+	if req.BlockHash == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "blockHash is required"})
+		return
+	}
+	if !blockHashRegex.MatchString(req.BlockHash) {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid blockHash format: must be a 64-character hex string"})
+		return
+	}
+	if req.CallbackURL == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "callbackUrl is required"})
+		return
+	}
+	if err := ssrfguard.ValidateURL(req.CallbackURL, s.allowPrivateCallbackIPs, nil); err != nil {
+		var msg string
+		switch {
+		case errors.Is(err, ssrfguard.ErrBlockedAddress):
+			msg = "invalid callbackUrl: host is on the SSRF deny-list (private, loopback, link-local, or metadata-endpoint address)"
+		default:
+			msg = "invalid callbackUrl: must be a valid HTTP/HTTPS URL with a public host"
+		}
+		s.Logger.Warn("rejected reprocess callback URL",
+			"reason", err.Error(),
+			"blockHash", req.BlockHash,
+		)
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: msg})
+		return
+	}
+	if len(req.CallbackToken) > maxCallbackTokenLen {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
+			Error: "invalid callbackToken: exceeds maximum length",
+		})
+		return
+	}
+
+	// Build candidate DataHub list: operator-configured fallbacks first
+	// (operator-trusted), then dynamically-discovered URLs. Dedupe so a
+	// URL listed in both is probed only once.
+	candidates := s.collectDataHubCandidates()
+	if len(candidates) == 0 {
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+			Error: "no DataHub endpoints configured or discovered",
+		})
+		return
+	}
+
+	resolvedURL, height, status, probeErr := s.probeDataHubsForBlock(r.Context(), candidates, req.BlockHash)
+	if probeErr != nil {
+		s.Logger.Warn("reprocess: no DataHub served block",
+			"blockHash", req.BlockHash,
+			"candidates", len(candidates),
+			"status", status,
+			"error", probeErr,
+		)
+		writeJSON(w, status, ErrorResponse{Error: probeErr.Error()})
+		return
+	}
+
+	blockMsg := kafka.BlockMessage{
+		Hash:                  req.BlockHash,
+		Height:                height,
+		DataHubURL:            resolvedURL,
+		OverrideCallbackURL:   req.CallbackURL,
+		OverrideCallbackToken: req.CallbackToken,
+		BypassDedup:           true,
+	}
+	encoded, err := blockMsg.Encode()
+	if err != nil {
+		s.Logger.Error("failed to encode reprocess block message",
+			"blockHash", req.BlockHash, "error", err)
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal server error"})
+		return
+	}
+	// Partition key includes the override URL so a /reprocess never collides
+	// with a live announcement of the same block on the same partition.
+	partitionKey := req.BlockHash + "|" + req.CallbackURL
+	if err := s.blockProducer.PublishWithHashKey(partitionKey, encoded); err != nil {
+		s.Logger.Error("failed to publish reprocess block message",
+			"blockHash", req.BlockHash, "error", err)
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to enqueue reprocess"})
+		return
+	}
+
+	s.Logger.Info("reprocess enqueued",
+		"blockHash", req.BlockHash,
+		"dataHubUrl", resolvedURL,
+		"callbackUrl", req.CallbackURL,
+	)
+	writeJSON(w, http.StatusAccepted, ReprocessResponse{
+		Status:     "queued",
+		BlockHash:  req.BlockHash,
+		DataHubURL: resolvedURL,
+	})
+}
+
+// collectDataHubCandidates returns the deduped, ordered list of DataHub URLs
+// /reprocess should probe. Operator-configured fallbacks come first so they
+// take precedence on tie; discovered URLs are appended. A registry-lookup
+// error is logged and treated as "no discovered URLs" — the configured
+// fallback list still serves the request.
+func (s *Server) collectDataHubCandidates() []string {
+	seen := make(map[string]struct{}, len(s.fallbackDataHubURLs))
+	out := make([]string, 0, len(s.fallbackDataHubURLs))
+	for _, u := range s.fallbackDataHubURLs {
+		if u == "" {
+			continue
+		}
+		if _, ok := seen[u]; ok {
+			continue
+		}
+		seen[u] = struct{}{}
+		out = append(out, u)
+	}
+	if s.dataHubRegistry != nil {
+		discovered, err := s.dataHubRegistry.GetAll()
+		if err != nil {
+			s.Logger.Warn("reprocess: failed to read DataHub registry; falling back to configured URLs only",
+				"error", err)
+			return out
+		}
+		for _, u := range discovered {
+			if u == "" {
+				continue
+			}
+			if _, ok := seen[u]; ok {
+				continue
+			}
+			seen[u] = struct{}{}
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// probeDataHubsForBlock tries each candidate DataHub in order and returns
+// the first one that successfully serves block metadata for blockHash, the
+// block's height, and HTTP 202 (status echoes the API response shape:
+// caller should write 202 on success). On exhausted candidates, returns:
+//   - 404 if every probe returned ErrNotFound (block genuinely missing).
+//   - 502 if every probe failed for any other reason (transport, timeout, 5xx).
+//
+// Mixed outcomes are bucketed as 502 since at least one DataHub couldn't
+// confirm a 404, and the caller should treat the result as ambiguous and
+// retry later.
+func (s *Server) probeDataHubsForBlock(parentCtx context.Context, candidates []string, blockHash string) (string, uint32, int, error) {
+	allNotFound := true
+	for _, url := range candidates {
+		ctx, cancel := context.WithTimeout(parentCtx, reprocessProbeTimeout)
+		meta, err := s.dataHubClient.FetchBlockMetadata(ctx, url, blockHash)
+		cancel()
+		if err == nil {
+			return url, meta.Height, http.StatusAccepted, nil
+		}
+		if !errors.Is(err, datahub.ErrNotFound) {
+			allNotFound = false
+		}
+		s.Logger.Debug("reprocess probe failed",
+			"dataHubUrl", url,
+			"blockHash", blockHash,
+			"notFound", errors.Is(err, datahub.ErrNotFound),
+			"error", err,
+		)
+	}
+	if allNotFound {
+		return "", 0, http.StatusNotFound, errors.New("block not found on any known DataHub")
+	}
+	return "", 0, http.StatusBadGateway, errors.New("no DataHub could serve the requested block")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

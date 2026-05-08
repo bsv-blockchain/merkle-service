@@ -27,15 +27,31 @@ type SubtreeMessage struct {
 	AttemptCount int    `json:"attemptCount,omitempty"`
 }
 
-// BlockMessage represents a block announcement received from P2P.
+// BlockMessage represents a block announcement received from P2P, or an
+// on-demand reprocess request originated by the API.
+//
+// Override* fields are set only on reprocess. When OverrideCallbackURL is
+// non-empty the block-processor and downstream subtree-worker scope all
+// callback delivery to that one URL/token instead of the global
+// CallbackURLRegistry: STUMPs are filtered to txids the override URL is
+// registered for, BLOCK_PROCESSED fires only at the override URL, and the
+// per-block subtree counter uses key (BlockHash|OverrideCallbackURL) so a
+// reprocess never collides with a live announcement of the same block.
+//
+// BypassDedup is also reprocess-only — the block-processor's dedup cache
+// is skipped so a hash already seen via P2P can still be reprocessed on
+// demand.
 type BlockMessage struct {
-	Hash       string `json:"hash"`
-	Height     uint32 `json:"height"`
-	Header     string `json:"header"`
-	Coinbase   string `json:"coinbase"`
-	DataHubURL string `json:"dataHubUrl"`
-	PeerID     string `json:"peerId"`
-	ClientName string `json:"clientName"`
+	Hash                  string `json:"hash"`
+	Height                uint32 `json:"height"`
+	Header                string `json:"header"`
+	Coinbase              string `json:"coinbase"`
+	DataHubURL            string `json:"dataHubUrl"`
+	PeerID                string `json:"peerId"`
+	ClientName            string `json:"clientName"`
+	OverrideCallbackURL   string `json:"overrideCallbackUrl,omitempty"`
+	OverrideCallbackToken string `json:"overrideCallbackToken,omitempty"`
+	BypassDedup           bool   `json:"bypassDedup,omitempty"`
 }
 
 // CallbackTopicMessage is the message published to the callback Kafka topic.
@@ -164,6 +180,13 @@ type SubtreeWorkMessage struct {
 	SubtreeIndex int    `json:"subtreeIndex"`
 	DataHubURL   string `json:"dataHubUrl"`
 	AttemptCount int    `json:"attemptCount,omitempty"`
+	// OverrideCallbackURL/Token are propagated from a /reprocess-originated
+	// BlockMessage. When set, the subtree worker scopes STUMP delivery to
+	// only this URL (and uses this token), and on the last subtree emits
+	// BLOCK_PROCESSED only to this URL — the global broadcast registry is
+	// not consulted.
+	OverrideCallbackURL   string `json:"overrideCallbackUrl,omitempty"`
+	OverrideCallbackToken string `json:"overrideCallbackToken,omitempty"`
 }
 
 func (m *SubtreeWorkMessage) Encode() ([]byte, error) {

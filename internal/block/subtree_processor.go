@@ -55,6 +55,14 @@ type SubtreeResult struct {
 // batchSem, when non-nil, gates the registration BatchGet so only N calls are
 // in flight per process (avoids exhausting the Aerospike connection pool when
 // a block fans out 14+ subtrees in parallel).
+//
+// filterURL, when non-empty, scopes the result to a single callback URL
+// (used by the /reprocess flow to deliver only to the requesting arcade).
+// Registrations whose URL doesn't match are dropped before STUMP build, so
+// the resulting CallbackGroups contains at most one URL key. If filterURL is
+// set and overrideToken is non-empty, overrideToken replaces whatever token
+// regStore had on file for that URL — the request token is the source of
+// truth for this delivery (token rotation hasn't reached /watch yet).
 func ProcessBlockSubtree(
 	ctx context.Context,
 	subtreeHash string,
@@ -67,6 +75,8 @@ func ProcessBlockSubtree(
 	regCache RegCache,
 	batchSem chan struct{},
 	postMineTTLSec int,
+	filterURL string,
+	overrideToken string,
 	logger *slog.Logger,
 ) (*SubtreeResult, error) {
 	// 6.2: Retrieve subtree data from blob store, falling back to DataHub.
@@ -113,6 +123,29 @@ func ProcessBlockSubtree(
 
 	if len(registrations) == 0 {
 		return nil, nil
+	}
+
+	// /reprocess scope: drop entries whose URL ≠ filterURL so the requester
+	// only receives STUMPs for txids it has registered. Privacy: never leak
+	// merkle paths covering another arcade's watched txids.
+	if filterURL != "" {
+		filtered := make(map[string][]store.CallbackEntry, len(registrations))
+		for txid, entries := range registrations {
+			for _, e := range entries {
+				if e.URL == filterURL {
+					token := e.Token
+					if overrideToken != "" {
+						token = overrideToken
+					}
+					filtered[txid] = []store.CallbackEntry{{URL: filterURL, Token: token}}
+					break
+				}
+			}
+		}
+		registrations = filtered
+		if len(registrations) == 0 {
+			return nil, nil
+		}
 	}
 
 	// Reduce CallbackEntry tuples back into the (txid → urls) shape that
