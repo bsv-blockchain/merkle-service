@@ -59,6 +59,17 @@ type CallbackURLRegistry interface {
 	GetAll() ([]CallbackEntry, error)
 }
 
+// DataHubRegistry remembers every DataHub URL the block processor has
+// successfully fetched block metadata from. The /reprocess endpoint reads
+// this set (combined with operator-configured fallbacks) to find a DataHub
+// that can serve a past block when the API caller doesn't know which
+// DataHubs are live on the network. Add upserts and refreshes a per-URL TTL
+// so dead URLs eventually drop off.
+type DataHubRegistry interface {
+	Add(dataHubURL string) error
+	GetAll() ([]string, error)
+}
+
 // CallbackAccumulatorStore aggregates per-block, per-URL callback data across
 // subtrees, then hands it off atomically for dispatch via ReadAndDelete.
 type CallbackAccumulatorStore interface {

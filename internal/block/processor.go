@@ -27,6 +27,7 @@ type Processor struct {
 	regStore            store.RegistrationStore
 	subtreeStore        store.SubtreeStore
 	urlRegistry         store.CallbackURLRegistry
+	dataHubRegistry     store.DataHubRegistry
 	subtreeCounter      store.SubtreeCounterStore
 	dataHubClient       *datahub.Client
 	dedupCache          *cache.DedupCache
@@ -39,17 +40,19 @@ func NewProcessor(
 	regStore store.RegistrationStore,
 	subtreeStore store.SubtreeStore,
 	urlRegistry store.CallbackURLRegistry,
+	dataHubRegistry store.DataHubRegistry,
 	subtreeCounter store.SubtreeCounterStore,
 	logger *slog.Logger,
 ) *Processor {
 	p := &Processor{
-		kafkaCfg:       kafkaCfg,
-		blockCfg:       blockCfg,
-		datahubCfg:     datahubCfg,
-		regStore:       regStore,
-		subtreeStore:   subtreeStore,
-		urlRegistry:    urlRegistry,
-		subtreeCounter: subtreeCounter,
+		kafkaCfg:        kafkaCfg,
+		blockCfg:        blockCfg,
+		datahubCfg:      datahubCfg,
+		regStore:        regStore,
+		subtreeStore:    subtreeStore,
+		urlRegistry:     urlRegistry,
+		dataHubRegistry: dataHubRegistry,
+		subtreeCounter:  subtreeCounter,
 	}
 	p.InitBase("block-processor")
 	if logger != nil {
@@ -149,10 +152,13 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 		"hash", blockMsg.Hash,
 		"height", blockMsg.Height,
 		"dataHubUrl", blockMsg.DataHubURL,
+		"reprocess", blockMsg.OverrideCallbackURL != "",
 	)
 
-	// Check dedup cache — skip if already successfully processed.
-	if p.dedupCache != nil && p.dedupCache.Contains(blockMsg.Hash) {
+	// Check dedup cache — skip if already successfully processed. Reprocess
+	// requests (BypassDedup) intentionally skip both the lookup and the later
+	// Add so a hash already seen via P2P can still be reprocessed on demand.
+	if !blockMsg.BypassDedup && p.dedupCache != nil && p.dedupCache.Contains(blockMsg.Hash) {
 		p.Logger.Debug("skipping duplicate block message", "hash", blockMsg.Hash)
 		return nil
 	}
@@ -162,6 +168,16 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	if err != nil {
 		p.Logger.Error("failed to fetch block metadata", "hash", blockMsg.Hash, "error", err)
 		return fmt.Errorf("fetching block metadata %s: %w", blockMsg.Hash, err)
+	}
+
+	// Remember this DataHub URL — the /reprocess endpoint reads the registry
+	// to pick a candidate DataHub when serving past-block requests, and we
+	// only want to remember URLs that actually served a block successfully.
+	if p.dataHubRegistry != nil && blockMsg.DataHubURL != "" {
+		if regErr := p.dataHubRegistry.Add(blockMsg.DataHubURL); regErr != nil {
+			p.Logger.Warn("failed to record DataHub URL in registry",
+				"url", blockMsg.DataHubURL, "error", regErr)
+		}
 	}
 
 	// 5.3: Extract subtree hashes from block metadata.
@@ -195,11 +211,13 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	encoded := make([]encodedWork, 0, len(subtreeHashes))
 	for i, stHash := range subtreeHashes {
 		workMsg := &kafka.SubtreeWorkMessage{
-			BlockHash:    blockMsg.Hash,
-			BlockHeight:  meta.Height,
-			SubtreeHash:  stHash,
-			SubtreeIndex: i,
-			DataHubURL:   blockMsg.DataHubURL,
+			BlockHash:             blockMsg.Hash,
+			BlockHeight:           meta.Height,
+			SubtreeHash:           stHash,
+			SubtreeIndex:          i,
+			DataHubURL:            blockMsg.DataHubURL,
+			OverrideCallbackURL:   blockMsg.OverrideCallbackURL,
+			OverrideCallbackToken: blockMsg.OverrideCallbackToken,
 		}
 		data, encErr := workMsg.Encode()
 		if encErr != nil {
@@ -218,10 +236,16 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	// workers cannot decrement a missing counter. The Aerospike-backed Init
 	// uses RecordExistsAction=UPDATE (upsert), so on a redelivery this safely
 	// overwrites any stale value left by a previous partial-publish attempt.
+	//
+	// On reprocess we scope the counter key by override URL so a /reprocess
+	// for a hash already being processed live (or being reprocessed by a
+	// different arcade) gets its own counter — see SubtreeCounterKey.
+	counterKey := SubtreeCounterKey(blockMsg.Hash, blockMsg.OverrideCallbackURL)
 	if p.subtreeCounter != nil {
-		if err := p.subtreeCounter.Init(blockMsg.Hash, len(encoded)); err != nil {
+		if err := p.subtreeCounter.Init(counterKey, len(encoded)); err != nil {
 			p.Logger.Error("failed to init subtree counter",
 				"blockHash", blockMsg.Hash,
+				"counterKey", counterKey,
 				"count", len(encoded),
 				"error", err,
 			)
@@ -263,10 +287,26 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 
 	// Mark block as successfully processed for dedup. This must be the last
 	// step: anything that returned an error above leaves the cache untouched
-	// so the block is retried on redelivery.
-	if p.dedupCache != nil {
+	// so the block is retried on redelivery. Reprocess requests
+	// (BypassDedup) are intentionally NOT recorded — a future live
+	// announcement of the same hash must still flow through the live path.
+	if !blockMsg.BypassDedup && p.dedupCache != nil {
 		p.dedupCache.Add(blockMsg.Hash)
 	}
 
 	return nil
+}
+
+// SubtreeCounterKey composes the per-block subtree counter store key.
+// Live announcements key on blockHash alone (preserving today's behavior).
+// Reprocess requests scope by overrideURL so two arcades reprocessing the
+// same block, or a reprocess overlapping with a live announcement, do not
+// share counter state and therefore cannot fire BLOCK_PROCESSED for each
+// other. The counter store treats the key as opaque, so no interface
+// change is needed.
+func SubtreeCounterKey(blockHash, overrideURL string) string {
+	if overrideURL == "" {
+		return blockHash
+	}
+	return blockHash + "|" + overrideURL
 }

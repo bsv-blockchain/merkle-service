@@ -6,6 +6,8 @@ import (
 
 	"github.com/bsv-blockchain/merkle-service/internal/api"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
+	"github.com/bsv-blockchain/merkle-service/internal/datahub"
+	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	_ "github.com/bsv-blockchain/merkle-service/internal/store/sql" // register SQL backend
@@ -28,6 +30,31 @@ func main() {
 
 	server := api.NewServer(cfg.API, registry.Registration, registry.CallbackURLRegistry, registry.Health, logger)
 	server.SetAllowPrivateCallbackIPs(cfg.Callback.AllowPrivateIPs)
+
+	// /reprocess deps. The DataHub client honors the same SSRF posture as the
+	// block-processor so /reprocess can't be coerced into probing
+	// loopback/RFC1918 addresses unless the operator opted in via
+	// datahub.allowPrivateIPs.
+	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, logger)
+	if err != nil {
+		log.Fatal("failed to create block producer: ", err)
+	}
+	defer func() { _ = blockProducer.Close() }()
+
+	dataHubClient := datahub.NewClientWithSSRFGuard(
+		cfg.DataHub.TimeoutSec,
+		cfg.DataHub.MaxRetries,
+		cfg.DataHub.MaxBlockBytes,
+		cfg.DataHub.MaxSubtreeBytes,
+		cfg.DataHub.AllowPrivateIPs,
+		logger,
+	)
+	server.SetReprocessDeps(&api.ReprocessDeps{
+		DataHubRegistry:     registry.DataHubRegistry,
+		DataHubClient:       dataHubClient,
+		BlockProducer:       blockProducer,
+		FallbackDataHubURLs: cfg.DataHub.FallbackURLs,
+	})
 
 	if err := server.Init(nil); err != nil {
 		log.Fatal("failed to init api server: ", err)

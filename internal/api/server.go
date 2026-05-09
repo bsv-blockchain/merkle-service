@@ -12,6 +12,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
+	"github.com/bsv-blockchain/merkle-service/internal/datahub"
+	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
@@ -23,17 +25,40 @@ var dashboardHTML []byte
 type Server struct {
 	service.BaseService
 
-	cfg         config.APIConfig
-	httpServer  *http.Server
-	router      chi.Router
-	regStore    store.RegistrationStore
-	urlRegistry store.CallbackURLRegistry
-	health      store.BackendHealth
+	cfg             config.APIConfig
+	httpServer      *http.Server
+	router          chi.Router
+	regStore        store.RegistrationStore
+	urlRegistry     store.CallbackURLRegistry
+	dataHubRegistry store.DataHubRegistry
+	dataHubClient   *datahub.Client
+	blockProducer   reprocessBlockProducer
+	// fallbackDataHubURLs are operator-configured DataHubs probed by
+	// /reprocess before the dynamically-discovered ones.
+	fallbackDataHubURLs []string
+	health              store.BackendHealth
 	// allowPrivateCallbackIPs, when true, lets /watch accept callback
 	// URLs that resolve to loopback/link-local/RFC1918 addresses.
 	// Defaults to false (deny). See SetAllowPrivateCallbackIPs and
 	// CallbackConfig.AllowPrivateIPs.
 	allowPrivateCallbackIPs bool
+}
+
+// reprocessBlockProducer is the minimal kafka.Producer surface the /reprocess
+// handler needs. Defined as an interface so unit tests can substitute a
+// no-network producer without touching Sarama.
+type reprocessBlockProducer interface {
+	PublishWithHashKey(key string, value []byte) error
+}
+
+// ReprocessDeps bundles the dependencies the /reprocess endpoint needs that
+// /watch does not. Bundled in their own struct so existing callers of
+// NewServer keep their signature; pass nil to disable /reprocess.
+type ReprocessDeps struct {
+	DataHubRegistry     store.DataHubRegistry
+	DataHubClient       *datahub.Client
+	BlockProducer       *kafka.Producer
+	FallbackDataHubURLs []string
 }
 
 func NewServer(cfg config.APIConfig, regStore store.RegistrationStore, urlRegistry store.CallbackURLRegistry, health store.BackendHealth, logger *slog.Logger) *Server {
@@ -48,6 +73,21 @@ func NewServer(cfg config.APIConfig, regStore store.RegistrationStore, urlRegist
 		s.Logger = logger
 	}
 	return s
+}
+
+// SetReprocessDeps wires the dependencies needed for the /reprocess endpoint.
+// Must be called before Init for the route to be registered. Passing nil or
+// any-nil leaves /reprocess disabled (the route returns 503 at request time).
+func (s *Server) SetReprocessDeps(deps *ReprocessDeps) {
+	if deps == nil {
+		return
+	}
+	s.dataHubRegistry = deps.DataHubRegistry
+	s.dataHubClient = deps.DataHubClient
+	if deps.BlockProducer != nil {
+		s.blockProducer = deps.BlockProducer
+	}
+	s.fallbackDataHubURLs = deps.FallbackDataHubURLs
 }
 
 // SetAllowPrivateCallbackIPs toggles the SSRF guard on /watch. When false
@@ -81,6 +121,7 @@ func (s *Server) Init(cfg interface{}) error {
 	// Routes
 	s.router.Get("/", handleDashboard)
 	s.router.Post("/watch", s.handleWatch)
+	s.router.Post("/reprocess", s.handleReprocess)
 	s.router.Get("/health", s.handleHealth)
 	s.router.Get("/api/lookup/{txid}", s.handleLookup)
 
