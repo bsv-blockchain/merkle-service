@@ -27,10 +27,15 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
-// CallbackDeduper abstracts callback deduplication for testability.
+// CallbackDeduper abstracts callback deduplication for testability. Claim is
+// the single atomic primitive: claimed=true means this caller is the first
+// (and only) deliverer for the tuple — it must deliver. claimed=false means
+// the tuple was already claimed by a prior or concurrent worker — caller
+// MUST skip delivery to avoid double-firing. Collapsing the previous
+// Exists+Record pair into one operation closes the read-modify-write race
+// where two workers could both see "not exists" and both deliver.
 type CallbackDeduper interface {
-	Exists(txid, callbackURL, statusType string) (bool, error)
-	Record(txid, callbackURL, statusType string, ttl time.Duration) error
+	Claim(txid, callbackURL, statusType string, ttl time.Duration) (bool, error)
 }
 
 // futureRetryWaitCap is the maximum amount of time handleMessage will block
@@ -331,47 +336,43 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 		"subtreeIndex", cbMsg.SubtreeIndex,
 	)
 
-	// Check callback dedup — skip if already delivered.
-	if d.dedupStore != nil {
-		dedupKey := dedupKeyForMessage(cbMsg)
-		if dedupKey != "" {
-			exists, err := d.dedupStore.Exists(dedupKey, cbMsg.CallbackURL, string(cbMsg.Type))
-			if err != nil {
-				// Previous behavior was "proceed with delivery" — but if a
-				// prior attempt had succeeded and Aerospike is briefly
-				// unreadable, we'd deliver a duplicate BLOCK_PROCESSED. Safer
-				// to fall through to the retry path so the next attempt
-				// re-checks dedup once the store recovers.
-				d.Logger.Error("dedup check failed, scheduling retry", "error", err, "dedupKey", dedupKey, "callbackUrl", cbMsg.CallbackURL)
-				return d.scheduleRetryOrDLQ(cbMsg, fmt.Errorf("dedup check: %w", err))
-			}
-			if exists {
-				d.Logger.Debug("skipping duplicate callback delivery",
-					"dedupKey", dedupKey,
-					"callbackUrl", cbMsg.CallbackURL,
-					"type", cbMsg.Type,
-				)
-				d.messagesDedupe.Add(1)
-				return nil
-			}
+	// Atomically claim the dedup slot BEFORE delivery. Single-shot Claim
+	// closes the prior Exists/Record TOCTOU race where two concurrent workers
+	// could both observe "not delivered yet" and both fire the callback.
+	// claimed=true here means we own the delivery; claimed=false means a
+	// peer (or a prior attempt) already won, so we skip.
+	//
+	// On Claim failure (backend outage) we fall through to the retry path so
+	// the next attempt re-claims once the store recovers — preferable to
+	// proceeding without dedup protection and risking a double-fire.
+	dedupKey := dedupKeyForMessage(cbMsg)
+	if d.dedupStore != nil && dedupKey != "" {
+		ttl := time.Duration(d.cfg.Callback.DedupTTLSec) * time.Second
+		claimed, err := d.dedupStore.Claim(dedupKey, cbMsg.CallbackURL, string(cbMsg.Type), ttl)
+		if err != nil {
+			d.Logger.Error("dedup claim failed, scheduling retry", "error", err, "dedupKey", dedupKey, "callbackUrl", cbMsg.CallbackURL)
+			return d.scheduleRetryOrDLQ(cbMsg, fmt.Errorf("dedup claim: %w", err))
+		}
+		if !claimed {
+			d.Logger.Debug("skipping duplicate callback delivery",
+				"dedupKey", dedupKey,
+				"callbackUrl", cbMsg.CallbackURL,
+				"type", cbMsg.Type,
+			)
+			d.messagesDedupe.Add(1)
+			return nil
 		}
 	}
 
-	// Attempt HTTP POST delivery.
+	// Attempt HTTP POST delivery. We've already claimed the dedup slot, so a
+	// failure here leaves the slot held — the retry republished to Kafka
+	// will, on next consumption, see the existing claim and dedup-skip
+	// (since this worker registered the claim). That's the trade-off for
+	// race-free dedup: at most one HTTP delivery attempt per tuple per TTL
+	// window. The Kafka-driven retry/DLQ pipeline still kicks in to surface
+	// the failure.
 	deliverErr := d.deliverCallback(ctx, cbMsg)
 	if deliverErr == nil {
-		// Record successful delivery for dedup. Delivery already succeeded —
-		// the offset will advance regardless. Log dedup-store outages at
-		// ERROR so they're visible in prod without DEBUG.
-		if d.dedupStore != nil {
-			dedupKey := dedupKeyForMessage(cbMsg)
-			if dedupKey != "" {
-				ttl := time.Duration(d.cfg.Callback.DedupTTLSec) * time.Second
-				if recErr := d.dedupStore.Record(dedupKey, cbMsg.CallbackURL, string(cbMsg.Type), ttl); recErr != nil {
-					d.Logger.Error("failed to record callback dedup", "error", recErr, "dedupKey", dedupKey, "callbackUrl", cbMsg.CallbackURL)
-				}
-			}
-		}
 		d.messagesProcessed.Add(1)
 		d.Logger.Debug("callback delivered successfully",
 			"callbackUrl", cbMsg.CallbackURL,
