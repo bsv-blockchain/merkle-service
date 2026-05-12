@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/model"
@@ -261,6 +262,128 @@ func TestHandleReprocess_DedupesCandidates(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("expected single probe (configured + discovered should dedupe), got %d", got)
+	}
+}
+
+// TestHandleReprocess_SkipsUnhealthyDiscoveredPeer verifies that a peer
+// marked unhealthy by the shared PeerHealth tracker is skipped from the
+// /reprocess probe loop, while operator-configured fallbacks are still
+// tried.
+func TestHandleReprocess_SkipsUnhealthyDiscoveredPeer(t *testing.T) {
+	var deadCalls, liveCalls atomic.Int32
+	// "Discovered" peer that would return 500 if probed. Pre-marking it
+	// unhealthy should keep its call count at zero.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		deadCalls.Add(1)
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer dead.Close()
+	// Operator-configured fallback that 404s. Must be probed even though
+	// the only discovered peer is unhealthy.
+	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		liveCalls.Add(1)
+		http.NotFound(w, &http.Request{})
+	}))
+	defer live.Close()
+
+	client := datahub.NewClient(2, 0, discardLogger())
+	ph := datahub.NewPeerHealth(1, 10*time.Minute)
+	client.SetPeerHealth(ph)
+	ph.RecordFailure(dead.URL)
+
+	s := newReprocessServer(t, &ReprocessDeps{
+		DataHubClient:       client,
+		FallbackDataHubURLs: []string{live.URL},
+		DataHubRegistry:     &fakeDataHubRegistry{urls: []string{dead.URL}},
+	})
+	s.blockProducer = &recordingProducer{}
+	router := newReprocessRouter(s)
+
+	body := fmt.Sprintf(`{"blockHash":%q,"callbackUrl":"https://1.1.1.1/cb"}`, fixtureBlockHash)
+	w := postReprocess(router, body)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 (live 404 + dead skipped), got %d (body=%s)",
+			w.Code, w.Body.String())
+	}
+	if deadCalls.Load() != 0 {
+		t.Errorf("unhealthy discovered peer should not be probed, got %d calls",
+			deadCalls.Load())
+	}
+	if liveCalls.Load() != 1 {
+		t.Errorf("operator fallback should still be probed, got %d calls",
+			liveCalls.Load())
+	}
+}
+
+// TestHandleReprocess_AlwaysProbesOperatorFallbacks verifies that an
+// operator-configured fallback URL is probed even when the tracker
+// reports it unhealthy — operators trust these URLs, and our health
+// view may be stale after a long quiet period.
+func TestHandleReprocess_AlwaysProbesOperatorFallbacks(t *testing.T) {
+	var calls atomic.Int32
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.NotFound(w, &http.Request{})
+	}))
+	defer hub.Close()
+
+	client := datahub.NewClient(2, 0, discardLogger())
+	ph := datahub.NewPeerHealth(1, 10*time.Minute)
+	client.SetPeerHealth(ph)
+	// Pre-mark the operator fallback unhealthy. It should be probed anyway.
+	ph.RecordFailure(hub.URL)
+
+	s := newReprocessServer(t, &ReprocessDeps{
+		DataHubClient:       client,
+		FallbackDataHubURLs: []string{hub.URL},
+	})
+	s.blockProducer = &recordingProducer{}
+	router := newReprocessRouter(s)
+
+	body := fmt.Sprintf(`{"blockHash":%q,"callbackUrl":"https://1.1.1.1/cb"}`, fixtureBlockHash)
+	w := postReprocess(router, body)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if calls.Load() != 1 {
+		t.Errorf("operator fallback must always be probed, got %d calls",
+			calls.Load())
+	}
+}
+
+// TestHandleReprocess_AllDiscoveredUnhealthyReturns502 verifies that if
+// every candidate is a discovered peer marked unhealthy (and no operator
+// fallbacks are configured), the endpoint returns 502 rather than 404 —
+// we cannot honestly conclude the block is missing without probing
+// anyone.
+func TestHandleReprocess_AllDiscoveredUnhealthyReturns502(t *testing.T) {
+	var calls atomic.Int32
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.NotFound(w, &http.Request{})
+	}))
+	defer dead.Close()
+
+	client := datahub.NewClient(2, 0, discardLogger())
+	ph := datahub.NewPeerHealth(1, 10*time.Minute)
+	client.SetPeerHealth(ph)
+	ph.RecordFailure(dead.URL)
+
+	s := newReprocessServer(t, &ReprocessDeps{
+		DataHubClient:   client,
+		DataHubRegistry: &fakeDataHubRegistry{urls: []string{dead.URL}},
+	})
+	s.blockProducer = &recordingProducer{}
+	router := newReprocessRouter(s)
+
+	body := fmt.Sprintf(`{"blockHash":%q,"callbackUrl":"https://1.1.1.1/cb"}`, fixtureBlockHash)
+	w := postReprocess(router, body)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 (nothing probed), got %d (body=%s)",
+			w.Code, w.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Errorf("unhealthy peer should not be probed, got %d calls", calls.Load())
 	}
 }
 

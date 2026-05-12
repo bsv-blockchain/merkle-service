@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/bsv-blockchain/merkle-service/internal/api"
 	"github.com/bsv-blockchain/merkle-service/internal/block"
@@ -46,16 +47,21 @@ func main() {
 
 	apiServer := api.NewServer(cfg.API, registry.Registration, registry.CallbackURLRegistry, registry.Health, logger)
 	apiServer.SetAllowPrivateCallbackIPs(cfg.Callback.AllowPrivateIPs)
+	apiDataHubClient := datahub.NewClientWithSSRFGuard(
+		cfg.DataHub.TimeoutSec,
+		cfg.DataHub.MaxRetries,
+		cfg.DataHub.MaxBlockBytes,
+		cfg.DataHub.MaxSubtreeBytes,
+		cfg.DataHub.AllowPrivateIPs,
+		logger,
+	)
+	apiDataHubClient.SetPeerHealth(datahub.NewPeerHealth(
+		cfg.DataHub.PeerHealth.FailureThreshold,
+		time.Duration(cfg.DataHub.PeerHealth.CooldownSec)*time.Second,
+	))
 	apiServer.SetReprocessDeps(&api.ReprocessDeps{
-		DataHubRegistry: registry.DataHubRegistry,
-		DataHubClient: datahub.NewClientWithSSRFGuard(
-			cfg.DataHub.TimeoutSec,
-			cfg.DataHub.MaxRetries,
-			cfg.DataHub.MaxBlockBytes,
-			cfg.DataHub.MaxSubtreeBytes,
-			cfg.DataHub.AllowPrivateIPs,
-			logger,
-		),
+		DataHubRegistry:     registry.DataHubRegistry,
+		DataHubClient:       apiDataHubClient,
 		BlockProducer:       blockProducer,
 		FallbackDataHubURLs: cfg.DataHub.FallbackURLs,
 	})

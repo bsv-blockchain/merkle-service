@@ -278,7 +278,7 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	// Build candidate DataHub list: operator-configured fallbacks first
 	// (operator-trusted), then dynamically-discovered URLs. Dedupe so a
 	// URL listed in both is probed only once.
-	candidates := s.collectDataHubCandidates()
+	candidates, fallbackCount := s.collectDataHubCandidates()
 	if len(candidates) == 0 {
 		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
 			Error: "no DataHub endpoints configured or discovered",
@@ -286,7 +286,7 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resolvedURL, height, status, probeErr := s.probeDataHubsForBlock(r.Context(), candidates, req.BlockHash)
+	resolvedURL, height, status, probeErr := s.probeDataHubsForBlock(r.Context(), candidates, fallbackCount, req.BlockHash)
 	if probeErr != nil {
 		s.Logger.Warn("reprocess: no DataHub served block",
 			"blockHash", req.BlockHash,
@@ -335,12 +335,15 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// collectDataHubCandidates returns the deduped, ordered list of DataHub URLs
-// /reprocess should probe. Operator-configured fallbacks come first so they
-// take precedence on tie; discovered URLs are appended. A registry-lookup
-// error is logged and treated as "no discovered URLs" — the configured
-// fallback list still serves the request.
-func (s *Server) collectDataHubCandidates() []string {
+// collectDataHubCandidates returns the deduped, ordered list of DataHub
+// URLs /reprocess should probe along with the count of operator-trusted
+// fallback URLs occupying the prefix of the slice. Operator-configured
+// fallbacks come first so they take precedence on tie and so the
+// probe loop can recognize them as "always try" (peer-health filtering
+// is bypassed for these). Discovered URLs are appended. A
+// registry-lookup error is logged and treated as "no discovered URLs"
+// — the configured fallback list still serves the request.
+func (s *Server) collectDataHubCandidates() ([]string, int) {
 	seen := make(map[string]struct{}, len(s.fallbackDataHubURLs))
 	out := make([]string, 0, len(s.fallbackDataHubURLs))
 	for _, u := range s.fallbackDataHubURLs {
@@ -353,12 +356,13 @@ func (s *Server) collectDataHubCandidates() []string {
 		seen[u] = struct{}{}
 		out = append(out, u)
 	}
+	fallbackCount := len(out)
 	if s.dataHubRegistry != nil {
 		discovered, err := s.dataHubRegistry.GetAll()
 		if err != nil {
 			s.Logger.Warn("reprocess: failed to read DataHub registry; falling back to configured URLs only",
 				"error", err)
-			return out
+			return out, fallbackCount
 		}
 		for _, u := range discovered {
 			if u == "" {
@@ -371,25 +375,45 @@ func (s *Server) collectDataHubCandidates() []string {
 			out = append(out, u)
 		}
 	}
-	return out
+	return out, fallbackCount
 }
 
 // probeDataHubsForBlock tries each candidate DataHub in order and returns
 // the first one that successfully serves block metadata for blockHash, the
 // block's height, and HTTP 202 (status echoes the API response shape:
-// caller should write 202 on success). On exhausted candidates, returns:
+// caller should write 202 on success).
+//
+// The first fallbackCount entries are operator-configured and are always
+// probed — peer-health filtering is bypassed for them. Discovered peers
+// (entries after fallbackCount) are skipped if currently marked unhealthy
+// by the attached PeerHealth tracker.
+//
+// On exhausted candidates, returns:
 //   - 404 if every probe returned ErrNotFound (block genuinely missing).
 //   - 502 if every probe failed for any other reason (transport, timeout, 5xx).
 //
 // Mixed outcomes are bucketed as 502 since at least one DataHub couldn't
 // confirm a 404, and the caller should treat the result as ambiguous and
-// retry later.
-func (s *Server) probeDataHubsForBlock(parentCtx context.Context, candidates []string, blockHash string) (string, uint32, int, error) {
+// retry later. If every discovered peer was skipped as unhealthy and no
+// operator fallbacks were configured, returns 502 — we cannot confirm a
+// 404 without actually probing.
+func (s *Server) probeDataHubsForBlock(parentCtx context.Context, candidates []string, fallbackCount int, blockHash string) (string, uint32, int, error) {
+	ph := s.dataHubClient.PeerHealth()
 	allNotFound := true
-	for _, url := range candidates {
+	probed := 0
+	for i, url := range candidates {
+		// Operator-configured fallbacks (index < fallbackCount) are
+		// always tried. Discovered peers are skipped while unhealthy.
+		if i >= fallbackCount && ph != nil && !ph.IsHealthy(url) {
+			s.Logger.Debug("reprocess: skipping unhealthy discovered DataHub peer",
+				"dataHubUrl", url, "blockHash", blockHash)
+			continue
+		}
+
 		ctx, cancel := context.WithTimeout(parentCtx, reprocessProbeTimeout)
 		meta, err := s.dataHubClient.FetchBlockMetadata(ctx, url, blockHash)
 		cancel()
+		probed++
 		if err == nil {
 			return url, meta.Height, http.StatusAccepted, nil
 		}
@@ -402,6 +426,12 @@ func (s *Server) probeDataHubsForBlock(parentCtx context.Context, candidates []s
 			"notFound", errors.Is(err, datahub.ErrNotFound),
 			"error", err,
 		)
+	}
+	if probed == 0 {
+		// Every candidate was skipped as unhealthy and there were no
+		// operator fallbacks to force-try. We cannot honestly claim
+		// the block is missing without probing anyone.
+		return "", 0, http.StatusBadGateway, errors.New("no DataHub could serve the requested block")
 	}
 	if allNotFound {
 		return "", 0, http.StatusNotFound, errors.New("block not found on any known DataHub")

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/bsv-blockchain/merkle-service/internal/api"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
@@ -49,6 +50,10 @@ func main() {
 		cfg.DataHub.AllowPrivateIPs,
 		logger,
 	)
+	dataHubClient.SetPeerHealth(datahub.NewPeerHealth(
+		cfg.DataHub.PeerHealth.FailureThreshold,
+		time.Duration(cfg.DataHub.PeerHealth.CooldownSec)*time.Second,
+	))
 	server.SetReprocessDeps(&api.ReprocessDeps{
 		DataHubRegistry:     registry.DataHubRegistry,
 		DataHubClient:       dataHubClient,

@@ -83,5 +83,14 @@ data:
       url: file:///data/subtrees
 
     datahub:
-      timeoutSec: 30
-      maxRetries: 3
+      # Tight per-attempt timeout + small retry budget so a single bad peer
+      # is detected and dropped in seconds rather than minutes (worst case
+      # per peer ≈ 20.5s before failover to the next candidate).
+      timeoutSec: 10
+      maxRetries: 1
+      peerHealth:
+        # Mark a peer unhealthy after this many consecutive failures, then
+        # skip it for cooldownSec in /reprocess probes and block-processor
+        # failover. Any successful fetch resets the counter.
+        failureThreshold: 3
+        cooldownSec: 300

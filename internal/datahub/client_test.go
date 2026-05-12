@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/model"
@@ -425,5 +426,71 @@ func TestNewClient_AppliesDefaultCaps(t *testing.T) {
 	}
 	if c3.maxSubtreeBytes != DefaultMaxSubtreeBytes {
 		t.Errorf("negative subtree cap should fall back to default; got %d", c3.maxSubtreeBytes)
+	}
+}
+
+// TestFetchBlockMetadata_NotFoundDoesNotRetry pins the contract that a
+// 404 from a DataHub returns immediately rather than burning the retry
+// budget. Regressions here would re-introduce the long stalls seen on
+// TTN when a peer announced blocks it then 404'd.
+func TestFetchBlockMetadata_NotFoundDoesNotRetry(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewClient(5, 3, testLogger())
+	_, err := client.FetchBlockMetadata(context.Background(), server.URL,
+		"0000000000000000000000000000000000000000000000000000000000000001")
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+	if calls != 1 {
+		t.Fatalf("404 must not be retried; expected 1 call, got %d", calls)
+	}
+}
+
+// TestFetch_RecordsPeerHealth verifies that fetch outcomes are forwarded
+// to an attached PeerHealth tracker: failures bump the counter, success
+// resets it. This is the hook /reprocess and block-processor use to
+// avoid re-probing known-bad peers.
+func TestFetch_RecordsPeerHealth(t *testing.T) {
+	// Server that returns 404 until flipped, then 200 with a parseable block.
+	var serveOK bool
+	payload := buildBinaryBlockBytes(1, [][]byte{append([]byte{0x01}, make([]byte, 31)...)})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !serveOK {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	client := NewClient(5, 0, testLogger())
+	ph := NewPeerHealth(3, 10*time.Minute)
+	client.SetPeerHealth(ph)
+
+	// Three 404s mark the peer unhealthy.
+	for i := 0; i < 3; i++ {
+		_, _ = client.FetchBlockMetadata(context.Background(), server.URL,
+			"0000000000000000000000000000000000000000000000000000000000000001")
+	}
+	if ph.IsHealthy(server.URL) {
+		t.Fatal("three failures should mark peer unhealthy")
+	}
+
+	// A success resets the state.
+	serveOK = true
+	if _, err := client.FetchBlockMetadata(context.Background(), server.URL,
+		"0000000000000000000000000000000000000000000000000000000000000001"); err != nil {
+		t.Fatalf("unexpected success-path error: %v", err)
+	}
+	if !ph.IsHealthy(server.URL) {
+		t.Fatal("success should restore peer health")
 	}
 }

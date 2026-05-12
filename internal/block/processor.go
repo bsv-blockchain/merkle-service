@@ -2,8 +2,10 @@ package block
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/IBM/sarama"
 
@@ -14,6 +16,12 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
+
+// blockFetchPerPeerTimeout caps a single DataHub probe inside the
+// block-processor failover loop. It mirrors reprocessProbeTimeout in the
+// /reprocess flow so a bad peer cannot hold the block-processor for
+// longer than the per-attempt HTTP timeout plus a single backoff.
+const blockFetchPerPeerTimeout = 12 * time.Second
 
 // Processor implements the block processor service.
 type Processor struct {
@@ -70,6 +78,10 @@ func (p *Processor) Init(cfg interface{}) error {
 		p.datahubCfg.AllowPrivateIPs,
 		p.Logger,
 	)
+	p.dataHubClient.SetPeerHealth(datahub.NewPeerHealth(
+		p.datahubCfg.PeerHealth.FailureThreshold,
+		time.Duration(p.datahubCfg.PeerHealth.CooldownSec)*time.Second,
+	))
 
 	// Initialize message dedup cache.
 	if p.blockCfg.DedupCacheSize > 0 {
@@ -163,20 +175,25 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 		return nil
 	}
 
-	// 5.2: Fetch block metadata from DataHub.
-	meta, err := p.dataHubClient.FetchBlockMetadata(ctx, blockMsg.DataHubURL, blockMsg.Hash)
+	// 5.2: Fetch block metadata from DataHub. The announcing peer is tried
+	// first, then registered DataHubs are tried in turn if the announcing
+	// peer is unhealthy or returns a transport error / 404. resolvedURL is
+	// the URL that actually served the metadata — downstream subtree work
+	// is stamped with that URL so workers don't inherit a known-bad peer.
+	meta, resolvedURL, err := p.fetchBlockMetadataWithFailover(ctx, blockMsg.Hash, blockMsg.DataHubURL)
 	if err != nil {
 		p.Logger.Error("failed to fetch block metadata", "hash", blockMsg.Hash, "error", err)
 		return fmt.Errorf("fetching block metadata %s: %w", blockMsg.Hash, err)
 	}
 
-	// Remember this DataHub URL — the /reprocess endpoint reads the registry
-	// to pick a candidate DataHub when serving past-block requests, and we
-	// only want to remember URLs that actually served a block successfully.
-	if p.dataHubRegistry != nil && blockMsg.DataHubURL != "" {
-		if regErr := p.dataHubRegistry.Add(blockMsg.DataHubURL); regErr != nil {
+	// Remember the URL that successfully served the block — the /reprocess
+	// endpoint reads the registry to pick a candidate DataHub when serving
+	// past-block requests, and we only want to remember URLs that actually
+	// served a block successfully.
+	if p.dataHubRegistry != nil && resolvedURL != "" {
+		if regErr := p.dataHubRegistry.Add(resolvedURL); regErr != nil {
 			p.Logger.Warn("failed to record DataHub URL in registry",
-				"url", blockMsg.DataHubURL, "error", regErr)
+				"url", resolvedURL, "error", regErr)
 		}
 	}
 
@@ -215,7 +232,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 			BlockHeight:           meta.Height,
 			SubtreeHash:           stHash,
 			SubtreeIndex:          i,
-			DataHubURL:            blockMsg.DataHubURL,
+			DataHubURL:            resolvedURL,
 			OverrideCallbackURL:   blockMsg.OverrideCallbackURL,
 			OverrideCallbackToken: blockMsg.OverrideCallbackToken,
 		}
@@ -295,6 +312,97 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	}
 
 	return nil
+}
+
+// fetchBlockMetadataWithFailover fetches block metadata, trying the
+// announced peer first and then known-good peers from the DataHub
+// registry. The announcing peer is honored even if it is currently
+// marked unhealthy so a peer that recovered between announcements has a
+// chance to serve again — its outcome is recorded by the client and
+// will either reset or extend its unhealthy mark.
+//
+// Returns (meta, resolvedURL, nil) on the first peer that serves the
+// block. Returns an error wrapping datahub.ErrNotFound if every
+// attempted peer returned 404 (the block is confirmed missing from the
+// network we can see). Returns a generic error if all peers failed for
+// transport reasons.
+func (p *Processor) fetchBlockMetadataWithFailover(
+	ctx context.Context,
+	blockHash, announcedURL string,
+) (*datahub.BlockMetadata, string, error) {
+	type attempt struct {
+		url      string
+		forceTry bool // announced URL: try even if currently unhealthy
+	}
+
+	tried := make(map[string]struct{})
+	var attempts []attempt
+	if announcedURL != "" {
+		attempts = append(attempts, attempt{url: announcedURL, forceTry: true})
+		tried[announcedURL] = struct{}{}
+	}
+
+	// Registry candidates only matter when there's an actual registry and
+	// at least one URL is registered. A scan failure should not abort the
+	// whole fetch — we still have the announced URL.
+	if p.dataHubRegistry != nil {
+		registered, regErr := p.dataHubRegistry.GetAll()
+		if regErr != nil {
+			p.Logger.Warn("failed to list DataHub registry for failover",
+				"hash", blockHash, "error", regErr)
+		}
+		for _, u := range registered {
+			if u == "" {
+				continue
+			}
+			if _, ok := tried[u]; ok {
+				continue
+			}
+			tried[u] = struct{}{}
+			attempts = append(attempts, attempt{url: u})
+		}
+	}
+
+	ph := p.dataHubClient.PeerHealth()
+	var lastErr error
+	for _, a := range attempts {
+		if !a.forceTry && ph != nil && !ph.IsHealthy(a.url) {
+			p.Logger.Debug("skipping unhealthy DataHub peer for block fetch",
+				"hash", blockHash, "url", a.url)
+			continue
+		}
+
+		probeCtx, cancel := context.WithTimeout(ctx, blockFetchPerPeerTimeout)
+		meta, err := p.dataHubClient.FetchBlockMetadata(probeCtx, a.url, blockHash)
+		cancel()
+		if err == nil {
+			if a.url != announcedURL {
+				p.Logger.Info("block metadata served by failover DataHub",
+					"hash", blockHash,
+					"announcedUrl", announcedURL,
+					"resolvedUrl", a.url,
+				)
+			}
+			return meta, a.url, nil
+		}
+		lastErr = err
+		p.Logger.Debug("DataHub failover candidate failed",
+			"hash", blockHash,
+			"url", a.url,
+			"notFound", errors.Is(err, datahub.ErrNotFound),
+			"error", err,
+		)
+	}
+
+	if lastErr == nil {
+		// No candidate was attempted (every registered peer was unhealthy
+		// and the announced URL was empty). Return a clear error so the
+		// caller doesn't ack a block it never tried to fetch.
+		return nil, "", fmt.Errorf("no healthy DataHub peer available for block %s", blockHash)
+	}
+	// lastErr already wraps datahub.ErrNotFound when every probe returned
+	// 404, so callers can still errors.Is(err, datahub.ErrNotFound).
+	return nil, "", lastErr
 }
 
 // SubtreeCounterKey composes the per-block subtree counter store key.

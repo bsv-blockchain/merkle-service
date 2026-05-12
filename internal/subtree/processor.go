@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/IBM/sarama"
 
@@ -84,7 +85,11 @@ func (p *Processor) Init(_ interface{}) error {
 
 	// Initialize DataHub client. SSRF guard rejects peer-supplied URLs
 	// that point at private/loopback/link-local destinations unless the
-	// operator opts in via DataHub.AllowPrivateIPs (F-028).
+	// operator opts in via DataHub.AllowPrivateIPs (F-028). A PeerHealth
+	// tracker is attached so subtree fetch outcomes feed into the same
+	// "is this peer dead?" signal /reprocess uses — note the subtree
+	// processor does not skip peers itself (the announced URL is
+	// authoritative for which peer has the subtree), it only records.
 	p.dataHubClient = datahub.NewClientWithSSRFGuard(
 		p.cfg.DataHub.TimeoutSec,
 		p.cfg.DataHub.MaxRetries,
@@ -93,6 +98,10 @@ func (p *Processor) Init(_ interface{}) error {
 		p.cfg.DataHub.AllowPrivateIPs,
 		p.Logger,
 	)
+	p.dataHubClient.SetPeerHealth(datahub.NewPeerHealth(
+		p.cfg.DataHub.PeerHealth.FailureThreshold,
+		time.Duration(p.cfg.DataHub.PeerHealth.CooldownSec)*time.Second,
+	))
 
 	// Initialize message dedup cache.
 	if p.cfg.Subtree.DedupCacheSize > 0 {

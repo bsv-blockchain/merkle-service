@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/IBM/sarama"
 
@@ -84,6 +85,10 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 		s.datahubCfg.AllowPrivateIPs,
 		s.Logger,
 	)
+	s.dataHubClient.SetPeerHealth(datahub.NewPeerHealth(
+		s.datahubCfg.PeerHealth.FailureThreshold,
+		time.Duration(s.datahubCfg.PeerHealth.CooldownSec)*time.Second,
+	))
 
 	// Initialize block-time registration cache. A miss falls through to
 	// Aerospike, so a cache failure is not fatal — log and proceed.

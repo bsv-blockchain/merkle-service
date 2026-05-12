@@ -80,6 +80,27 @@ type Client struct {
 	// /link-local check. The unspecified/multicast checks remain in
 	// force regardless. Mirrors CallbackConfig.AllowPrivateIPs.
 	allowPrivateIPs bool
+
+	// peerHealth, when non-nil, is informed of every fetch outcome so
+	// call sites (block-processor failover, /reprocess probe) can skip
+	// hosts that are persistently failing. The client itself does not
+	// short-circuit on unhealthy peers — selection stays at the call
+	// site to preserve the "one URL in, one body out" contract.
+	peerHealth *PeerHealth
+}
+
+// SetPeerHealth attaches a PeerHealth tracker. After this call, every
+// Fetch* invocation records success or failure against the tracker
+// before returning. Passing nil disables tracking. Safe to call once at
+// startup; not safe to call concurrently with in-flight requests.
+func (c *Client) SetPeerHealth(p *PeerHealth) {
+	c.peerHealth = p
+}
+
+// PeerHealth returns the attached tracker, or nil if none was set. Call
+// sites use this to filter candidate peers before invoking Fetch*.
+func (c *Client) PeerHealth() *PeerHealth {
+	return c.peerHealth
 }
 
 // NewClient creates a new DataHub client with the default per-endpoint
@@ -182,7 +203,9 @@ func (c *Client) FetchSubtreeRaw(ctx context.Context, dataHubURL, hash string) (
 		return nil, err
 	}
 	url := fmt.Sprintf("%s/subtree/%s", dataHubURL, hash)
-	return c.doGetWithRetry(ctx, url, c.maxSubtreeBytes)
+	data, err := c.doGetWithRetry(ctx, url, c.maxSubtreeBytes)
+	c.recordPeerOutcome(dataHubURL, err)
+	return data, err
 }
 
 // FetchSubtree fetches and parses a subtree from a DataHub endpoint.
@@ -268,15 +291,37 @@ func (c *Client) FetchBlockMetadata(ctx context.Context, dataHubURL, hash string
 	url := fmt.Sprintf("%s/block/%s", dataHubURL, hash)
 	data, err := c.doGetWithRetry(ctx, url, c.maxBlockBytes)
 	if err != nil {
+		c.recordPeerOutcome(dataHubURL, err)
 		return nil, fmt.Errorf("fetching block metadata %s: %w", hash, err)
 	}
 
 	meta, err := ParseBinaryBlockMetadata(data)
 	if err != nil {
+		// Parse failure is a peer-side issue (malformed response): the
+		// transport succeeded but the body the peer returned cannot be
+		// trusted. Count it against the peer.
+		c.recordPeerOutcome(dataHubURL, err)
 		return nil, fmt.Errorf("parsing block metadata %s: %w", hash, err)
 	}
 
+	c.recordPeerOutcome(dataHubURL, nil)
 	return meta, nil
+}
+
+// recordPeerOutcome forwards a fetch outcome to the attached PeerHealth
+// tracker, if any. A nil err counts as a success and resets the peer's
+// consecutive-failure counter; a non-nil err counts as a failure regardless
+// of category (404, 5xx, timeout, network, parse) so a peer that lies
+// about the data it has is treated as unhealthy.
+func (c *Client) recordPeerOutcome(dataHubURL string, err error) {
+	if c.peerHealth == nil {
+		return
+	}
+	if err == nil {
+		c.peerHealth.RecordSuccess(dataHubURL)
+		return
+	}
+	c.peerHealth.RecordFailure(dataHubURL)
 }
 
 // validateDataHubURL applies the shared SSRF predicate to a peer-supplied

@@ -309,6 +309,26 @@ type DataHubConfig struct {
 	// for the block hash wins and is used for the entire reprocess. Order
 	// matters: configured entries are tried before discovered ones.
 	FallbackURLs []string `yaml:"fallbackUrls" mapstructure:"fallbackurls"`
+
+	// PeerHealth controls the in-memory tracker that marks DataHub peers
+	// unhealthy after consecutive failures so they are skipped for a
+	// cooldown window in /reprocess probes and block-processor failover.
+	PeerHealth PeerHealthConfig `yaml:"peerHealth" mapstructure:"peerhealth"`
+}
+
+// PeerHealthConfig configures the in-memory peer-health tracker. State
+// is per-process and resets on restart. A zero or negative value selects
+// the corresponding default.
+type PeerHealthConfig struct {
+	// FailureThreshold is the number of consecutive failures against a
+	// peer's host before it is marked unhealthy. Any successful fetch
+	// against the same host resets the counter.
+	FailureThreshold int `yaml:"failureThreshold" mapstructure:"failurethreshold"`
+
+	// CooldownSec is how long a peer stays marked unhealthy after the
+	// threshold is reached. Expiry is checked lazily on the next
+	// IsHealthy call.
+	CooldownSec int `yaml:"cooldownSec" mapstructure:"cooldownsec"`
 }
 
 // registerDefaults sets all default values in the Viper instance.
@@ -413,8 +433,10 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("blobstore.url", "file:///tmp/merkle-subtrees")
 
 	// DataHub
-	v.SetDefault("datahub.timeoutsec", 30)
-	v.SetDefault("datahub.maxretries", 3)
+	// Defaults tuned so a known-bad peer is dropped in seconds, not minutes.
+	// Worst case per peer: 10s + 500ms backoff + 10s ≈ 20.5s before failover.
+	v.SetDefault("datahub.timeoutsec", 10)
+	v.SetDefault("datahub.maxretries", 1)
 	// 16 MiB — block metadata is small; this leaves ~100x headroom over the
 	// largest realistic block-metadata payload while still bounding memory.
 	v.SetDefault("datahub.maxblockbytes", int64(16*1024*1024))
@@ -424,6 +446,9 @@ func registerDefaults(v *viper.Viper) {
 	// SSRF guard default: deny private/loopback/link-local destinations.
 	v.SetDefault("datahub.allowprivateips", false)
 	v.SetDefault("datahub.fallbackurls", []string{})
+	// Peer-health tracker defaults: 3 consecutive failures → 5m unhealthy.
+	v.SetDefault("datahub.peerhealth.failurethreshold", 3)
+	v.SetDefault("datahub.peerhealth.cooldownsec", 300)
 
 	// Registry
 	v.SetDefault("registry.maxcallbackspertxid", 10)
@@ -539,12 +564,14 @@ func bindEnvVars(v *viper.Viper) {
 		"blobstore.url": "BLOB_STORE_URL",
 
 		// DataHub
-		"datahub.timeoutsec":      "DATAHUB_TIMEOUT_SEC",
-		"datahub.maxretries":      "DATAHUB_MAX_RETRIES",
-		"datahub.maxblockbytes":   "DATAHUB_MAX_BLOCK_BYTES",
-		"datahub.maxsubtreebytes": "DATAHUB_MAX_SUBTREE_BYTES",
-		"datahub.allowprivateips": "DATAHUB_ALLOW_PRIVATE_IPS",
-		"datahub.fallbackurls":    "DATAHUB_FALLBACK_URLS",
+		"datahub.timeoutsec":                  "DATAHUB_TIMEOUT_SEC",
+		"datahub.maxretries":                  "DATAHUB_MAX_RETRIES",
+		"datahub.maxblockbytes":               "DATAHUB_MAX_BLOCK_BYTES",
+		"datahub.maxsubtreebytes":             "DATAHUB_MAX_SUBTREE_BYTES",
+		"datahub.allowprivateips":             "DATAHUB_ALLOW_PRIVATE_IPS",
+		"datahub.fallbackurls":                "DATAHUB_FALLBACK_URLS",
+		"datahub.peerhealth.failurethreshold": "DATAHUB_PEER_HEALTH_FAILURE_THRESHOLD",
+		"datahub.peerhealth.cooldownsec":      "DATAHUB_PEER_HEALTH_COOLDOWN_SEC",
 
 		// Registry
 		"registry.maxcallbackspertxid": "REGISTRY_MAX_CALLBACKS_PER_TXID",
