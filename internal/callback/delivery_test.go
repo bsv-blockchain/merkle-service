@@ -323,6 +323,125 @@ func TestDeliverCallback_2xxStatusesSucceed(t *testing.T) {
 	}
 }
 
+// TestDeliverCallback_NonRetryable4xxIsPermanent verifies that 4xx
+// responses other than 408/429 are wrapped in errPermanentDelivery so a
+// misconfigured arcade (wrong URL, missing/invalid auth token) drops to
+// DLQ on the first failure instead of burning the full retry budget on
+// every block.
+func TestDeliverCallback_NonRetryable4xxIsPermanent(t *testing.T) {
+	statusCodes := []int{
+		http.StatusBadRequest,       // 400
+		http.StatusUnauthorized,     // 401
+		http.StatusForbidden,        // 403
+		http.StatusNotFound,         // 404
+		http.StatusMethodNotAllowed, // 405
+		http.StatusGone,             // 410
+		http.StatusUnsupportedMediaType,
+		http.StatusUnprocessableEntity,
+	}
+
+	for _, code := range statusCodes {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(code)
+			}))
+			defer server.Close()
+
+			cfg := defaultTestConfig()
+			ds, _, _ := newTestDeliveryService(t, cfg, server.Client())
+
+			msg := &kafka.CallbackTopicMessage{
+				CallbackURL:  server.URL + "/callback",
+				Type:         kafka.CallbackStump,
+				BlockHash:    testBlockHash,
+				SubtreeIndex: 1,
+			}
+
+			err := ds.deliverCallback(context.Background(), msg)
+			if err == nil {
+				t.Fatalf("expected error for status %d", code)
+			}
+			if !isPermanentDeliveryError(err) {
+				t.Fatalf("expected permanent delivery error for status %d, got: %v", code, err)
+			}
+		})
+	}
+}
+
+// TestDeliverCallback_RetryableStatusesNotPermanent verifies that 408,
+// 429, and 5xx remain retryable — they are explicit "try again later"
+// signals (408/429) or server-side transient failures (5xx).
+func TestDeliverCallback_RetryableStatusesNotPermanent(t *testing.T) {
+	statusCodes := []int{
+		http.StatusRequestTimeout,      // 408
+		http.StatusTooManyRequests,     // 429
+		http.StatusInternalServerError, // 500
+		http.StatusBadGateway,          // 502
+		http.StatusServiceUnavailable,  // 503
+		http.StatusGatewayTimeout,      // 504
+	}
+
+	for _, code := range statusCodes {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(code)
+			}))
+			defer server.Close()
+
+			cfg := defaultTestConfig()
+			ds, _, _ := newTestDeliveryService(t, cfg, server.Client())
+
+			msg := &kafka.CallbackTopicMessage{
+				CallbackURL:  server.URL + "/callback",
+				Type:         kafka.CallbackStump,
+				BlockHash:    testBlockHash,
+				SubtreeIndex: 1,
+			}
+
+			err := ds.deliverCallback(context.Background(), msg)
+			if err == nil {
+				t.Fatalf("expected error for status %d", code)
+			}
+			if isPermanentDeliveryError(err) {
+				t.Fatalf("status %d should remain retryable, but was marked permanent: %v",
+					code, err)
+			}
+		})
+	}
+}
+
+// TestProcessDelivery_NonRetryable4xxRoutesStraightToDLQ verifies the
+// integration: a 401 response causes processDelivery to bypass the retry
+// budget and publish directly to DLQ, even though MaxRetries=5 is set.
+func TestProcessDelivery_NonRetryable4xxRoutesStraightToDLQ(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	cfg := defaultTestConfig()
+	cfg.Callback.MaxRetries = 5 // plenty of retry budget — should not be used
+	ds, retryMock, dlqMock := newTestDeliveryService(t, cfg, server.Client())
+
+	msg := &kafka.CallbackTopicMessage{
+		CallbackURL:  server.URL + "/callback",
+		Type:         kafka.CallbackBlockProcessed,
+		BlockHash:    testBlockHash,
+		SubtreeIndex: 0,
+	}
+
+	if err := ds.processDelivery(context.Background(), msg); err != nil {
+		t.Fatalf("processDelivery returned error: %v", err)
+	}
+
+	if got := len(retryMock.getMessages()); got != 0 {
+		t.Errorf("non-retryable 4xx must not republish for retry, got %d retry messages", got)
+	}
+	if got := len(dlqMock.getMessages()); got != 1 {
+		t.Fatalf("expected 1 DLQ message, got %d", got)
+	}
+}
+
 // TestProcessDelivery_RetriesViaKafkaRepublish asserts that an HTTP failure
 // with retries available causes the message to be republished to the
 // callback topic (the durable side-effect) before processDelivery returns

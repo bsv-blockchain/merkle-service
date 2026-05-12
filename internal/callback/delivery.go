@@ -630,10 +630,36 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 	if len(snippet) > 256 {
 		snippet = snippet[:256]
 	}
+	var statusErr error
 	if len(snippet) == 0 {
-		return fmt.Errorf("callback returned non-2xx status: %d", resp.StatusCode)
+		statusErr = fmt.Errorf("callback returned non-2xx status: %d", resp.StatusCode)
+	} else {
+		statusErr = fmt.Errorf("callback returned non-2xx status: %d: %s", resp.StatusCode, string(snippet))
 	}
-	return fmt.Errorf("callback returned non-2xx status: %d: %s", resp.StatusCode, string(snippet))
+	// 4xx other than 408 (Request Timeout) and 429 (Too Many Requests) signal
+	// a client-side problem the receiver cannot resolve by us retrying — wrong
+	// URL, missing/invalid auth token, malformed payload, gone. Route straight
+	// to DLQ so a misconfigured arcade does not pin a callback worker on
+	// every block for the full retry budget. 408/429 stay retryable because
+	// they are explicit "try again later" signals.
+	if isNonRetryable4xx(resp.StatusCode) {
+		return errPermanentDelivery(statusErr)
+	}
+	return statusErr
+}
+
+// isNonRetryable4xx reports whether code is a 4xx response that we should
+// treat as permanent. 408 (Request Timeout) and 429 (Too Many Requests) are
+// the standard "try again later" 4xx codes and stay on the retry path.
+func isNonRetryable4xx(code int) bool {
+	if code < 400 || code >= 500 {
+		return false
+	}
+	switch code {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	}
+	return true
 }
 
 // readBodyCapped reads up to max bytes from r and reports whether the
