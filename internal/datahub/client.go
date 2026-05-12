@@ -434,6 +434,17 @@ func (c *Client) doGetWithRetry(ctx context.Context, url string, maxBytes int64)
 			return nil, fmt.Errorf("%w: %s (HTTP 404)", ErrNotFound, url)
 		}
 
+		// Non-retryable 4xx (e.g. 401 Unauthorized, 403 Forbidden,
+		// 422 Unprocessable) signal a client-side problem the peer
+		// cannot resolve by us retrying. Return immediately so the
+		// caller fails over to another peer instead of burning the
+		// retry budget against an auth-rejecting endpoint. 408 (Request
+		// Timeout) and 429 (Too Many Requests) are the standard "try
+		// again later" 4xx codes and stay on the retry path below.
+		if isNonRetryable4xx(resp.StatusCode) {
+			return nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, url, string(body))
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			// Truncate the error body so a hostile server can't bloat our log
 			// lines either; readCapped already bounded it to maxBytes.
@@ -460,4 +471,20 @@ func (c *Client) doGetWithRetry(ctx context.Context, url string, maxBytes int64)
 	}
 
 	return nil, fmt.Errorf("DataHub request failed after %d attempts: %w", c.maxRetries+1, lastErr)
+}
+
+// isNonRetryable4xx reports whether code is a 4xx response that we treat
+// as permanent. 404 is handled by the dedicated ErrNotFound path above
+// and intentionally not included here. 408 (Request Timeout) and 429
+// (Too Many Requests) are the standard "try again later" 4xx codes and
+// stay on the retry path.
+func isNonRetryable4xx(code int) bool {
+	if code < 400 || code >= 500 {
+		return false
+	}
+	switch code {
+	case http.StatusNotFound, http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	}
+	return true
 }

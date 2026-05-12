@@ -366,3 +366,162 @@ func TestHandleMessage_NoSubtrees_DedupAdded(t *testing.T) {
 		t.Errorf("expected no publishes for empty block, got %d", len(mockProducer.messages))
 	}
 }
+
+// newEmptyBlockMessage encodes a BlockMessage for an empty (coinbase-only)
+// block. Optional overrideURL/Token + bypassDedup mirror the /reprocess
+// payload arcade sends.
+func newEmptyBlockMessage(t *testing.T, hash, dataHubURL, overrideURL, overrideToken string, bypassDedup bool) []byte {
+	t.Helper()
+	bm := &kafka.BlockMessage{
+		Hash:                  hash,
+		Height:                200,
+		DataHubURL:            dataHubURL,
+		OverrideCallbackURL:   overrideURL,
+		OverrideCallbackToken: overrideToken,
+		BypassDedup:           bypassDedup,
+	}
+	data, err := bm.Encode()
+	if err != nil {
+		t.Fatalf("encode block message: %v", err)
+	}
+	return data
+}
+
+// TestHandleMessage_EmptyBlock_ReprocessEmitsBlockProcessed asserts that
+// a coinbase-only block delivered via /reprocess (BypassDedup=true,
+// OverrideCallbackURL set) emits exactly one BLOCK_PROCESSED callback to
+// the override URL with the override token. Without this fix, arcade
+// would never get a callback for empty reprocessed blocks and would
+// retry /reprocess forever.
+func TestHandleMessage_EmptyBlock_ReprocessEmitsBlockProcessed(t *testing.T) {
+	subtreeWorkProducer := &failingSyncProducer{failAt: -1}
+	callbackProducer := &failingSyncProducer{failAt: -1}
+	p, _, dedup := buildProcessorWithProducer(t, subtreeWorkProducer)
+	p.callbackProducer = kafka.NewTestProducer(callbackProducer, "callback-test", testLogger())
+
+	server := newDataHubServerWithSubtrees(t, 0)
+	defer server.Close()
+
+	const (
+		blockHash     = "block-empty-reprocess"
+		overrideURL   = "https://arcade.example/api/v1/cb"
+		overrideToken = "tok-arcade-1"
+	)
+	msg := &sarama.ConsumerMessage{
+		Value: newEmptyBlockMessage(t, blockHash, server.URL, overrideURL, overrideToken, true),
+	}
+
+	if err := p.handleMessage(context.Background(), msg); err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+
+	if got := len(subtreeWorkProducer.messages); got != 0 {
+		t.Errorf("expected no subtree-work publishes for empty block, got %d", got)
+	}
+	if got := len(callbackProducer.messages); got != 1 {
+		t.Fatalf("expected exactly 1 BLOCK_PROCESSED callback publish, got %d", got)
+	}
+
+	// Decode and assert the callback message points at the override URL,
+	// carries the override token, and is typed BLOCK_PROCESSED.
+	payload, err := callbackProducer.messages[0].Value.Encode()
+	if err != nil {
+		t.Fatalf("encode produced message value: %v", err)
+	}
+	decoded, err := kafka.DecodeCallbackTopicMessage(payload)
+	if err != nil {
+		t.Fatalf("decode callback message: %v", err)
+	}
+	if decoded.Type != kafka.CallbackBlockProcessed {
+		t.Errorf("expected type BLOCK_PROCESSED, got %q", decoded.Type)
+	}
+	if decoded.BlockHash != blockHash {
+		t.Errorf("expected blockHash %q, got %q", blockHash, decoded.BlockHash)
+	}
+	if decoded.CallbackURL != overrideURL {
+		t.Errorf("expected override URL %q, got %q", overrideURL, decoded.CallbackURL)
+	}
+	if decoded.CallbackToken != overrideToken {
+		t.Errorf("expected override token %q, got %q", overrideToken, decoded.CallbackToken)
+	}
+
+	// Reprocess uses BypassDedup=true; the live-vs-reprocess contract says
+	// reprocess must NOT pollute the dedup cache so a future live
+	// announcement of the same hash still flows through normally.
+	if dedup.Contains(blockHash) {
+		t.Errorf("reprocess must not record empty block in dedup cache")
+	}
+}
+
+// TestHandleMessage_EmptyBlock_LiveEmitsBlockProcessedToAllRegistered
+// asserts that a live (non-reprocess) empty-block announcement broadcasts
+// BLOCK_PROCESSED to every URL in the callback URL registry. The dedup
+// cache is updated on the live path so a redelivered live announcement is
+// fast-skipped.
+func TestHandleMessage_EmptyBlock_LiveEmitsBlockProcessedToAllRegistered(t *testing.T) {
+	subtreeWorkProducer := &failingSyncProducer{failAt: -1}
+	callbackProducer := &failingSyncProducer{failAt: -1}
+	p, _, dedup := buildProcessorWithProducer(t, subtreeWorkProducer)
+	p.callbackProducer = kafka.NewTestProducer(callbackProducer, "callback-test", testLogger())
+	p.urlRegistry = &fakeURLRegistry{
+		urls: []string{
+			"https://arcade-a.example/cb",
+			"https://arcade-b.example/cb",
+		},
+		tokens: map[string]string{
+			"https://arcade-a.example/cb": "tok-a",
+		},
+	}
+
+	server := newDataHubServerWithSubtrees(t, 0)
+	defer server.Close()
+
+	const blockHash = "block-empty-live"
+	msg := &sarama.ConsumerMessage{
+		Value: newEmptyBlockMessage(t, blockHash, server.URL, "", "", false),
+	}
+
+	if err := p.handleMessage(context.Background(), msg); err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+	if got := len(subtreeWorkProducer.messages); got != 0 {
+		t.Errorf("expected no subtree-work publishes for empty block, got %d", got)
+	}
+	if got := len(callbackProducer.messages); got != 2 {
+		t.Fatalf("expected 2 BLOCK_PROCESSED publishes (one per registered URL), got %d", got)
+	}
+
+	// Verify each publish is a BLOCK_PROCESSED for blockHash and that both
+	// registered URLs are represented.
+	seen := map[string]string{}
+	for _, m := range callbackProducer.messages {
+		payload, err := m.Value.Encode()
+		if err != nil {
+			t.Fatalf("encode value: %v", err)
+		}
+		decoded, err := kafka.DecodeCallbackTopicMessage(payload)
+		if err != nil {
+			t.Fatalf("decode callback message: %v", err)
+		}
+		if decoded.Type != kafka.CallbackBlockProcessed {
+			t.Errorf("expected type BLOCK_PROCESSED, got %q", decoded.Type)
+		}
+		if decoded.BlockHash != blockHash {
+			t.Errorf("blockHash mismatch: %q", decoded.BlockHash)
+		}
+		seen[decoded.CallbackURL] = decoded.CallbackToken
+	}
+	if _, ok := seen["https://arcade-a.example/cb"]; !ok {
+		t.Errorf("arcade-a callback not published; got %v", seen)
+	}
+	if _, ok := seen["https://arcade-b.example/cb"]; !ok {
+		t.Errorf("arcade-b callback not published; got %v", seen)
+	}
+	if seen["https://arcade-a.example/cb"] != "tok-a" {
+		t.Errorf("arcade-a token mismatch: %q", seen["https://arcade-a.example/cb"])
+	}
+
+	if !dedup.Contains(blockHash) {
+		t.Errorf("live empty-block announcement must record dedup")
+	}
+}

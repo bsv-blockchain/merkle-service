@@ -429,6 +429,77 @@ func TestNewClient_AppliesDefaultCaps(t *testing.T) {
 	}
 }
 
+// TestFetchBlockMetadata_NonRetryable4xxDoesNotRetry pins the contract
+// that 401/403/422 (and other non-408/429 4xx) return immediately
+// instead of burning the retry budget. The motivating case was a peer
+// in the discovered DataHub registry that required auth and returned
+// 401 — pre-fix, every /reprocess call retried it 4 times × 500ms
+// backoffs before peer-health marked it unhealthy.
+func TestFetchBlockMetadata_NonRetryable4xxDoesNotRetry(t *testing.T) {
+	statusCodes := []int{
+		http.StatusBadRequest,          // 400
+		http.StatusUnauthorized,        // 401
+		http.StatusForbidden,           // 403
+		http.StatusMethodNotAllowed,    // 405
+		http.StatusGone,                // 410
+		http.StatusUnprocessableEntity, // 422
+	}
+
+	for _, code := range statusCodes {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			var calls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.WriteHeader(code)
+			}))
+			defer server.Close()
+
+			client := NewClient(5, 3, testLogger())
+			_, err := client.FetchBlockMetadata(context.Background(), server.URL,
+				"0000000000000000000000000000000000000000000000000000000000000001")
+			if err == nil {
+				t.Fatalf("expected error for status %d", code)
+			}
+			if calls != 1 {
+				t.Fatalf("status %d must not retry; expected 1 call, got %d", code, calls)
+			}
+		})
+	}
+}
+
+// TestFetchBlockMetadata_RetryableStatusesStillRetry locks in that
+// 408/429 (the "try again later" 4xx codes) and 5xx remain on the retry
+// path. Regressing this would cause a transient blip to surface as a
+// hard failure to the caller instead of being smoothed over.
+func TestFetchBlockMetadata_RetryableStatusesStillRetry(t *testing.T) {
+	statusCodes := []int{
+		http.StatusRequestTimeout,      // 408
+		http.StatusTooManyRequests,     // 429
+		http.StatusInternalServerError, // 500
+		http.StatusBadGateway,          // 502
+		http.StatusServiceUnavailable,  // 503
+	}
+
+	for _, code := range statusCodes {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			var calls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.WriteHeader(code)
+			}))
+			defer server.Close()
+
+			// maxRetries=2 → 3 total attempts.
+			client := NewClient(5, 2, testLogger())
+			_, _ = client.FetchBlockMetadata(context.Background(), server.URL,
+				"0000000000000000000000000000000000000000000000000000000000000001")
+			if calls != 3 {
+				t.Fatalf("status %d must use the full retry budget; expected 3 calls, got %d", code, calls)
+			}
+		})
+	}
+}
+
 // TestFetchBlockMetadata_NotFoundDoesNotRetry pins the contract that a
 // 404 from a DataHub returns immediately rather than burning the retry
 // budget. Regressions here would re-introduce the long stalls seen on

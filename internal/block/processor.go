@@ -32,13 +32,21 @@ type Processor struct {
 	datahubCfg          config.DataHubConfig
 	consumer            *kafka.Consumer
 	subtreeWorkProducer *kafka.Producer
-	regStore            store.RegistrationStore
-	subtreeStore        store.SubtreeStore
-	urlRegistry         store.CallbackURLRegistry
-	dataHubRegistry     store.DataHubRegistry
-	subtreeCounter      store.SubtreeCounterStore
-	dataHubClient       *datahub.Client
-	dedupCache          *cache.DedupCache
+	// callbackProducer publishes BLOCK_PROCESSED directly from the
+	// block-processor for blocks that have zero subtrees (coinbase-only
+	// blocks). Without this, empty blocks never produce a BLOCK_PROCESSED
+	// callback — the subtree-worker emits it via decrementCounterAndMaybeEmit
+	// but the counter is never initialized when there are no subtree-work
+	// messages, so the path never fires. On /reprocess that meant arcade
+	// got no acknowledgement and would retry indefinitely.
+	callbackProducer *kafka.Producer
+	regStore         store.RegistrationStore
+	subtreeStore     store.SubtreeStore
+	urlRegistry      store.CallbackURLRegistry
+	dataHubRegistry  store.DataHubRegistry
+	subtreeCounter   store.SubtreeCounterStore
+	dataHubClient    *datahub.Client
+	dedupCache       *cache.DedupCache
 }
 
 func NewProcessor(
@@ -99,6 +107,17 @@ func (p *Processor) Init(cfg interface{}) error {
 	}
 	p.subtreeWorkProducer = subtreeWorkProducer
 
+	// Create producer for emitting BLOCK_PROCESSED on the empty-block path.
+	callbackProducer, err := kafka.NewProducer(
+		p.kafkaCfg.Brokers,
+		p.kafkaCfg.CallbackTopic,
+		p.Logger,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create callback producer: %w", err)
+	}
+	p.callbackProducer = callbackProducer
+
 	consumer, err := kafka.NewConsumer(
 		p.kafkaCfg.Brokers,
 		p.kafkaCfg.ConsumerGroup+"-block",
@@ -125,6 +144,11 @@ func (p *Processor) Stop() error {
 	var firstErr error
 	if err := p.consumer.Stop(); err != nil {
 		firstErr = err
+	}
+	if p.callbackProducer != nil {
+		if err := p.callbackProducer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	if p.subtreeWorkProducer != nil {
 		if err := p.subtreeWorkProducer.Close(); err != nil && firstErr == nil {
@@ -206,9 +230,28 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	)
 
 	if len(subtreeHashes) == 0 {
-		// No subtree work to fan out, but the block has been observed and
-		// metadata fetched — record it in dedup so a redelivery is skipped.
-		if p.dedupCache != nil {
+		// Coinbase-only block. There is no subtree-work to fan out, so the
+		// subtree-worker's decrement-to-zero path will never run and
+		// BLOCK_PROCESSED would never fire. Emit it directly here so:
+		//   - /reprocess (OverrideCallbackURL != "") sends the arcade the
+		//     acknowledgement it is blocking on; otherwise arcade retries
+		//     /reprocess for this same block indefinitely.
+		//   - live announcements (OverrideCallbackURL == "") broadcast
+		//     "we processed this block" to every registered callback URL
+		//     so downstream consumers stay in step with the chain tip.
+		// A publish failure leaves the dedup cache untouched and returns
+		// an error so the consumer redelivers on the next session.
+		if err := emitBlockProcessedCallbacks(
+			p.Logger,
+			p.urlRegistry,
+			p.callbackProducer,
+			blockMsg.Hash,
+			blockMsg.OverrideCallbackURL,
+			blockMsg.OverrideCallbackToken,
+		); err != nil {
+			return fmt.Errorf("emitting BLOCK_PROCESSED for empty block %s: %w", blockMsg.Hash, err)
+		}
+		if !blockMsg.BypassDedup && p.dedupCache != nil {
 			p.dedupCache.Add(blockMsg.Hash)
 		}
 		return nil

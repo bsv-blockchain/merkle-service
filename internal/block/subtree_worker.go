@@ -535,20 +535,59 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 // emit fires again; duplicate BLOCK_PROCESSED messages are deduplicated at
 // the callback delivery service (keyed by blockHash + callbackURL + type).
 func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overrideToken string) error {
-	// /reprocess: deliver BLOCK_PROCESSED to exactly the requesting arcade,
-	// bypassing the global broadcast registry. Other arcades must not learn
-	// about this past block via the reprocess flow.
+	return emitBlockProcessedCallbacks(s.Logger, s.urlRegistry, s.callbackProducer, blockHash, overrideURL, overrideToken)
+}
+
+// callbackPublisher is the narrow surface emitBlockProcessedCallbacks needs.
+// Implemented by *kafka.Producer in production; mocked in tests.
+type callbackPublisher interface {
+	PublishWithHashKey(key string, value []byte) error
+}
+
+// emitBlockProcessedCallbacks publishes BLOCK_PROCESSED messages to every
+// callback URL that should learn about the block.
+//
+// When overrideURL is non-empty (the /reprocess path), exactly one
+// message is published to that URL with overrideToken — the global
+// callback URL registry is NOT consulted, so other arcades never see
+// this past block via the reprocess flow. Otherwise the message is
+// fanned out to every URL in urlRegistry.
+//
+// Used by:
+//   - SubtreeWorkerService when the per-block subtree counter decrements
+//     to zero (the normal path for blocks with subtrees).
+//   - Block-processor's handleMessage when a block has zero subtrees
+//     (coinbase-only blocks). Without this path arcade would never get
+//     a BLOCK_PROCESSED callback for empty blocks and would retry
+//     /reprocess indefinitely.
+//
+// Returns the first per-URL encode/publish error encountered so the
+// caller can re-drive the originating work item; later URLs in the same
+// call still get a best-effort delivery attempt before the error is
+// returned. Duplicates created by retries are deduplicated downstream
+// at the callback delivery service (keyed by blockHash + callbackURL +
+// type).
+func emitBlockProcessedCallbacks(
+	logger *slog.Logger,
+	urlRegistry store.CallbackURLRegistry,
+	producer callbackPublisher,
+	blockHash, overrideURL, overrideToken string,
+) error {
+	if producer == nil {
+		return nil
+	}
+
 	var entries []store.CallbackEntry
 	if overrideURL != "" {
 		entries = []store.CallbackEntry{{URL: overrideURL, Token: overrideToken}}
 	} else {
-		if s.urlRegistry == nil {
+		if urlRegistry == nil {
 			return nil
 		}
 		var err error
-		entries, err = s.urlRegistry.GetAll()
+		entries, err = urlRegistry.GetAll()
 		if err != nil {
-			s.Logger.Error("failed to get callback URLs for BLOCK_PROCESSED", "error", err)
+			logger.Error("failed to get callback URLs for BLOCK_PROCESSED", "error", err)
 			return fmt.Errorf("getting callback URLs for BLOCK_PROCESSED on block %s: %w", blockHash, err)
 		}
 	}
@@ -556,11 +595,6 @@ func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overri
 		return nil
 	}
 
-	// Track the first error so the caller can re-drive the work item, while
-	// still attempting the remaining URLs (each callback target is
-	// independent — a hiccup on one shouldn't deny delivery to the others on
-	// this attempt). Matches publishSubtreeCallbacks's partial-success
-	// pattern from PR #77.
 	var firstErr error
 	for _, entry := range entries {
 		msg := &kafka.CallbackTopicMessage{
@@ -571,7 +605,7 @@ func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overri
 		}
 		data, encErr := msg.Encode()
 		if encErr != nil {
-			s.Logger.Error("failed to encode BLOCK_PROCESSED message",
+			logger.Error("failed to encode BLOCK_PROCESSED message",
 				"callbackURL", entry.URL,
 				"error", encErr,
 			)
@@ -580,8 +614,8 @@ func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overri
 			}
 			continue
 		}
-		if pubErr := s.callbackProducer.PublishWithHashKey(msg.PartitionKey(), data); pubErr != nil {
-			s.Logger.Error("failed to publish BLOCK_PROCESSED callback",
+		if pubErr := producer.PublishWithHashKey(msg.PartitionKey(), data); pubErr != nil {
+			logger.Error("failed to publish BLOCK_PROCESSED callback",
 				"callbackURL", entry.URL,
 				"error", pubErr,
 			)
@@ -592,7 +626,7 @@ func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overri
 	}
 
 	if firstErr == nil {
-		s.Logger.Info("emitted BLOCK_PROCESSED callbacks",
+		logger.Info("emitted BLOCK_PROCESSED callbacks",
 			"blockHash", blockHash,
 			"callbackURLs", len(entries),
 		)
