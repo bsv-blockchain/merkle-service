@@ -2,6 +2,7 @@ package subtree
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -59,9 +60,10 @@ type Processor struct {
 	dedupCache        *cache.DedupCache
 	dataHubClient     *datahub.Client
 
-	messagesProcessed atomic.Int64
-	messagesRetried   atomic.Int64
-	messagesDLQ       atomic.Int64
+	messagesProcessed        atomic.Int64
+	messagesRetried          atomic.Int64
+	messagesDLQ              atomic.Int64
+	messagesSkippedUnhealthy atomic.Int64
 }
 
 // NewProcessor creates a new subtree Processor.
@@ -235,6 +237,7 @@ func (p *Processor) Stop() error {
 		"messagesProcessed", p.messagesProcessed.Load(),
 		"messagesRetried", p.messagesRetried.Load(),
 		"messagesDLQ", p.messagesDLQ.Load(),
+		"messagesSkippedUnhealthy", p.messagesSkippedUnhealthy.Load(),
 	)
 	return firstErr
 }
@@ -250,7 +253,8 @@ func (p *Processor) Health() service.HealthStatus {
 		Name:   p.Name,
 		Status: status,
 		Details: map[string]string{
-			"messagesProcessed": fmt.Sprintf("%d", p.messagesProcessed.Load()),
+			"messagesProcessed":        fmt.Sprintf("%d", p.messagesProcessed.Load()),
+			"messagesSkippedUnhealthy": fmt.Sprintf("%d", p.messagesSkippedUnhealthy.Load()),
 		},
 	}
 }
@@ -299,9 +303,33 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 		return nil
 	}
 
+	// Peer-health gate: if the announcing peer has been failing recently,
+	// skip the fetch and ack-and-drop. SEEN_ON_NETWORK detection is
+	// best-effort and another healthy peer's announcement of the same
+	// subtree will refill it. This prevents a continuously re-announcing
+	// dead peer from generating a steady stream of retries and DLQ
+	// entries on every announcement.
+	if ph := p.dataHubClient.PeerHealth(); ph != nil && !ph.IsHealthy(subtreeMsg.DataHubURL) {
+		p.Logger.Debug("skipping subtree fetch: peer marked unhealthy",
+			"hash", subtreeMsg.Hash,
+			"dataHubUrl", subtreeMsg.DataHubURL,
+		)
+		p.messagesSkippedUnhealthy.Add(1)
+		return nil
+	}
+
 	// 3.2: Fetch binary subtree data from DataHub.
 	rawData, err := p.dataHubClient.FetchSubtreeRaw(ctx, subtreeMsg.DataHubURL, subtreeMsg.Hash)
 	if err != nil {
+		// A 404 from the announcing peer is permanent for that peer: subtrees
+		// are content-addressable, so retrying the same URL cannot recover.
+		// Route straight to DLQ; the peer-health tracker has already counted
+		// this failure and will cause subsequent announcements of any hash
+		// from the same host to short-circuit at the IsHealthy gate above
+		// once the threshold is reached.
+		if errors.Is(err, datahub.ErrNotFound) {
+			return p.handlePermanentFailure(subtreeMsg, "fetching subtree from DataHub", err)
+		}
 		return p.handleTransientFailure(subtreeMsg, "fetching subtree from DataHub", err)
 	}
 
@@ -376,15 +404,7 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 			"error", cause,
 		)
 		subtreeMsg.AttemptCount = nextAttempt
-		data, encErr := subtreeMsg.Encode()
-		if encErr != nil {
-			return fmt.Errorf("encoding subtree message for DLQ: %w", encErr)
-		}
-		if pubErr := p.dlqProducer.Publish(subtreeMsg.Hash, data); pubErr != nil {
-			return fmt.Errorf("publishing subtree message to DLQ: %w", pubErr)
-		}
-		p.messagesDLQ.Add(1)
-		return nil
+		return p.publishToDLQ(subtreeMsg)
 	}
 
 	p.Logger.Warn("subtree message transient failure, re-publishing for retry",
@@ -403,6 +423,43 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 		return fmt.Errorf("re-publishing subtree message for retry: %w", pubErr)
 	}
 	p.messagesRetried.Add(1)
+	return nil
+}
+
+// handlePermanentFailure routes a subtree message straight to subtree-dlq
+// without consuming the retry budget. Used when retrying the same peer
+// cannot recover the failure — currently a DataHub 404, meaning the
+// announcing peer does not actually serve the subtree it announced. The
+// AttemptCount is left at its incoming value so a DLQ entry with
+// AttemptCount=0 is distinguishable from a transient-exhausted entry.
+// Returns nil on successful hand-off so the consumer acks the original
+// offset.
+func (p *Processor) handlePermanentFailure(subtreeMsg *kafka.SubtreeMessage, stage string, cause error) error {
+	p.Logger.Warn("subtree message permanent failure, routing to DLQ",
+		"hash", subtreeMsg.Hash,
+		"stage", stage,
+		"dataHubUrl", subtreeMsg.DataHubURL,
+		"attemptCount", subtreeMsg.AttemptCount,
+		"error", cause,
+	)
+	return p.publishToDLQ(subtreeMsg)
+}
+
+// publishToDLQ encodes subtreeMsg and publishes it to subtree-dlq. The
+// caller is responsible for setting AttemptCount as it wants the DLQ entry
+// to reflect (handleTransientFailure bumps it before calling;
+// handlePermanentFailure leaves it as-is). Increments messagesDLQ on
+// success. Returns an error only on encode or publish failure — the caller
+// must NOT ack the source message in that case.
+func (p *Processor) publishToDLQ(subtreeMsg *kafka.SubtreeMessage) error {
+	data, encErr := subtreeMsg.Encode()
+	if encErr != nil {
+		return fmt.Errorf("encoding subtree message for DLQ: %w", encErr)
+	}
+	if pubErr := p.dlqProducer.Publish(subtreeMsg.Hash, data); pubErr != nil {
+		return fmt.Errorf("publishing subtree message to DLQ: %w", pubErr)
+	}
+	p.messagesDLQ.Add(1)
 	return nil
 }
 

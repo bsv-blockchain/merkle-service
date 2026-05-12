@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/IBM/sarama"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -2016,5 +2017,220 @@ func TestHandleMessage_SeenCounterSuccess_UpdatesDedup(t *testing.T) {
 	// since mockSeenCounter never fires the threshold).
 	if got := len(cbMock.getMessages()); got != 1 {
 		t.Errorf("expected 1 SEEN_ON_NETWORK callback publish, got %d", got)
+	}
+}
+
+// TestHandleMessage_SkipsUnhealthyPeer verifies the pre-fetch
+// peer-health gate. A subtree announcement from a host that has been
+// pre-marked unhealthy is ack-and-dropped without any HTTP fetch or
+// retry/DLQ publish, and the new messagesSkippedUnhealthy counter is
+// incremented.
+func TestHandleMessage_SkipsUnhealthyPeer(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// A server that fails the test if it's ever hit — the IsHealthy gate
+	// must short-circuit before any fetch.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("DataHub should not be called when peer is unhealthy")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	retryMock := &mockSyncProducer{}
+	dlqMock := &mockSyncProducer{}
+	cbMock := &mockSyncProducer{}
+
+	client := datahub.NewClient(5, 0, logger)
+	ph := datahub.NewPeerHealth(1, 10*time.Minute)
+	client.SetPeerHealth(ph)
+	ph.RecordFailure(server.URL) // crosses threshold=1 → unhealthy
+
+	p := &Processor{
+		cfg: &config.Config{
+			Subtree: config.SubtreeConfig{MaxAttempts: 5, StorageMode: "stream"},
+		},
+		registrationStore: &mockRegStore{},
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(cbMock, "callback-test", logger),
+		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		dataHubClient:     client,
+	}
+	p.InitBase("subtree-skip-unhealthy-test")
+	p.Logger = logger
+
+	subtreeMsg := &kafka.SubtreeMessage{
+		Hash:         "subtree-skip-unhealthy",
+		DataHubURL:   server.URL,
+		AttemptCount: 0,
+	}
+	value, encErr := subtreeMsg.Encode()
+	if encErr != nil {
+		t.Fatalf("encode subtree msg: %v", encErr)
+	}
+
+	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage: expected nil (ack-and-drop on unhealthy), got: %v", err)
+	}
+
+	if got := len(retryMock.getMessages()); got != 0 {
+		t.Errorf("expected 0 retry publishes when peer is unhealthy, got %d", got)
+	}
+	if got := len(dlqMock.getMessages()); got != 0 {
+		t.Errorf("expected 0 DLQ publishes when peer is unhealthy, got %d", got)
+	}
+	if got := len(cbMock.getMessages()); got != 0 {
+		t.Errorf("expected 0 callback publishes when peer is unhealthy, got %d", got)
+	}
+	if got := p.messagesSkippedUnhealthy.Load(); got != 1 {
+		t.Errorf("expected messagesSkippedUnhealthy=1, got %d", got)
+	}
+	if got := p.messagesProcessed.Load(); got != 0 {
+		t.Errorf("expected messagesProcessed=0, got %d", got)
+	}
+}
+
+// TestHandleMessage_NotFoundGoesStraightToDLQ verifies that a 404 from
+// the announcing peer routes straight to subtree-dlq on the first
+// failure — no retry republish, no AttemptCount bump — even when there
+// is plenty of retry budget left. A 404 on a content-addressable
+// subtree is permanent for that peer.
+func TestHandleMessage_NotFoundGoesStraightToDLQ(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	retryMock := &mockSyncProducer{}
+	dlqMock := &mockSyncProducer{}
+
+	// No PeerHealth attached: this test exercises the post-fetch 404
+	// branch in isolation, independent of the IsHealthy gate.
+	p := &Processor{
+		cfg: &config.Config{
+			Subtree: config.SubtreeConfig{MaxAttempts: 5, StorageMode: "stream"},
+		},
+		registrationStore: &mockRegStore{},
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(&mockSyncProducer{}, "callback-test", logger),
+		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		dataHubClient:     datahub.NewClient(5, 0, logger),
+	}
+	p.InitBase("subtree-404-permanent-test")
+	p.Logger = logger
+
+	subtreeMsg := &kafka.SubtreeMessage{
+		Hash:         "subtree-404-permanent",
+		DataHubURL:   server.URL,
+		AttemptCount: 0,
+	}
+	value, encErr := subtreeMsg.Encode()
+	if encErr != nil {
+		t.Fatalf("encode subtree msg: %v", encErr)
+	}
+
+	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage: expected nil (permanent → DLQ returns nil), got: %v", err)
+	}
+
+	if got := len(retryMock.getMessages()); got != 0 {
+		t.Errorf("404 must not retry; expected 0 retry publishes, got %d", got)
+	}
+	dlqMsgs := dlqMock.getMessages()
+	if got := len(dlqMsgs); got != 1 {
+		t.Fatalf("expected exactly 1 DLQ publish, got %d", got)
+	}
+	dlqValue, err := dlqMsgs[0].Value.Encode()
+	if err != nil {
+		t.Fatalf("encode DLQ message value: %v", err)
+	}
+	decoded, err := kafka.DecodeSubtreeMessage(dlqValue)
+	if err != nil {
+		t.Fatalf("decode DLQ subtree message: %v", err)
+	}
+	if decoded.AttemptCount != 0 {
+		t.Errorf("permanent failure must NOT bump AttemptCount; expected 0, got %d",
+			decoded.AttemptCount)
+	}
+	if got := p.messagesDLQ.Load(); got != 1 {
+		t.Errorf("expected messagesDLQ=1, got %d", got)
+	}
+	if got := p.messagesRetried.Load(); got != 0 {
+		t.Errorf("expected messagesRetried=0, got %d", got)
+	}
+}
+
+// TestHandleMessage_TransientErrorStillRetries is a regression test:
+// only HTTP 404 is permanent. 5xx responses must continue to flow
+// through handleTransientFailure with AttemptCount bump and retry
+// republish.
+func TestHandleMessage_TransientErrorStillRetries(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	retryMock := &mockSyncProducer{}
+	dlqMock := &mockSyncProducer{}
+
+	p := &Processor{
+		cfg: &config.Config{
+			Subtree: config.SubtreeConfig{MaxAttempts: 5, StorageMode: "stream"},
+		},
+		registrationStore: &mockRegStore{},
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(&mockSyncProducer{}, "callback-test", logger),
+		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		// maxRetries=0 keeps the doGetWithRetry loop to a single attempt
+		// so the test doesn't burn 500ms+ on internal HTTP retries.
+		dataHubClient: datahub.NewClient(5, 0, logger),
+	}
+	p.InitBase("subtree-500-transient-test")
+	p.Logger = logger
+
+	subtreeMsg := &kafka.SubtreeMessage{
+		Hash:         "subtree-500-transient",
+		DataHubURL:   server.URL,
+		AttemptCount: 0,
+	}
+	value, encErr := subtreeMsg.Encode()
+	if encErr != nil {
+		t.Fatalf("encode subtree msg: %v", encErr)
+	}
+
+	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage: expected nil (transient → retry returns nil), got: %v", err)
+	}
+
+	retryMsgs := retryMock.getMessages()
+	if got := len(retryMsgs); got != 1 {
+		t.Fatalf("expected 1 retry publish, got %d", got)
+	}
+	if got := len(dlqMock.getMessages()); got != 0 {
+		t.Errorf("expected 0 DLQ publishes on first transient failure, got %d", got)
+	}
+	retryValue, err := retryMsgs[0].Value.Encode()
+	if err != nil {
+		t.Fatalf("encode retry message value: %v", err)
+	}
+	decoded, err := kafka.DecodeSubtreeMessage(retryValue)
+	if err != nil {
+		t.Fatalf("decode retry subtree message: %v", err)
+	}
+	if decoded.AttemptCount != 1 {
+		t.Errorf("transient failure must bump AttemptCount; expected 1, got %d",
+			decoded.AttemptCount)
+	}
+	if got := p.messagesRetried.Load(); got != 1 {
+		t.Errorf("expected messagesRetried=1, got %d", got)
+	}
+	if got := p.messagesDLQ.Load(); got != 0 {
+		t.Errorf("expected messagesDLQ=0, got %d", got)
 	}
 }
