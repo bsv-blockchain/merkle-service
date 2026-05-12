@@ -82,6 +82,8 @@ func newTestClient(t *testing.T) (*Client, *mockSyncProducer, *mockSyncProducer)
 		cfg,
 		kafka.NewTestProducer(mockSubtreeProducer, "subtree-kafka-topic", logger),
 		kafka.NewTestProducer(mockBlockProducer, "block-kafka-topic", logger),
+		nil,   // dataHubRegistry — node_status path is exercised separately
+		false, // allowPrivateIPs
 		logger,
 	)
 
@@ -279,6 +281,8 @@ func TestInit_MissingSubtreeProducer(t *testing.T) {
 		config.P2PConfig{Network: "main"},
 		nil, // missing subtree producer
 		kafka.NewTestProducer(mockProducer, "block", logger),
+		nil,
+		false,
 		logger,
 	)
 
@@ -296,6 +300,8 @@ func TestInit_MissingBlockProducer(t *testing.T) {
 		config.P2PConfig{Network: "main"},
 		kafka.NewTestProducer(mockProducer, "subtree", logger),
 		nil, // missing block producer
+		nil,
+		false,
 		logger,
 	)
 
@@ -351,6 +357,8 @@ func TestNewClient_MsgBusFieldsStored(t *testing.T) {
 		cfg,
 		kafka.NewTestProducer(mockSubtree, "subtree", logger),
 		kafka.NewTestProducer(mockBlock, "block", logger),
+		nil,
+		false,
 		logger,
 	)
 
@@ -442,7 +450,7 @@ func TestPublishWithRetry_ExhaustionReturnsTerminalError(t *testing.T) {
 	mockProducer := &mockSyncProducer{failErr: errors.New("simulated kafka outage")}
 	producer := kafka.NewTestProducer(mockProducer, "subtree", logger)
 
-	client := NewClient(config.P2PConfig{}, producer, producer, logger)
+	client := NewClient(config.P2PConfig{}, producer, producer, nil, false, logger)
 
 	err := client.publishWithRetry(context.Background(), producer, "hash-x", []byte("payload"), "subtree")
 	if err == nil {
@@ -464,7 +472,7 @@ func TestPublishWithRetry_SucceedsBeforeExhaustion(t *testing.T) {
 	// Producer that fails the first two attempts, then succeeds.
 	flaky := &flakyProducer{failuresRemaining: 2}
 	producer := kafka.NewTestProducer(flaky, "subtree", logger)
-	client := NewClient(config.P2PConfig{}, producer, producer, logger)
+	client := NewClient(config.P2PConfig{}, producer, producer, nil, false, logger)
 
 	err := client.publishWithRetry(context.Background(), producer, "hash-y", []byte("payload"), "subtree")
 	if err != nil {
@@ -484,7 +492,7 @@ func TestHandleSubtreeMessage_PropagatesTerminalError(t *testing.T) {
 	mockProducer := &mockSyncProducer{failErr: errors.New("kafka down")}
 	producer := kafka.NewTestProducer(mockProducer, "subtree", logger)
 
-	client := NewClient(config.P2PConfig{}, producer, producer, logger)
+	client := NewClient(config.P2PConfig{}, producer, producer, nil, false, logger)
 
 	err := client.handleSubtreeMessage(context.Background(), teranode.SubtreeMessage{Hash: "h"})
 	if !errors.Is(err, ErrPublishExhausted) {
@@ -501,7 +509,7 @@ func TestHandleBlockMessage_PropagatesTerminalError(t *testing.T) {
 	mockProducer := &mockSyncProducer{failErr: errors.New("kafka down")}
 	producer := kafka.NewTestProducer(mockProducer, "block", logger)
 
-	client := NewClient(config.P2PConfig{}, producer, producer, logger)
+	client := NewClient(config.P2PConfig{}, producer, producer, nil, false, logger)
 
 	err := client.handleBlockMessage(context.Background(), teranode.BlockMessage{Hash: "b", Height: 1})
 	if !errors.Is(err, ErrPublishExhausted) {
@@ -558,7 +566,7 @@ func TestPublishWithRetry_ContextCancelledDuringBackoffIsNotFatal(t *testing.T) 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockProducer := &mockSyncProducer{failErr: errors.New("kafka down")}
 	producer := kafka.NewTestProducer(mockProducer, "subtree", logger)
-	client := NewClient(config.P2PConfig{}, producer, producer, logger)
+	client := NewClient(config.P2PConfig{}, producer, producer, nil, false, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {

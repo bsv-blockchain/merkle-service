@@ -11,6 +11,8 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/p2p"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
+	"github.com/bsv-blockchain/merkle-service/internal/store"
+	_ "github.com/bsv-blockchain/merkle-service/internal/store/sql" // register SQL backend
 )
 
 // exit is overridable so tests can assert on the status code without
@@ -48,8 +50,27 @@ func run() error {
 	}
 	defer func() { _ = blockProducer.Close() }()
 
+	// Build the shared store registry so the p2p client can persist
+	// every peer's advertised DataHub URL into the DataHubRegistry. The
+	// registry is consulted by /reprocess and the block-processor
+	// failover path, so populating it from node_status broadcasts means
+	// we see every peer the network has advertised — not just the
+	// peer-of-record on whichever block was last announced to us.
+	storeRegistry, err := store.NewFromConfig(context.Background(), cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = storeRegistry.Close() }()
+
 	// Create, init, and start the P2P client.
-	client := p2p.NewClient(cfg.P2P, subtreeProducer, blockProducer, logger)
+	client := p2p.NewClient(
+		cfg.P2P,
+		subtreeProducer,
+		blockProducer,
+		storeRegistry.DataHubRegistry,
+		cfg.DataHub.AllowPrivateIPs,
+		logger,
+	)
 
 	if err := client.Init(nil); err != nil {
 		return err

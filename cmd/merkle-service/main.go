@@ -65,7 +65,14 @@ func main() {
 		BlockProducer:       blockProducer,
 		FallbackDataHubURLs: cfg.DataHub.FallbackURLs,
 	})
-	p2pClient := p2p.NewClient(cfg.P2P, subtreeProducer, blockProducer, logger)
+	p2pClient := p2p.NewClient(
+		cfg.P2P,
+		subtreeProducer,
+		blockProducer,
+		registry.DataHubRegistry,
+		cfg.DataHub.AllowPrivateIPs,
+		logger,
+	)
 	subtreeFetcher := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree)
 	blockProcessor := block.NewProcessor(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.CallbackURLRegistry, registry.DataHubRegistry, registry.SubtreeCounter, logger)
 	subtreeWorker := block.NewSubtreeWorkerService(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.Stump, registry.CallbackURLRegistry, registry.SubtreeCounter, logger)

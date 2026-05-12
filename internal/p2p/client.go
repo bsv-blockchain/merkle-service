@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	p2p "github.com/bsv-blockchain/go-teranode-p2p-client"
@@ -15,6 +16,8 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
+	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
+	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
 const (
@@ -50,6 +53,24 @@ type Client struct {
 	subtreeProducer *kafka.Producer
 	blockProducer   *kafka.Producer
 
+	// dataHubRegistry, when non-nil, records the BaseURL/PropagationURL
+	// advertised by every peer that broadcasts a node_status message.
+	// This populates the DataHub peer set independently of which peer
+	// happens to announce the next block/subtree we consume — so
+	// /reprocess candidates and block-processor failover see every peer
+	// the network has advertised, not just the announcer-of-record.
+	dataHubRegistry store.DataHubRegistry
+
+	// allowPrivateIPs governs whether the SSRF guard accepts peer-supplied
+	// URLs pointing at loopback/link-local/RFC1918 addresses. Mirrors the
+	// posture used by the DataHub HTTP client so the registry never
+	// contains a URL the fetcher would refuse to call.
+	allowPrivateIPs bool
+
+	// nodeStatusReceived counts every node_status message handled, exposed
+	// via Health.Details so operators can see discovery is alive.
+	nodeStatusReceived atomic.Int64
+
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
@@ -63,17 +84,28 @@ type Client struct {
 	connected bool
 }
 
-// NewClient creates a new P2P client with the given configuration and Kafka producers.
+// NewClient creates a new P2P client with the given configuration and Kafka
+// producers. dataHubRegistry may be nil — in that case the client still
+// processes subtree/block announcements but does not record peers from
+// node_status. allowPrivateIPs controls whether peer-advertised
+// loopback/link-local/RFC1918 URLs are accepted into the registry; it
+// should be wired from the same DataHub.AllowPrivateIPs setting that
+// governs the HTTP fetch client so we never register a URL the fetcher
+// would refuse.
 func NewClient(
 	cfg config.P2PConfig,
 	subtreeProducer *kafka.Producer,
 	blockProducer *kafka.Producer,
+	dataHubRegistry store.DataHubRegistry,
+	allowPrivateIPs bool,
 	logger *slog.Logger,
 ) *Client {
 	c := &Client{
 		cfg:             cfg,
 		subtreeProducer: subtreeProducer,
 		blockProducer:   blockProducer,
+		dataHubRegistry: dataHubRegistry,
+		allowPrivateIPs: allowPrivateIPs,
 		fatalErr:        make(chan error, 1),
 	}
 	c.InitBase("p2p-client")
@@ -140,11 +172,13 @@ func (c *Client) Start(ctx context.Context) error {
 	// Subscribe to typed channels.
 	subtreeCh := c.p2pClient.SubscribeSubtrees(ctx)
 	blockCh := c.p2pClient.SubscribeBlocks(ctx)
+	statusCh := c.p2pClient.SubscribeNodeStatus(ctx)
 
 	// Start message processing goroutines.
-	c.wg.Add(2)
+	c.wg.Add(3)
 	go c.processSubtreeMessages(ctx, subtreeCh)
 	go c.processBlockMessages(ctx, blockCh)
+	go c.processNodeStatusMessages(ctx, statusCh)
 
 	c.SetStarted(true)
 	c.setConnected(true)
@@ -242,7 +276,8 @@ func (c *Client) Health() service.HealthStatus {
 
 	status := "healthy"
 	details := map[string]string{
-		"peerCount": fmt.Sprintf("%d", peerCount),
+		"peerCount":          fmt.Sprintf("%d", peerCount),
+		"nodeStatusReceived": fmt.Sprintf("%d", c.nodeStatusReceived.Load()),
 	}
 
 	if !c.connected {
@@ -286,6 +321,100 @@ func (c *Client) processSubtreeMessages(ctx context.Context, ch <-chan teranode.
 			return
 		}
 	}
+}
+
+// processNodeStatusMessages reads typed node_status announcements from the
+// teranode p2p network and registers each peer's advertised DataHub URL
+// with the shared DataHubRegistry. This is independent of the
+// block/subtree publish pipeline: a registry failure is logged but does
+// not signal fatal, since loss of peer discovery is degraded — not
+// broken — operation (block/subtree processors still get the announcing
+// peer's URL on each message and can fall back through whatever is
+// already in the registry).
+func (c *Client) processNodeStatusMessages(ctx context.Context, ch <-chan teranode.NodeStatusMessage) {
+	defer c.wg.Done()
+
+	if c.dataHubRegistry == nil {
+		// Drain the channel until shutdown so the publisher doesn't block,
+		// but skip the registry write — wiring chose not to attach one.
+		c.Logger.Info("node_status loop running without DataHub registry; peer URLs will not be persisted")
+		for {
+			select {
+			case _, ok := <-ch:
+				if !ok {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+
+	c.Logger.Info("starting node_status message processing loop")
+
+	for {
+		select {
+		case msg, ok := <-ch:
+			if !ok {
+				c.Logger.Info("node_status message channel closed")
+				return
+			}
+			c.handleNodeStatusMessage(msg)
+		case <-ctx.Done():
+			c.Logger.Info("node_status loop exiting: context canceled")
+			return
+		}
+	}
+}
+
+// handleNodeStatusMessage extracts the peer's DataHub URL from a
+// node_status announcement, validates it through the SSRF guard, and
+// upserts it into the DataHubRegistry. Validation failures are logged
+// at warn level so operators can tell when a peer is broadcasting an
+// unusable URL; registry upsert failures are logged at warn level since
+// the next announcement from the same peer will retry the insert.
+func (c *Client) handleNodeStatusMessage(msg teranode.NodeStatusMessage) {
+	c.nodeStatusReceived.Add(1)
+
+	raw := pickDataHubURL(msg)
+	if raw == "" {
+		c.Logger.Debug("node_status has no datahub url",
+			"peerID", msg.PeerID,
+			"clientName", msg.ClientName,
+		)
+		return
+	}
+
+	if err := ssrfguard.ValidateURL(raw, c.allowPrivateIPs, nil); err != nil {
+		c.Logger.Warn("rejected discovered datahub url",
+			"peerID", msg.PeerID,
+			"url", raw,
+			"error", err,
+		)
+		return
+	}
+
+	normalized := normalizeDataHubURL(raw)
+	if c.dataHubRegistry == nil {
+		// Defense-in-depth: processNodeStatusMessages already short-circuits
+		// when the registry is nil, but a direct caller (tests, future
+		// helpers) is safer if the handler itself is nil-tolerant.
+		return
+	}
+	if err := c.dataHubRegistry.Add(normalized); err != nil {
+		c.Logger.Warn("failed to record discovered datahub url in registry",
+			"peerID", msg.PeerID,
+			"url", normalized,
+			"error", err,
+		)
+		return
+	}
+
+	c.Logger.Debug("registered peer datahub url from node_status",
+		"peerID", msg.PeerID,
+		"clientName", msg.ClientName,
+		"url", normalized,
+	)
 }
 
 // processBlockMessages reads typed block messages and publishes them to Kafka.
