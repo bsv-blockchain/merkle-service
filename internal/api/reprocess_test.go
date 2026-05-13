@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -473,13 +474,25 @@ func TestHandleReprocess_PublishesScopedBlockMessage(t *testing.T) {
 // only need the bytes to be a parsable block.
 func tinyBlockFixture(t *testing.T) []byte {
 	t.Helper()
+	return blockFixtureWithSubtrees(t, 1)
+}
+
+// blockFixtureWithSubtrees builds a parsable block payload with the
+// requested number of subtree hashes — used by the dedup-clear tests
+// to verify the handler enumerates one STUMP dedup key per index.
+func blockFixtureWithSubtrees(t *testing.T, subtreeCount int) []byte {
+	t.Helper()
 	header := &model.BlockHeader{
 		HashPrevBlock:  &chainhash.Hash{},
 		HashMerkleRoot: &chainhash.Hash{},
 	}
-	subtreeHash := &chainhash.Hash{}
-	subtreeHash[0] = 0xab
-	block, err := model.NewBlock(header, nil, []*chainhash.Hash{subtreeHash}, 0, 0, 1, 0)
+	subtrees := make([]*chainhash.Hash, subtreeCount)
+	for i := range subtrees {
+		h := &chainhash.Hash{}
+		h[0] = byte(0xa0 + i)
+		subtrees[i] = h
+	}
+	block, err := model.NewBlock(header, nil, subtrees, 0, 0, 1, 0)
 	if err != nil {
 		t.Fatalf("model.NewBlock: %v", err)
 	}
@@ -488,4 +501,225 @@ func tinyBlockFixture(t *testing.T) []byte {
 		t.Fatalf("block.Bytes: %v", err)
 	}
 	return data
+}
+
+// fakeCallbackDeduper is an in-memory store.CallbackDedupStore for
+// asserting which dedup keys /reprocess clears. The internal key uses
+// the same three-tuple shape that the real backends key on, so test
+// assertions read naturally.
+type fakeCallbackDeduper struct {
+	mu        sync.Mutex
+	entries   map[string]struct{}
+	deletes   []dedupTriple
+	deleteErr error
+}
+
+type dedupTriple struct {
+	Txid, URL, StatusType string
+}
+
+func newFakeCallbackDeduper() *fakeCallbackDeduper {
+	return &fakeCallbackDeduper{entries: map[string]struct{}{}}
+}
+
+func fakeDedupKey(t dedupTriple) string {
+	return t.Txid + "\x00" + t.URL + "\x00" + t.StatusType
+}
+
+func (f *fakeCallbackDeduper) Exists(txid, url, st string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.entries[fakeDedupKey(dedupTriple{txid, url, st})]
+	return ok, nil
+}
+
+func (f *fakeCallbackDeduper) Record(txid, url, st string, _ time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entries[fakeDedupKey(dedupTriple{txid, url, st})] = struct{}{}
+	return nil
+}
+
+func (f *fakeCallbackDeduper) Delete(txid, url, st string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	tr := dedupTriple{txid, url, st}
+	f.deletes = append(f.deletes, tr)
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	delete(f.entries, fakeDedupKey(tr))
+	return nil
+}
+
+func (f *fakeCallbackDeduper) takeDeletes() []dedupTriple {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]dedupTriple, len(f.deletes))
+	copy(out, f.deletes)
+	return out
+}
+
+// TestHandleReprocess_ClearsDedupBeforePublish pins the fix for
+// bsv-blockchain/merkle-service#122: a /reprocess request first
+// removes any callback-dedup entries left behind by a previous
+// DLQ'd delivery for (blockHash, callbackURL), so callback-delivery
+// doesn't silently swallow the freshly-emitted STUMPs and
+// BLOCK_PROCESSED. With a 2-subtree fixture block, we expect
+// exactly three deletes: BLOCK_PROCESSED, STUMP:0, STUMP:1.
+func TestHandleReprocess_ClearsDedupBeforePublish(t *testing.T) {
+	blockBody := blockFixtureWithSubtrees(t, 2)
+	hub := dataHubServer(t, http.StatusOK, func(string) []byte { return blockBody })
+	prod := &recordingProducer{}
+	dedup := newFakeCallbackDeduper()
+
+	const callbackURL = "https://1.1.1.1/arcade/cb"
+
+	// Pre-populate dedup state to simulate the DLQ'd-prior-attempt
+	// scenario from the bug.
+	_ = dedup.Record(fixtureBlockHash, callbackURL, "BLOCK_PROCESSED", time.Hour)
+	_ = dedup.Record(fixtureBlockHash+":0", callbackURL, "STUMP", time.Hour)
+	_ = dedup.Record(fixtureBlockHash+":1", callbackURL, "STUMP", time.Hour)
+
+	s := newReprocessServer(t, &ReprocessDeps{
+		DataHubClient:       datahub.NewClient(5, 0, discardLogger()),
+		FallbackDataHubURLs: []string{hub.URL},
+		DedupStore:          dedup,
+	})
+	s.blockProducer = prod
+	router := newReprocessRouter(s)
+
+	body := fmt.Sprintf(`{"blockHash":%q,"callbackUrl":%q}`, fixtureBlockHash, callbackURL)
+	w := postReprocess(router, body)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d (body=%s)", w.Code, w.Body.String())
+	}
+
+	// Assert dedup-clear surface: three deletes, one per dedup key the
+	// downstream pipeline could re-emit for this (blockHash, callbackURL).
+	got := dedup.takeDeletes()
+	want := map[dedupTriple]bool{
+		{fixtureBlockHash, callbackURL, "BLOCK_PROCESSED"}: false,
+		{fixtureBlockHash + ":0", callbackURL, "STUMP"}:    false,
+		{fixtureBlockHash + ":1", callbackURL, "STUMP"}:    false,
+	}
+	for _, d := range got {
+		if _, ok := want[d]; !ok {
+			t.Errorf("unexpected Delete call: %+v", d)
+			continue
+		}
+		want[d] = true
+	}
+	for k, seen := range want {
+		if !seen {
+			t.Errorf("expected Delete for %+v but it was not called", k)
+		}
+	}
+
+	// All three pre-populated entries should now be absent.
+	for _, tr := range []dedupTriple{
+		{fixtureBlockHash, callbackURL, "BLOCK_PROCESSED"},
+		{fixtureBlockHash + ":0", callbackURL, "STUMP"},
+		{fixtureBlockHash + ":1", callbackURL, "STUMP"},
+	} {
+		exists, err := dedup.Exists(tr.Txid, tr.URL, tr.StatusType)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exists {
+			t.Errorf("entry %+v should have been cleared", tr)
+		}
+	}
+
+	// Block message was still published (the dedup-clear is best-effort
+	// pre-publish; the publish itself must always run on probe success).
+	if len(prod.keys) != 1 {
+		t.Errorf("expected one block publish, got %d", len(prod.keys))
+	}
+}
+
+// TestHandleReprocess_DedupClearFailureDoesNotBlockPublish verifies the
+// best-effort contract: a Delete error from the dedup store is logged
+// but does not block the publish. The user still gets 202.
+func TestHandleReprocess_DedupClearFailureDoesNotBlockPublish(t *testing.T) {
+	blockBody := blockFixtureWithSubtrees(t, 1)
+	hub := dataHubServer(t, http.StatusOK, func(string) []byte { return blockBody })
+	prod := &recordingProducer{}
+	dedup := newFakeCallbackDeduper()
+	dedup.deleteErr = errors.New("aerospike down")
+
+	s := newReprocessServer(t, &ReprocessDeps{
+		DataHubClient:       datahub.NewClient(5, 0, discardLogger()),
+		FallbackDataHubURLs: []string{hub.URL},
+		DedupStore:          dedup,
+	})
+	s.blockProducer = prod
+	router := newReprocessRouter(s)
+
+	body := fmt.Sprintf(`{"blockHash":%q,"callbackUrl":%q}`, fixtureBlockHash, "https://1.1.1.1/cb")
+	w := postReprocess(router, body)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 despite Delete errors, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if len(prod.keys) != 1 {
+		t.Errorf("expected publish to proceed despite dedup-clear failures; got %d publishes", len(prod.keys))
+	}
+}
+
+// TestHandleReprocess_NoDedupStoreConfigured verifies backward
+// compatibility: when the deploy does not wire DedupStore, the handler
+// proceeds with publish and no panic.
+func TestHandleReprocess_NoDedupStoreConfigured(t *testing.T) {
+	blockBody := blockFixtureWithSubtrees(t, 1)
+	hub := dataHubServer(t, http.StatusOK, func(string) []byte { return blockBody })
+	prod := &recordingProducer{}
+
+	s := newReprocessServer(t, &ReprocessDeps{
+		DataHubClient:       datahub.NewClient(5, 0, discardLogger()),
+		FallbackDataHubURLs: []string{hub.URL},
+		// DedupStore omitted on purpose.
+	})
+	s.blockProducer = prod
+	router := newReprocessRouter(s)
+
+	body := fmt.Sprintf(`{"blockHash":%q,"callbackUrl":%q}`, fixtureBlockHash, "https://1.1.1.1/cb")
+	w := postReprocess(router, body)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if len(prod.keys) != 1 {
+		t.Errorf("expected publish to proceed when DedupStore is nil; got %d publishes", len(prod.keys))
+	}
+}
+
+// TestHandleReprocess_ZeroSubtreesClearsOnlyBlockProcessed pins the
+// empty-block behavior: a coinbase-only block has no STUMP dedup
+// entries, so only the BLOCK_PROCESSED key is cleared.
+func TestHandleReprocess_ZeroSubtreesClearsOnlyBlockProcessed(t *testing.T) {
+	blockBody := blockFixtureWithSubtrees(t, 0)
+	hub := dataHubServer(t, http.StatusOK, func(string) []byte { return blockBody })
+	prod := &recordingProducer{}
+	dedup := newFakeCallbackDeduper()
+
+	const callbackURL = "https://1.1.1.1/arcade/cb"
+	s := newReprocessServer(t, &ReprocessDeps{
+		DataHubClient:       datahub.NewClient(5, 0, discardLogger()),
+		FallbackDataHubURLs: []string{hub.URL},
+		DedupStore:          dedup,
+	})
+	s.blockProducer = prod
+	router := newReprocessRouter(s)
+
+	body := fmt.Sprintf(`{"blockHash":%q,"callbackUrl":%q}`, fixtureBlockHash, callbackURL)
+	w := postReprocess(router, body)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	got := dedup.takeDeletes()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 Delete (BLOCK_PROCESSED), got %d: %+v", len(got), got)
+	}
+	if got[0] != (dedupTriple{fixtureBlockHash, callbackURL, "BLOCK_PROCESSED"}) {
+		t.Errorf("Delete target mismatch: got %+v", got[0])
+	}
 }

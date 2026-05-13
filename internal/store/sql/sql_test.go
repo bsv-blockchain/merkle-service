@@ -320,6 +320,76 @@ func TestCallbackDedup_RecordAndExists(t *testing.T) {
 	}
 }
 
+// TestCallbackDedup_DeleteRemovesEntry verifies the /reprocess
+// dedup-clear path: a recorded entry can be removed so that a
+// freshly-emitted callback for the same (txid, url, statusType) is
+// not skipped as a duplicate. Guards
+// bsv-blockchain/merkle-service#122.
+func TestCallbackDedup_DeleteRemovesEntry(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newCallbackDedup(db, d)
+
+	if err := s.Record("tx", "url", "BLOCK_PROCESSED", 1*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete("tx", "url", "BLOCK_PROCESSED"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	ok, err := s.Exists("tx", "url", "BLOCK_PROCESSED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("Exists=true after Delete; expected false")
+	}
+}
+
+// TestCallbackDedup_DeleteAbsentKeyIsNoError verifies that calling
+// Delete on a key that was never recorded is idempotent (no error
+// returned).
+func TestCallbackDedup_DeleteAbsentKeyIsNoError(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newCallbackDedup(db, d)
+
+	if err := s.Delete("never-recorded", "url", "BLOCK_PROCESSED"); err != nil {
+		t.Fatalf("Delete on absent key returned %v; want nil", err)
+	}
+}
+
+// TestCallbackDedup_DeleteDoesNotAffectOtherKeys verifies that Delete
+// is scoped exactly to the (txid, url, statusType) triple — a sibling
+// entry differing only by statusType is untouched.
+func TestCallbackDedup_DeleteDoesNotAffectOtherKeys(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newCallbackDedup(db, d)
+
+	if err := s.Record("tx", "url", "BLOCK_PROCESSED", 1*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Record("tx", "url", "STUMP", 1*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Delete("tx", "url", "BLOCK_PROCESSED"); err != nil {
+		t.Fatal(err)
+	}
+
+	bp, err := s.Exists("tx", "url", "BLOCK_PROCESSED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bp {
+		t.Error("BLOCK_PROCESSED Exists=true after Delete")
+	}
+	st, err := s.Exists("tx", "url", "STUMP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st {
+		t.Error("sibling STUMP entry was wrongly removed")
+	}
+}
+
 func TestCallbackDedup_TTLExpiry(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newCallbackDedup(db, d)

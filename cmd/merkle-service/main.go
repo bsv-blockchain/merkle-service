@@ -64,6 +64,7 @@ func main() {
 		DataHubClient:       apiDataHubClient,
 		BlockProducer:       blockProducer,
 		FallbackDataHubURLs: cfg.DataHub.FallbackURLs,
+		DedupStore:          registry.CallbackDedup,
 	})
 	p2pClient := p2p.NewClient(
 		cfg.P2P,

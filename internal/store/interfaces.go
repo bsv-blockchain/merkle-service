@@ -49,6 +49,12 @@ type SubtreeStore interface {
 type CallbackDedupStore interface {
 	Exists(txid, callbackURL, statusType string) (bool, error)
 	Record(txid, callbackURL, statusType string, ttl time.Duration) error
+	// Delete removes a single dedup entry. No-op when the entry is
+	// absent — implementations return nil. /reprocess uses this to clear
+	// stale dedup state left behind by a prior DLQ'd attempt so the
+	// freshly-emitted callbacks are not skipped as duplicates
+	// (bsv-blockchain/merkle-service#122).
+	Delete(txid, callbackURL, statusType string) error
 }
 
 // CallbackURLRegistry enumerates every known callback URL alongside its

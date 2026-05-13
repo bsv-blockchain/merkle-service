@@ -1,6 +1,7 @@
 package callback
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -679,6 +680,66 @@ func TestProcessDelivery_DedupSkipsDuplicate(t *testing.T) {
 	}
 	if ds.messagesDedupe.Load() != 1 {
 		t.Errorf("expected messagesDedupe=1, got %d", ds.messagesDedupe.Load())
+	}
+}
+
+// TestProcessDelivery_DedupSkipLogsInfo pins issue #122 mitigation: the
+// per-message dedup-skip log is at INFO level (not DEBUG) so production
+// operators can grep by callbackUrl and immediately see when a
+// subscriber's deliveries are being silently suppressed. Includes the
+// structured fields needed for diagnosis: blockHash, callbackUrl,
+// type, subtreeIndex, dedupKey.
+func TestProcessDelivery_DedupSkipLogsInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	cfg := defaultTestConfig()
+	ds, _, _ := newTestDeliveryService(t, cfg, server.Client())
+	ds.Logger = logger
+	ds.dedupStore = &mockDedupStore{exists: true}
+
+	msg := &kafka.CallbackTopicMessage{
+		CallbackURL:  "https://subscriber.example/cb",
+		Type:         kafka.CallbackBlockProcessed,
+		BlockHash:    "blockhash-xyz",
+		SubtreeIndex: 0,
+	}
+
+	if err := ds.processDelivery(context.Background(), msg); err != nil {
+		t.Fatalf("processDelivery returned error: %v", err)
+	}
+
+	out := buf.String()
+	if out == "" {
+		t.Fatalf("expected an info log entry for dedup skip; got nothing")
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &entry); err != nil {
+		t.Fatalf("decode log entry: %v\nraw: %s", err, out)
+	}
+	if entry["level"] != "INFO" {
+		t.Errorf("expected level=INFO, got %v", entry["level"])
+	}
+	if entry["msg"] != "skipping duplicate callback delivery" {
+		t.Errorf("unexpected msg: %v", entry["msg"])
+	}
+	if entry["callbackUrl"] != "https://subscriber.example/cb" {
+		t.Errorf("missing/wrong callbackUrl: %v", entry["callbackUrl"])
+	}
+	if entry["blockHash"] != "blockhash-xyz" {
+		t.Errorf("missing/wrong blockHash: %v", entry["blockHash"])
+	}
+	if entry["type"] != "BLOCK_PROCESSED" {
+		t.Errorf("missing/wrong type: %v", entry["type"])
+	}
+	if _, ok := entry["dedupKey"]; !ok {
+		t.Errorf("missing dedupKey field")
 	}
 }
 

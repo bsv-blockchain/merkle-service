@@ -59,6 +59,7 @@ func main() {
 		DataHubClient:       dataHubClient,
 		BlockProducer:       blockProducer,
 		FallbackDataHubURLs: cfg.DataHub.FallbackURLs,
+		DedupStore:          registry.CallbackDedup,
 	})
 
 	if err := server.Init(nil); err != nil {

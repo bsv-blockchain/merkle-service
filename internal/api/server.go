@@ -33,6 +33,13 @@ type Server struct {
 	dataHubRegistry store.DataHubRegistry
 	dataHubClient   *datahub.Client
 	blockProducer   reprocessBlockProducer
+	// dedupStore, when non-nil, lets /reprocess clear stale callback-dedup
+	// entries for the target (blockHash, callbackURL) so that
+	// freshly-emitted STUMP and BLOCK_PROCESSED callbacks from a
+	// reprocess aren't suppressed by entries left behind by a prior
+	// delivery that exhausted its retry chain and went to DLQ
+	// (bsv-blockchain/merkle-service#122).
+	dedupStore store.CallbackDedupStore
 	// fallbackDataHubURLs are operator-configured DataHubs probed by
 	// /reprocess before the dynamically-discovered ones.
 	fallbackDataHubURLs []string
@@ -59,6 +66,11 @@ type ReprocessDeps struct {
 	DataHubClient       *datahub.Client
 	BlockProducer       *kafka.Producer
 	FallbackDataHubURLs []string
+	// DedupStore wires the callback-dedup store so /reprocess can clear
+	// stale dedup entries for the (blockHash, callbackURL) pair before
+	// publishing. Optional — when nil, /reprocess proceeds without
+	// clearing (legacy behavior).
+	DedupStore store.CallbackDedupStore
 }
 
 func NewServer(cfg config.APIConfig, regStore store.RegistrationStore, urlRegistry store.CallbackURLRegistry, health store.BackendHealth, logger *slog.Logger) *Server {
@@ -88,6 +100,7 @@ func (s *Server) SetReprocessDeps(deps *ReprocessDeps) {
 		s.blockProducer = deps.BlockProducer
 	}
 	s.fallbackDataHubURLs = deps.FallbackDataHubURLs
+	s.dedupStore = deps.DedupStore
 }
 
 // SetAllowPrivateCallbackIPs toggles the SSRF guard on /watch. When false

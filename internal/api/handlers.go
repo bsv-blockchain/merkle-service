@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -286,7 +287,7 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resolvedURL, height, status, probeErr := s.probeDataHubsForBlock(r.Context(), candidates, fallbackCount, req.BlockHash)
+	resolvedURL, height, subtreeHashes, status, probeErr := s.probeDataHubsForBlock(r.Context(), candidates, fallbackCount, req.BlockHash)
 	if probeErr != nil {
 		s.Logger.Warn("reprocess: no DataHub served block",
 			"blockHash", req.BlockHash,
@@ -297,6 +298,19 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, ErrorResponse{Error: probeErr.Error()})
 		return
 	}
+
+	// Clear stale callback-dedup entries for the (blockHash, callbackURL)
+	// pair before publishing the reprocess block message. Without this,
+	// any prior delivery attempt that exhausted its retry chain and
+	// landed in DLQ would have recorded a dedup entry — and the
+	// freshly-emitted STUMP/BLOCK_PROCESSED callbacks would be silently
+	// skipped by callback-delivery's dedup gate (issue #122).
+	//
+	// Best-effort: a Delete error is logged but does not block the
+	// publish. The dedup-record path in callback-delivery is itself
+	// log-on-error, so a brief store outage during clear simply means
+	// some entries may persist; the next reprocess request will retry.
+	s.clearReprocessDedup(req.BlockHash, req.CallbackURL, subtreeHashes)
 
 	blockMsg := kafka.BlockMessage{
 		Hash:                  req.BlockHash,
@@ -333,6 +347,63 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 		BlockHash:  req.BlockHash,
 		DataHubURL: resolvedURL,
 	})
+}
+
+// clearReprocessDedup removes any callback-dedup entries that would
+// cause callback-delivery to skip the freshly-emitted STUMP and
+// BLOCK_PROCESSED callbacks for this (blockHash, callbackURL). Mirrors
+// the key derivation in callback-delivery's dedupKeyForMessage:
+//   - one BLOCK_PROCESSED entry keyed on blockHash, callbackURL,
+//     "BLOCK_PROCESSED".
+//   - one STUMP entry per subtree index i in [0, len(subtreeHashes))
+//     keyed on (blockHash + ":" + i), callbackURL, "STUMP".
+//
+// SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES are not re-emitted on the
+// /reprocess path so we do not need to clear them.
+//
+// Failures are best-effort: log at warn and continue. A persistent
+// store outage that leaves an entry behind will reappear on the next
+// reprocess request and can be cleared then.
+func (s *Server) clearReprocessDedup(blockHash, callbackURL string, subtreeHashes []string) {
+	if s.dedupStore == nil {
+		return
+	}
+
+	type entry struct {
+		key      string
+		typeName string
+	}
+	entries := make([]entry, 0, 1+len(subtreeHashes))
+	entries = append(entries, entry{key: blockHash, typeName: string(kafka.CallbackBlockProcessed)})
+	for i := range subtreeHashes {
+		entries = append(entries, entry{
+			key:      blockHash + ":" + strconv.Itoa(i),
+			typeName: string(kafka.CallbackStump),
+		})
+	}
+
+	cleared := 0
+	for _, e := range entries {
+		if err := s.dedupStore.Delete(e.key, callbackURL, e.typeName); err != nil {
+			s.Logger.Warn("reprocess: failed to clear callback dedup entry",
+				"blockHash", blockHash,
+				"callbackUrl", callbackURL,
+				"type", e.typeName,
+				"dedupTxidKey", e.key,
+				"error", err,
+			)
+			continue
+		}
+		cleared++
+	}
+
+	s.Logger.Info("reprocess: cleared callback dedup entries",
+		"blockHash", blockHash,
+		"callbackUrl", callbackURL,
+		"clearedCount", cleared,
+		"attemptedCount", len(entries),
+		"subtreeCount", len(subtreeHashes),
+	)
 }
 
 // collectDataHubCandidates returns the deduped, ordered list of DataHub
@@ -397,7 +468,7 @@ func (s *Server) collectDataHubCandidates() ([]string, int) {
 // retry later. If every discovered peer was skipped as unhealthy and no
 // operator fallbacks were configured, returns 502 — we cannot confirm a
 // 404 without actually probing.
-func (s *Server) probeDataHubsForBlock(parentCtx context.Context, candidates []string, fallbackCount int, blockHash string) (string, uint32, int, error) {
+func (s *Server) probeDataHubsForBlock(parentCtx context.Context, candidates []string, fallbackCount int, blockHash string) (resolvedURL string, height uint32, subtreeHashes []string, status int, err error) {
 	ph := s.dataHubClient.PeerHealth()
 	allNotFound := true
 	probed := 0
@@ -411,32 +482,32 @@ func (s *Server) probeDataHubsForBlock(parentCtx context.Context, candidates []s
 		}
 
 		ctx, cancel := context.WithTimeout(parentCtx, reprocessProbeTimeout)
-		meta, err := s.dataHubClient.FetchBlockMetadata(ctx, url, blockHash)
+		meta, ferr := s.dataHubClient.FetchBlockMetadata(ctx, url, blockHash)
 		cancel()
 		probed++
-		if err == nil {
-			return url, meta.Height, http.StatusAccepted, nil
+		if ferr == nil {
+			return url, meta.Height, meta.Subtrees, http.StatusAccepted, nil
 		}
-		if !errors.Is(err, datahub.ErrNotFound) {
+		if !errors.Is(ferr, datahub.ErrNotFound) {
 			allNotFound = false
 		}
 		s.Logger.Debug("reprocess probe failed",
 			"dataHubUrl", url,
 			"blockHash", blockHash,
-			"notFound", errors.Is(err, datahub.ErrNotFound),
-			"error", err,
+			"notFound", errors.Is(ferr, datahub.ErrNotFound),
+			"error", ferr,
 		)
 	}
 	if probed == 0 {
 		// Every candidate was skipped as unhealthy and there were no
 		// operator fallbacks to force-try. We cannot honestly claim
 		// the block is missing without probing anyone.
-		return "", 0, http.StatusBadGateway, errors.New("no DataHub could serve the requested block")
+		return "", 0, nil, http.StatusBadGateway, errors.New("no DataHub could serve the requested block")
 	}
 	if allNotFound {
-		return "", 0, http.StatusNotFound, errors.New("block not found on any known DataHub")
+		return "", 0, nil, http.StatusNotFound, errors.New("block not found on any known DataHub")
 	}
-	return "", 0, http.StatusBadGateway, errors.New("no DataHub could serve the requested block")
+	return "", 0, nil, http.StatusBadGateway, errors.New("no DataHub could serve the requested block")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

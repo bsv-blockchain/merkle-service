@@ -46,6 +46,22 @@ func (s *callbackDedup) Exists(txid, callbackURL, statusType string) (bool, erro
 	return true, nil
 }
 
+// Delete removes a dedup entry. Used by /reprocess to clear stale dedup
+// state left by a previous DLQ'd attempt so freshly-emitted callbacks
+// are not skipped as duplicates. Deleting an absent key is a no-op
+// (returns nil) — DELETE with no matching row returns zero rows
+// affected, which we treat as success since the intent is idempotent
+// removal.
+func (s *callbackDedup) Delete(txid, callbackURL, statusType string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	key := dedupKey(txid, callbackURL, statusType)
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
+		"DELETE FROM callback_dedup WHERE dedup_key = %s", s.d.placeholder(1))
+	_, err := s.db.ExecContext(ctx, q, key)
+	return err
+}
+
 func (s *callbackDedup) Record(txid, callbackURL, statusType string, ttl time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

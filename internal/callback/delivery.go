@@ -346,10 +346,19 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 				return d.scheduleRetryOrDLQ(cbMsg, fmt.Errorf("dedup check: %w", err))
 			}
 			if exists {
-				d.Logger.Debug("skipping duplicate callback delivery",
+				// Log at info so silent suppressions are observable in
+				// production without DEBUG. A persistent flood of these
+				// for the same (callbackUrl, blockHash) signals that a
+				// prior delivery hit DLQ and /reprocess is needed to
+				// clear the stale dedup state — see
+				// bsv-blockchain/merkle-service#122 for the full
+				// post-DLQ failure mode.
+				d.Logger.Info("skipping duplicate callback delivery",
 					"dedupKey", dedupKey,
 					"callbackUrl", cbMsg.CallbackURL,
 					"type", cbMsg.Type,
+					"blockHash", cbMsg.BlockHash,
+					"subtreeIndex", cbMsg.SubtreeIndex,
 				)
 				d.messagesDedupe.Add(1)
 				return nil

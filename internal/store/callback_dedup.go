@@ -58,6 +58,26 @@ func (s *aerospikeCallbackDedup) Exists(txid, callbackURL, statusType string) (b
 	return exists, nil
 }
 
+// Delete removes a dedup entry. Used by /reprocess to clear stale dedup
+// state left by a previous DLQ'd attempt so freshly-emitted callbacks
+// are not skipped as duplicates. Deleting an absent key is a no-op
+// (returns nil) — the Aerospike client returns existed=false in that
+// case, which we treat as success since the intent is idempotent
+// removal.
+func (s *aerospikeCallbackDedup) Delete(txid, callbackURL, statusType string) error {
+	keyStr := dedupKey(txid, callbackURL, statusType)
+	key, err := as.NewKey(s.client.Namespace(), s.setName, keyStr)
+	if err != nil {
+		return fmt.Errorf("failed to create dedup key: %w", err)
+	}
+
+	wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
+	if _, err := s.client.Client().Delete(wp, key); err != nil {
+		return fmt.Errorf("failed to delete dedup record: %w", err)
+	}
+	return nil
+}
+
 // Record marks a callback delivery as completed with a TTL.
 func (s *aerospikeCallbackDedup) Record(txid, callbackURL, statusType string, ttl time.Duration) error {
 	keyStr := dedupKey(txid, callbackURL, statusType)
