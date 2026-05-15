@@ -14,7 +14,7 @@ import (
 
 // preloadRegistrations loads all txid→callbackURL registrations into Aerospike.
 // Uses parallel workers for large datasets.
-func preloadRegistrations(manifest *Manifest, txids [][]byte, regStore *store.RegistrationStore, logger *slog.Logger) error {
+func preloadRegistrations(manifest *Manifest, txids [][]byte, regStore store.RegistrationStore, logger *slog.Logger) error {
 	workers := 10
 	if len(manifest.ArcadeInstances) < workers {
 		workers = len(manifest.ArcadeInstances)
@@ -67,7 +67,7 @@ func preloadRegistrations(manifest *Manifest, txids [][]byte, regStore *store.Re
 }
 
 // preloadCallbackURLRegistry adds all callback URLs to the broadcast registry.
-func preloadCallbackURLRegistry(manifest *Manifest, urlRegistry *store.CallbackURLRegistry) error {
+func preloadCallbackURLRegistry(manifest *Manifest, urlRegistry store.CallbackURLRegistry) error {
 	for _, arcade := range manifest.ArcadeInstances {
 		if err := urlRegistry.Add(arcade.CallbackURL, ""); err != nil {
 			return fmt.Errorf("adding callback URL for arcade %d: %w", arcade.Index, err)
@@ -77,7 +77,7 @@ func preloadCallbackURLRegistry(manifest *Manifest, urlRegistry *store.CallbackU
 }
 
 // preloadSubtrees loads all subtree binary data into the subtree store.
-func preloadSubtrees(manifest *Manifest, subtreeData map[string][]byte, subtreeStore *store.SubtreeStore) error {
+func preloadSubtrees(manifest *Manifest, subtreeData map[string][]byte, subtreeStore store.SubtreeStore) error {
 	for _, st := range manifest.Subtrees {
 		data, ok := subtreeData[st.Hash]
 		if !ok {

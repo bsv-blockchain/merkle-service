@@ -183,6 +183,9 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 	// far longer than any scale-test run.
 	urlRegistry := store.NewCallbackURLRegistry(asClient, urlRegistrySetName, 0, 3, 100, logger)
 
+	dataHubRegistrySetName := fmt.Sprintf("scale_datahub_%d", time.Now().UnixNano())
+	dataHubRegistry := store.NewDataHubRegistry(asClient, dataHubRegistrySetName, 0, 3, 100, logger)
+
 	blobStore := store.NewMemoryBlobStore()
 	subtreeStore := store.NewSubtreeStore(blobStore, 100, logger)
 	stumpStore := store.NewStumpStore(blobStore, 100, logger)
@@ -244,7 +247,7 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 		MaxRetries: 2,
 	}
 
-	processor := block.NewProcessor(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, urlRegistry, subtreeCounter, logger)
+	processor := block.NewProcessor(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, urlRegistry, dataHubRegistry, subtreeCounter, logger)
 	if err := processor.Init(nil); err != nil {
 		t.Fatalf("failed to init block processor: %v", err)
 	}
@@ -318,7 +321,7 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 }
 
 // spotCheckRegistrations verifies a sample of registrations loaded correctly.
-func spotCheckRegistrations(t *testing.T, regStore *store.RegistrationStore, manifest *Manifest, txids [][]byte) {
+func spotCheckRegistrations(t *testing.T, regStore store.RegistrationStore, manifest *Manifest, txids [][]byte) {
 	t.Helper()
 
 	// Check 10 random txids spread across instances.
