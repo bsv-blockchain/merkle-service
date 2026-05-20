@@ -51,8 +51,8 @@ github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
 github.com/DATA-DOG/go-sqlmock v1.5.2 h1:OcvFkGmslmlZibjAjaHm3L//6LiuBgolP7OputlJIzU=
 github.com/DATA-DOG/go-sqlmock v1.5.2/go.mod h1:88MAG/4G7SMwSE3CeA0ZKzrT5CiOU3OJ+JlNzwDqpNU=
-github.com/IBM/sarama v1.48.2 h1:QKUXRaHF46aoRwagtvDR/imrOdbdV/qWzv0u6e5my+w=
-github.com/IBM/sarama v1.48.2/go.mod h1:m/Q1aFezH82/AglfTpJbw/fO0ZybYXhPgTmvajiZX50=
+github.com/IBM/sarama v1.49.0 h1:FhLbVia5yi426qttj0kNTI86vPc3v+/3mGHkif1Fsao=
+github.com/IBM/sarama v1.49.0/go.mod h1:m/Q1aFezH82/AglfTpJbw/fO0ZybYXhPgTmvajiZX50=
 github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAwZ/2OOE=
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
 github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29 h1:0kQAzHq8vLs7Pptv+7TxjdETLf/nIqJpIB4oC6Ba4vY=
@@ -125,8 +125,8 @@ github.com/bsv-blockchain/go-safe-conversion v1.2.0 h1:HwLWaxqm2OyU5/2BRQ8kwdn25
 github.com/bsv-blockchain/go-safe-conversion v1.2.0/go.mod h1:62Eq2980j4BygfqJhd/ObGRHET8ubEy2rBdGi4k6nsw=
 github.com/bsv-blockchain/go-sdk v1.2.23 h1:DRZWaqgW6Ra+uFe1+sLFi+WPcjTdBm8NAwfr6ODOF68=
 github.com/bsv-blockchain/go-sdk v1.2.23/go.mod h1:5mmw1QLusuAkjWmQgUOurQYCXdIsQEsWXbAZ9zwme3g=
-github.com/bsv-blockchain/go-subtree v1.3.2 h1:9bUuQ192mZQuz99iiOviYWU3yjrcR8nVuLGc/fkt05Y=
-github.com/bsv-blockchain/go-subtree v1.3.2/go.mod h1:0ysEa29As06LxqoY1+tT+oLMWbDp7Pj0DFILZ84eGoc=
+github.com/bsv-blockchain/go-subtree v1.4.1 h1:9cQE3KPLP0kghZHadPbMuaRKgaxbc86wyLOH7LYfnQw=
+github.com/bsv-blockchain/go-subtree v1.4.1/go.mod h1:0ysEa29As06LxqoY1+tT+oLMWbDp7Pj0DFILZ84eGoc=
 github.com/bsv-blockchain/go-teranode-p2p-client v0.2.5 h1:HPNDXeXLixgN7dDyRedC9LUAWKPGzq2lAmLZ/xCD/iA=
 github.com/bsv-blockchain/go-teranode-p2p-client v0.2.5/go.mod h1:Mm8z2+1+O6rpotdXrAHVEtDWxJ+uBO2rE3Mo243UN+Y=
 github.com/bsv-blockchain/go-tx-map v1.3.5 h1:KPCwGfJHJY2+s1tBGevSu2sfAo6RQ4IgsHu96Reonb4=
