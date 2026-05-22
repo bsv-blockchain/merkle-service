@@ -14,6 +14,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
@@ -40,6 +41,9 @@ type Server struct {
 	// delivery that exhausted its retry chain and went to DLQ
 	// (bsv-blockchain/merkle-service#122).
 	dedupStore store.CallbackDedupStore
+	// backend is the configured store backend label ("aerospike"/"sql")
+	// used to tag DB metrics emitted from handlers.
+	backend string
 	// fallbackDataHubURLs are operator-configured DataHubs probed by
 	// /reprocess before the dynamically-discovered ones.
 	fallbackDataHubURLs []string
@@ -103,6 +107,25 @@ func (s *Server) SetReprocessDeps(deps *ReprocessDeps) {
 	s.dedupStore = deps.DedupStore
 }
 
+// SetBackend records the store-backend label for DB metrics emitted from
+// API handlers ("aerospike" or "sql").
+func (s *Server) SetBackend(backend string) {
+	if backend == config.BackendSQL {
+		s.backend = metrics.BackendSQL
+	} else {
+		s.backend = metrics.BackendAerospike
+	}
+}
+
+// backendLabel returns the configured store-backend label. Defaults to
+// aerospike when SetBackend hasn't been called.
+func (s *Server) backendLabel() string {
+	if s.backend == "" {
+		return metrics.BackendAerospike
+	}
+	return s.backend
+}
+
 // SetAllowPrivateCallbackIPs toggles the SSRF guard on /watch. When false
 // (the default) callback URLs resolving to private/loopback/link-local
 // destinations are rejected at registration time. Wire this from
@@ -129,6 +152,7 @@ func (s *Server) Init(cfg interface{}) error {
 	s.router.Use(middleware.RequestID)
 	s.router.Use(middleware.RealIP)
 	s.router.Use(middlewareLogger(s.Logger))
+	s.router.Use(metrics.ChiMiddleware)
 	s.router.Use(middleware.Recoverer)
 
 	// Routes
@@ -197,7 +221,8 @@ func middlewareLogger(logger *slog.Logger) func(next http.Handler) http.Handler 
 
 			next.ServeHTTP(ww, r)
 
-			logger.Info("request",
+			logger.Info(
+				"request",
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", ww.Status(),

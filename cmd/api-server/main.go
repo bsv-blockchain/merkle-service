@@ -9,6 +9,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	_ "github.com/bsv-blockchain/merkle-service/internal/store/sql" // register SQL backend
@@ -31,6 +32,23 @@ func main() {
 
 	server := api.NewServer(cfg.API, registry.Registration, registry.CallbackURLRegistry, registry.Health, logger)
 	server.SetAllowPrivateCallbackIPs(cfg.Callback.AllowPrivateIPs)
+	server.SetBackend(cfg.Store.Backend)
+
+	var metricsSrv *metrics.Server
+	if cfg.Metrics.Enabled {
+		metricsSrv = metrics.NewServer(cfg.Metrics, logger)
+		if initErr := metricsSrv.Init(nil); initErr != nil {
+			log.Fatal("failed to init metrics server: ", initErr)
+		}
+		if startErr := metricsSrv.Start(ctx); startErr != nil {
+			log.Fatal("failed to start metrics server: ", startErr)
+		}
+		defer func() {
+			if stopErr := metricsSrv.Stop(); stopErr != nil {
+				logger.Error("failed to stop metrics server", "error", stopErr)
+			}
+		}()
+	}
 
 	// /reprocess deps. The DataHub client honors the same SSRF posture as the
 	// block-processor so /reprocess can't be coerced into probing

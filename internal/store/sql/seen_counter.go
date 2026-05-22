@@ -48,7 +48,8 @@ func (s *seenCounter) Increment(txid, subtreeID string) (*storepkg.IncrementResu
 	// Ensure the parent counter row exists (no-op if already there).
 	qIns := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO seen_counters (txid) VALUES (%s)%s",
-		s.d.placeholder(1), s.d.onConflictDoNothing)
+		s.d.placeholder(1), s.d.onConflictDoNothing,
+	)
 	if _, err = tx.ExecContext(ctx, qIns, txid); err != nil {
 		return nil, fmt.Errorf("insert seen_counters: %w", err)
 	}
@@ -56,7 +57,8 @@ func (s *seenCounter) Increment(txid, subtreeID string) (*storepkg.IncrementResu
 	// Idempotent append of subtreeID.
 	qSub := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO seen_counter_subtrees (txid, subtree_id) VALUES (%s, %s)%s",
-		s.d.placeholder(1), s.d.placeholder(2), s.d.onConflictDoNothing)
+		s.d.placeholder(1), s.d.placeholder(2), s.d.onConflictDoNothing,
+	)
 	if _, err = tx.ExecContext(ctx, qSub, txid, subtreeID); err != nil {
 		return nil, fmt.Errorf("insert seen_counter_subtrees: %w", err)
 	}
@@ -99,7 +101,8 @@ func (s *seenCounter) tryFireThreshold(ctx context.Context, tx *sql.Tx, txid str
 			`UPDATE seen_counters
             SET threshold_fired = 1
             WHERE txid = %s AND threshold_fired = 0
-            RETURNING 1`, s.d.placeholder(1))
+            RETURNING 1`, s.d.placeholder(1),
+		)
 		var one int
 		err := tx.QueryRowContext(ctx, q, txid).Scan(&one)
 		if err != nil {
@@ -118,7 +121,8 @@ func (s *seenCounter) tryFireThreshold(ctx context.Context, tx *sql.Tx, txid str
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		`UPDATE seen_counters
         SET threshold_fired = 1
-        WHERE txid = %s AND threshold_fired = 0`, s.d.placeholder(1))
+        WHERE txid = %s AND threshold_fired = 0`, s.d.placeholder(1),
+	)
 	res, err := tx.ExecContext(ctx, q, txid)
 	if err != nil {
 		return false, fmt.Errorf("fire threshold (sqlite): %w", err)

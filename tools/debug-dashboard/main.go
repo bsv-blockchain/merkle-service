@@ -92,7 +92,8 @@ func main() {
 	handler := loggingMiddleware(logger, mux)
 
 	addr := fmt.Sprintf(":%d", *port)
-	logger.Info("starting debug dashboard",
+	logger.Info(
+		"starting debug dashboard",
 		"addr", addr,
 		"merkleAPI", *merkleAPI,
 		"callbackURL", callbackURL,
@@ -116,7 +117,8 @@ func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(sw, r)
-		logger.Debug("request",
+		logger.Debug(
+			"request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", sw.status,

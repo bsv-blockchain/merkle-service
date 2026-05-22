@@ -15,13 +15,22 @@ import (
 
 	"github.com/IBM/sarama"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
+
+// subtreeCount returns the current value of the named outcome counter.
+// Tests assert on deltas against a pre-call snapshot since the underlying
+// Prometheus counter is process-global and accumulates across tests.
+func subtreeCount(outcome string) int64 {
+	return int64(testutil.ToFloat64(metrics.SubtreeMessagesTotal.WithLabelValues(outcome)))
+}
 
 const (
 	testTx1 = "tx1"
@@ -1276,8 +1285,10 @@ func TestHandleTransientFailure_RoutesToDLQAtMaxAttempts(t *testing.T) {
 	cause := errors.New("datahub 404")
 
 	// Simulate retries until MaxAttempts is reached.
+	beforeRetried := subtreeCount(metrics.OutcomeRetried)
+	beforeDLQ := subtreeCount(metrics.OutcomeDLQ)
 	for i := 0; i < maxAttempts; i++ {
-		if err := p.handleTransientFailure(subtreeMsg, "fetch", cause); err != nil {
+		if err := p.handleTransientFailure(subtreeMsg, "fetch", cause, time.Now()); err != nil {
 			t.Fatalf("iteration %d: unexpected error: %v", i, err)
 		}
 	}
@@ -1319,11 +1330,11 @@ func TestHandleTransientFailure_RoutesToDLQAtMaxAttempts(t *testing.T) {
 		t.Errorf("DLQ msg Hash: expected %q, got %q", subtreeMsg.Hash, dlqDecoded.Hash)
 	}
 
-	if got := p.messagesRetried.Load(); got != int64(maxAttempts-1) {
-		t.Errorf("messagesRetried: expected %d, got %d", maxAttempts-1, got)
+	if got := subtreeCount(metrics.OutcomeRetried) - beforeRetried; got != int64(maxAttempts-1) {
+		t.Errorf("retried counter delta: expected %d, got %d", maxAttempts-1, got)
 	}
-	if got := p.messagesDLQ.Load(); got != 1 {
-		t.Errorf("messagesDLQ: expected 1, got %d", got)
+	if got := subtreeCount(metrics.OutcomeDLQ) - beforeDLQ; got != 1 {
+		t.Errorf("dlq counter delta: expected 1, got %d", got)
 	}
 }
 
@@ -1344,7 +1355,7 @@ func TestHandleTransientFailure_DefaultsMaxAttemptsWhenUnset(t *testing.T) {
 	p.Logger = logger
 
 	subtreeMsg := &kafka.SubtreeMessage{Hash: "h"}
-	if err := p.handleTransientFailure(subtreeMsg, "fetch", errors.New("x")); err != nil {
+	if err := p.handleTransientFailure(subtreeMsg, "fetch", errors.New("x"), time.Now()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1622,6 +1633,8 @@ func TestHandleMessage_CallbackPublishFailure_RoutesToRetry(t *testing.T) {
 		t.Fatalf("encode subtree msg: %v", err)
 	}
 
+	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
+	beforeRetried := subtreeCount(metrics.OutcomeRetried)
 	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil error (retry path returns nil after re-publishing), got: %v", err)
 	}
@@ -1634,13 +1647,13 @@ func TestHandleMessage_CallbackPublishFailure_RoutesToRetry(t *testing.T) {
 	if got := len(dlqMock.getMessages()); got != 0 {
 		t.Errorf("expected zero DLQ publishes, got %d", got)
 	}
-	// messagesProcessed must NOT have been incremented — the subtree wasn't
+	// processed counter must NOT have advanced — the subtree wasn't
 	// successfully processed end-to-end.
-	if got := p.messagesProcessed.Load(); got != 0 {
-		t.Errorf("expected messagesProcessed=0 after callback failure, got %d", got)
+	if got := subtreeCount(metrics.OutcomeProcessed) - beforeProcessed; got != 0 {
+		t.Errorf("expected processed delta=0 after callback failure, got %d", got)
 	}
-	if got := p.messagesRetried.Load(); got != 1 {
-		t.Errorf("expected messagesRetried=1 after callback failure, got %d", got)
+	if got := subtreeCount(metrics.OutcomeRetried) - beforeRetried; got != 1 {
+		t.Errorf("expected retried delta=1 after callback failure, got %d", got)
 	}
 }
 
@@ -1753,6 +1766,8 @@ func TestHandleMessage_CachedLookupFailure_RoutesToRetryAndSkipsDedup(t *testing
 		t.Fatalf("encode subtree msg: %v", err)
 	}
 
+	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
+	beforeRetried := subtreeCount(metrics.OutcomeRetried)
 	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil error (retry path returns nil after re-publishing), got: %v", err)
 	}
@@ -1770,11 +1785,11 @@ func TestHandleMessage_CachedLookupFailure_RoutesToRetryAndSkipsDedup(t *testing
 	if got := len(dlqMock.getMessages()); got != 0 {
 		t.Errorf("expected zero DLQ publishes, got %d", got)
 	}
-	if got := p.messagesProcessed.Load(); got != 0 {
-		t.Errorf("expected messagesProcessed=0 after cached-lookup failure, got %d", got)
+	if got := subtreeCount(metrics.OutcomeProcessed) - beforeProcessed; got != 0 {
+		t.Errorf("expected processed delta=0 after cached-lookup failure, got %d", got)
 	}
-	if got := p.messagesRetried.Load(); got != 1 {
-		t.Errorf("expected messagesRetried=1 after cached-lookup failure, got %d", got)
+	if got := subtreeCount(metrics.OutcomeRetried) - beforeRetried; got != 1 {
+		t.Errorf("expected retried delta=1 after cached-lookup failure, got %d", got)
 	}
 	// No callbacks should have been emitted — we never built a complete map.
 	if got := len(cbMock.getMessages()); got != 0 {
@@ -1910,6 +1925,8 @@ func TestHandleMessage_SeenCounterIncrementFailure_RoutesToRetryAndSkipsDedup(t 
 		t.Fatalf("encode subtree msg: %v", err)
 	}
 
+	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
+	beforeRetried := subtreeCount(metrics.OutcomeRetried)
 	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil error (retry path returns nil after re-publishing), got: %v", err)
 	}
@@ -1928,11 +1945,11 @@ func TestHandleMessage_SeenCounterIncrementFailure_RoutesToRetryAndSkipsDedup(t 
 	if got := len(dlqMock.getMessages()); got != 0 {
 		t.Errorf("expected zero DLQ publishes, got %d", got)
 	}
-	if got := p.messagesProcessed.Load(); got != 0 {
-		t.Errorf("expected messagesProcessed=0 after seen-counter failure, got %d", got)
+	if got := subtreeCount(metrics.OutcomeProcessed) - beforeProcessed; got != 0 {
+		t.Errorf("expected processed delta=0 after seen-counter failure, got %d", got)
 	}
-	if got := p.messagesRetried.Load(); got != 1 {
-		t.Errorf("expected messagesRetried=1 after seen-counter failure, got %d", got)
+	if got := subtreeCount(metrics.OutcomeRetried) - beforeRetried; got != 1 {
+		t.Errorf("expected retried delta=1 after seen-counter failure, got %d", got)
 	}
 
 	// Increment was attempted at least once for the registered txid.
@@ -1993,6 +2010,8 @@ func TestHandleMessage_SeenCounterSuccess_UpdatesDedup(t *testing.T) {
 		t.Fatalf("encode subtree msg: %v", err)
 	}
 
+	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
+	beforeRetried := subtreeCount(metrics.OutcomeRetried)
 	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil error on success path, got: %v", err)
 	}
@@ -2007,11 +2026,11 @@ func TestHandleMessage_SeenCounterSuccess_UpdatesDedup(t *testing.T) {
 	if got := len(dlqMock.getMessages()); got != 0 {
 		t.Errorf("expected 0 DLQ publishes on success, got %d", got)
 	}
-	if got := p.messagesProcessed.Load(); got != 1 {
-		t.Errorf("expected messagesProcessed=1 on success, got %d", got)
+	if got := subtreeCount(metrics.OutcomeProcessed) - beforeProcessed; got != 1 {
+		t.Errorf("expected processed delta=1 on success, got %d", got)
 	}
-	if got := p.messagesRetried.Load(); got != 0 {
-		t.Errorf("expected messagesRetried=0 on success, got %d", got)
+	if got := subtreeCount(metrics.OutcomeRetried) - beforeRetried; got != 0 {
+		t.Errorf("expected retried delta=0 on success, got %d", got)
 	}
 	// SEEN_ON_NETWORK should have been published (no SEEN_MULTIPLE_NODES
 	// since mockSeenCounter never fires the threshold).
@@ -2069,6 +2088,8 @@ func TestHandleMessage_SkipsUnhealthyPeer(t *testing.T) {
 		t.Fatalf("encode subtree msg: %v", encErr)
 	}
 
+	beforeSkipped := subtreeCount(metrics.OutcomeSkippedUnhealthy)
+	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
 	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil (ack-and-drop on unhealthy), got: %v", err)
 	}
@@ -2082,11 +2103,11 @@ func TestHandleMessage_SkipsUnhealthyPeer(t *testing.T) {
 	if got := len(cbMock.getMessages()); got != 0 {
 		t.Errorf("expected 0 callback publishes when peer is unhealthy, got %d", got)
 	}
-	if got := p.messagesSkippedUnhealthy.Load(); got != 1 {
-		t.Errorf("expected messagesSkippedUnhealthy=1, got %d", got)
+	if got := subtreeCount(metrics.OutcomeSkippedUnhealthy) - beforeSkipped; got != 1 {
+		t.Errorf("expected skipped_unhealthy delta=1, got %d", got)
 	}
-	if got := p.messagesProcessed.Load(); got != 0 {
-		t.Errorf("expected messagesProcessed=0, got %d", got)
+	if got := subtreeCount(metrics.OutcomeProcessed) - beforeProcessed; got != 0 {
+		t.Errorf("expected processed delta=0, got %d", got)
 	}
 }
 
@@ -2132,6 +2153,8 @@ func TestHandleMessage_NotFoundGoesStraightToDLQ(t *testing.T) {
 		t.Fatalf("encode subtree msg: %v", encErr)
 	}
 
+	beforePermanent := subtreeCount(metrics.OutcomePermanentFailure)
+	beforeRetried := subtreeCount(metrics.OutcomeRetried)
 	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil (permanent → DLQ returns nil), got: %v", err)
 	}
@@ -2155,11 +2178,11 @@ func TestHandleMessage_NotFoundGoesStraightToDLQ(t *testing.T) {
 		t.Errorf("permanent failure must NOT bump AttemptCount; expected 0, got %d",
 			decoded.AttemptCount)
 	}
-	if got := p.messagesDLQ.Load(); got != 1 {
-		t.Errorf("expected messagesDLQ=1, got %d", got)
+	if got := subtreeCount(metrics.OutcomePermanentFailure) - beforePermanent; got != 1 {
+		t.Errorf("expected permanent_failure delta=1, got %d", got)
 	}
-	if got := p.messagesRetried.Load(); got != 0 {
-		t.Errorf("expected messagesRetried=0, got %d", got)
+	if got := subtreeCount(metrics.OutcomeRetried) - beforeRetried; got != 0 {
+		t.Errorf("expected retried delta=0, got %d", got)
 	}
 }
 
@@ -2204,6 +2227,8 @@ func TestHandleMessage_TransientErrorStillRetries(t *testing.T) {
 		t.Fatalf("encode subtree msg: %v", encErr)
 	}
 
+	beforeRetried := subtreeCount(metrics.OutcomeRetried)
+	beforeDLQ := subtreeCount(metrics.OutcomeDLQ)
 	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil (transient → retry returns nil), got: %v", err)
 	}
@@ -2227,10 +2252,10 @@ func TestHandleMessage_TransientErrorStillRetries(t *testing.T) {
 		t.Errorf("transient failure must bump AttemptCount; expected 1, got %d",
 			decoded.AttemptCount)
 	}
-	if got := p.messagesRetried.Load(); got != 1 {
-		t.Errorf("expected messagesRetried=1, got %d", got)
+	if got := subtreeCount(metrics.OutcomeRetried) - beforeRetried; got != 1 {
+		t.Errorf("expected retried delta=1, got %d", got)
 	}
-	if got := p.messagesDLQ.Load(); got != 0 {
-		t.Errorf("expected messagesDLQ=0, got %d", got)
+	if got := subtreeCount(metrics.OutcomeDLQ) - beforeDLQ; got != 0 {
+		t.Errorf("expected dlq delta=0, got %d", got)
 	}
 }

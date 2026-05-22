@@ -228,7 +228,8 @@ func (h *Handlers) handleCallbackReceive(w http.ResponseWriter, r *http.Request)
 	}
 	h.callbackStore.Add(entry)
 
-	h.logger.Info("received callback",
+	h.logger.Info(
+		"received callback",
 		"status", parsed["status"],
 		"txid", parsed["txid"],
 	)

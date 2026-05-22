@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 )
 
 // ttlTable describes a single TTL-bearing parent table, plus any child tables
@@ -98,7 +100,9 @@ func (s *sweeper) waitStopped() {
 
 func (s *sweeper) sweepOnce(ctx context.Context) {
 	for _, t := range ttlTables {
+		start := time.Now()
 		rows, err := s.sweepTable(ctx, t)
+		metrics.ObserveSweep(t.parent, time.Since(start), int(rows))
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Warn("ttl sweeper: delete failed", "table", t.parent, "error", err)
@@ -113,7 +117,9 @@ func (s *sweeper) sweepOnce(ctx context.Context) {
 	// every Add) so it doesn't fit the expires_at-driven ttlTable shape.
 	// Sweep it separately, gated on a positive retention.
 	if s.urlRetention > 0 {
+		start := time.Now()
 		rows, err := s.sweepCallbackURLs(ctx)
+		metrics.ObserveSweep("callback_urls", time.Since(start), int(rows))
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Warn("ttl sweeper: callback_urls delete failed", "error", err)
@@ -121,7 +127,9 @@ func (s *sweeper) sweepOnce(ctx context.Context) {
 		} else if rows > 0 && s.logger != nil {
 			s.logger.Debug("ttl sweeper: expired callback URLs deleted", "rows", rows)
 		}
+		start = time.Now()
 		rows, err = s.sweepDataHubURLs(ctx)
+		metrics.ObserveSweep("datahub_urls", time.Since(start), int(rows))
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Warn("ttl sweeper: datahub_urls delete failed", "error", err)
@@ -138,7 +146,8 @@ func (s *sweeper) sweepDataHubURLs(ctx context.Context) (int64, error) {
 	cutoff := -int(s.urlRetention / time.Second)
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"DELETE FROM datahub_urls WHERE last_seen_at IS NOT NULL AND last_seen_at < %s",
-		s.d.intervalSeconds(cutoff))
+		s.d.intervalSeconds(cutoff),
+	)
 	res, err := s.db.ExecContext(ctx, q)
 	if err != nil {
 		return 0, err
@@ -155,7 +164,8 @@ func (s *sweeper) sweepCallbackURLs(ctx context.Context) (int64, error) {
 	cutoff := -int(s.urlRetention / time.Second)
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"DELETE FROM callback_urls WHERE last_seen_at IS NOT NULL AND last_seen_at < %s",
-		s.d.intervalSeconds(cutoff))
+		s.d.intervalSeconds(cutoff),
+	)
 	res, err := s.db.ExecContext(ctx, q)
 	if err != nil {
 		return 0, err
@@ -215,11 +225,13 @@ func (s *sweeper) sweepTableBatch(ctx context.Context, t ttlTable, batch int) (i
 	if isPostgres(s.d) {
 		selectQ = fmt.Sprintf(
 			"SELECT %s FROM %s WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT %d",
-			t.parentKey, t.parent, batch)
+			t.parentKey, t.parent, batch,
+		)
 	} else {
 		selectQ = fmt.Sprintf(
 			"SELECT %s FROM %s WHERE expires_at IS NOT NULL AND expires_at < %s LIMIT %d",
-			t.parentKey, t.parent, s.d.now, batch)
+			t.parentKey, t.parent, s.d.now, batch,
+		)
 	}
 	rows, err := tx.QueryContext(ctx, selectQ)
 	if err != nil {
@@ -276,11 +288,13 @@ func (s *sweeper) sweepParentByPhysicalRowID(ctx context.Context, table string, 
 	if isPostgres(s.d) {
 		q = fmt.Sprintf(
 			"DELETE FROM %s WHERE ctid IN (SELECT ctid FROM %s WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT %d)",
-			table, table, batch)
+			table, table, batch,
+		)
 	} else {
 		q = fmt.Sprintf(
 			"DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE expires_at IS NOT NULL AND expires_at < %s LIMIT %d)",
-			table, table, s.d.now, batch)
+			table, table, s.d.now, batch,
+		)
 	}
 	res, err := s.db.ExecContext(ctx, q)
 	if err != nil {

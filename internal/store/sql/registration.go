@@ -49,7 +49,8 @@ func (s *registrationStore) Add(txid, callbackURL, callbackToken string) error {
 
 	insertReg := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO registrations (txid) VALUES (%s)%s",
-		s.d.placeholder(1), s.d.onConflictDoNothing)
+		s.d.placeholder(1), s.d.onConflictDoNothing,
+	)
 	if _, err := tx.ExecContext(ctx, insertReg, txid); err != nil {
 		return fmt.Errorf("insert registration: %w", err)
 	}
@@ -70,7 +71,8 @@ func (s *registrationStore) Add(txid, callbackURL, callbackToken string) error {
 		// still refreshed via the ON CONFLICT DO UPDATE in the INSERT below.
 		probeQ := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 			"SELECT 1 FROM registration_urls WHERE txid = %s AND callback_url = %s",
-			s.d.placeholder(1), s.d.placeholder(2))
+			s.d.placeholder(1), s.d.placeholder(2),
+		)
 		var exists int
 		switch err := tx.QueryRowContext(ctx, probeQ, txid, callbackURL).Scan(&exists); err {
 		case nil:
@@ -78,7 +80,8 @@ func (s *registrationStore) Add(txid, callbackURL, callbackToken string) error {
 			// this UPDATE a token rotation would never propagate.
 			updateTokenQ := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 				"UPDATE registration_urls SET callback_token = %s WHERE txid = %s AND callback_url = %s",
-				s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3))
+				s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3),
+			)
 			if _, updateErr := tx.ExecContext(ctx, updateTokenQ, callbackToken, txid, callbackURL); updateErr != nil {
 				return fmt.Errorf("refresh callback token: %w", updateErr)
 			}
@@ -104,7 +107,8 @@ func (s *registrationStore) Add(txid, callbackURL, callbackToken string) error {
 	insertURL := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO registration_urls (txid, callback_url, callback_token) VALUES (%s, %s, %s) "+
 			"ON CONFLICT (txid, callback_url) DO UPDATE SET callback_token = EXCLUDED.callback_token",
-		s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3))
+		s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3),
+	)
 	if _, err := tx.ExecContext(ctx, insertURL, txid, callbackURL, callbackToken); err != nil {
 		return fmt.Errorf("insert registration url: %w", err)
 	}
@@ -116,7 +120,8 @@ func (s *registrationStore) Get(txid string) ([]storepkg.CallbackEntry, error) {
 	defer cancel()
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"SELECT callback_url, callback_token FROM registration_urls WHERE txid = %s ORDER BY callback_url",
-		s.d.placeholder(1))
+		s.d.placeholder(1),
+	)
 	rows, err := s.db.QueryContext(ctx, q, txid)
 	if err != nil {
 		return nil, err
@@ -163,7 +168,8 @@ func (s *registrationStore) BatchGet(txids []string) (map[string][]storepkg.Call
 		}
 		q := fmt.Sprintf(
 			"SELECT txid, callback_url, callback_token FROM registration_urls WHERE txid IN (%s)",
-			strings.Join(placeholders, ", "))
+			strings.Join(placeholders, ", "),
+		)
 		if err := s.batchGetChunk(ctx, q, args, result); err != nil {
 			return nil, err
 		}
@@ -193,7 +199,8 @@ func (s *registrationStore) UpdateTTL(txid string, ttl time.Duration) error {
 	defer cancel()
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"UPDATE registrations SET expires_at = %s WHERE txid = %s",
-		s.d.intervalSeconds(int(ttl.Seconds())), s.d.placeholder(1))
+		s.d.intervalSeconds(int(ttl.Seconds())), s.d.placeholder(1),
+	)
 	_, err := s.db.ExecContext(ctx, q, txid)
 	return err
 }
@@ -221,7 +228,8 @@ func (s *registrationStore) BatchUpdateTTL(txids []string, ttl time.Duration) er
 		}
 		q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 			"UPDATE registrations SET expires_at = %s WHERE txid IN (%s)",
-			intervalExpr, strings.Join(placeholders, ", "))
+			intervalExpr, strings.Join(placeholders, ", "),
+		)
 		if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
 			return err
 		}
