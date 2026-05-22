@@ -130,7 +130,8 @@ func NewAerospikeClientFromConfig(cfg config.AerospikeConfig, logger *slog.Logge
 		socketTimeoutMs: nz(cfg.SocketTimeoutMs, defaultSocketTimeoutMs),
 	}
 
-	logger.Info("aerospike client initialized",
+	logger.Info(
+		"aerospike client initialized",
 		"seeds", seeds,
 		"port", cfg.Port,
 		"connectionQueueSize", policy.ConnectionQueueSize,

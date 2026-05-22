@@ -37,15 +37,15 @@ func main() {
 	var metricsSrv *metrics.Server
 	if cfg.Metrics.Enabled {
 		metricsSrv = metrics.NewServer(cfg.Metrics, logger)
-		if err := metricsSrv.Init(nil); err != nil {
-			log.Fatal("failed to init metrics server: ", err)
+		if initErr := metricsSrv.Init(nil); initErr != nil {
+			log.Fatal("failed to init metrics server: ", initErr)
 		}
-		if err := metricsSrv.Start(ctx); err != nil {
-			log.Fatal("failed to start metrics server: ", err)
+		if startErr := metricsSrv.Start(ctx); startErr != nil {
+			log.Fatal("failed to start metrics server: ", startErr)
 		}
 		defer func() {
-			if err := metricsSrv.Stop(); err != nil {
-				logger.Error("failed to stop metrics server", "error", err)
+			if stopErr := metricsSrv.Stop(); stopErr != nil {
+				logger.Error("failed to stop metrics server", "error", stopErr)
 			}
 		}()
 	}

@@ -163,7 +163,8 @@ func applyMigration(ctx context.Context, db *sql.DB, d *dialect, m migration) er
 	}
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO schema_migrations (version, applied_at) VALUES (%s, %s)",
-		d.placeholder(1), d.now)
+		d.placeholder(1), d.now,
+	)
 	if _, err := tx.ExecContext(ctx, q, m.version); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("record migration: %w", err)

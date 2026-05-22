@@ -13,7 +13,7 @@ var (
 			Help:    "Duration of STUMP build operations.",
 			Buckets: BumpBuckets,
 		},
-		[]string{"outcome"},
+		[]string{labelOutcome},
 	)
 
 	bumpEncodeDuration = prometheus.NewHistogram(

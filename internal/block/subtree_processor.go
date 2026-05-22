@@ -83,7 +83,8 @@ func ProcessBlockSubtree(
 	// 6.2: Retrieve subtree data from blob store, falling back to DataHub.
 	rawData, err := subtreeStore.GetSubtree(subtreeHash)
 	if err != nil || rawData == nil {
-		logger.Debug("subtree not in blob store, fetching from DataHub",
+		logger.Debug(
+			"subtree not in blob store, fetching from DataHub",
 			"subtreeHash", subtreeHash,
 			"blockHash", blockHash,
 		)
@@ -227,7 +228,8 @@ func ProcessBlockSubtree(
 		}
 	}
 
-	logger.Info("processed block subtree",
+	logger.Info(
+		"processed block subtree",
 		"subtreeHash", subtreeHash,
 		"blockHash", blockHash,
 		"registeredTxids", len(registrations),

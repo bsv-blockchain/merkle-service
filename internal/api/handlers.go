@@ -97,7 +97,8 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		default:
 			msg = "invalid callbackUrl: must be a valid HTTP/HTTPS URL with a public host"
 		}
-		s.Logger.Warn("rejected callback URL registration",
+		s.Logger.Warn(
+			"rejected callback URL registration",
 			"reason", err.Error(),
 			"txid", req.TxID,
 		)
@@ -271,7 +272,8 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 		default:
 			msg = "invalid callbackUrl: must be a valid HTTP/HTTPS URL with a public host"
 		}
-		s.Logger.Warn("rejected reprocess callback URL",
+		s.Logger.Warn(
+			"rejected reprocess callback URL",
 			"reason", err.Error(),
 			"blockHash", req.BlockHash,
 		)
@@ -298,7 +300,8 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 
 	resolvedURL, height, subtreeHashes, status, probeErr := s.probeDataHubsForBlock(r.Context(), candidates, fallbackCount, req.BlockHash)
 	if probeErr != nil {
-		s.Logger.Warn("reprocess: no DataHub served block",
+		s.Logger.Warn(
+			"reprocess: no DataHub served block",
 			"blockHash", req.BlockHash,
 			"candidates", len(candidates),
 			"status", status,
@@ -346,7 +349,8 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.Logger.Info("reprocess enqueued",
+	s.Logger.Info(
+		"reprocess enqueued",
 		"blockHash", req.BlockHash,
 		"dataHubUrl", resolvedURL,
 		"callbackUrl", req.CallbackURL,
@@ -394,7 +398,8 @@ func (s *Server) clearReprocessDedup(blockHash, callbackURL string, subtreeHashe
 	cleared := 0
 	for _, e := range entries {
 		if err := s.dedupStore.Delete(e.key, callbackURL, e.typeName); err != nil {
-			s.Logger.Warn("reprocess: failed to clear callback dedup entry",
+			s.Logger.Warn(
+				"reprocess: failed to clear callback dedup entry",
 				"blockHash", blockHash,
 				"callbackUrl", callbackURL,
 				"type", e.typeName,
@@ -406,7 +411,8 @@ func (s *Server) clearReprocessDedup(blockHash, callbackURL string, subtreeHashe
 		cleared++
 	}
 
-	s.Logger.Info("reprocess: cleared callback dedup entries",
+	s.Logger.Info(
+		"reprocess: cleared callback dedup entries",
 		"blockHash", blockHash,
 		"callbackUrl", callbackURL,
 		"clearedCount", cleared,
@@ -500,7 +506,8 @@ func (s *Server) probeDataHubsForBlock(parentCtx context.Context, candidates []s
 		if !errors.Is(ferr, datahub.ErrNotFound) {
 			allNotFound = false
 		}
-		s.Logger.Debug("reprocess probe failed",
+		s.Logger.Debug(
+			"reprocess probe failed",
 			"dataHubUrl", url,
 			"blockHash", blockHash,
 			"notFound", errors.Is(ferr, datahub.ErrNotFound),

@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -25,7 +26,8 @@ func TestServer_ServesMetrics(t *testing.T) {
 	if err := srv.Init(nil); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if err := srv.Start(nil); err != nil { //nolint:staticcheck // Start ignores ctx
+	//nolint:staticcheck // Start ignores its ctx arg; test driver passes nil
+	if err := srv.Start(nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() {
@@ -66,7 +68,8 @@ func TestServer_DisabledIsNoop(t *testing.T) {
 	if err := srv.Init(nil); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if err := srv.Start(nil); err != nil { //nolint:staticcheck
+	//nolint:staticcheck // Start ignores its ctx arg; test driver passes nil
+	if err := srv.Start(nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := srv.Stop(); err != nil {
@@ -79,7 +82,8 @@ func TestServer_DisabledIsNoop(t *testing.T) {
 
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -95,7 +99,11 @@ func mustGetWithRetry(t *testing.T, url string, total time.Duration) string {
 	deadline := time.Now().Add(total)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url) //nolint:gosec,noctx // test client, hits localhost only
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
 			defer func() { _ = resp.Body.Close() }()
 			b, rerr := io.ReadAll(resp.Body)

@@ -331,7 +331,8 @@ func (c *Client) recordPeerOutcome(dataHubURL string, err error) {
 // distinguish SSRF rejection from transport failures.
 func (c *Client) validateDataHubURL(rawURL string) error {
 	if err := ssrfguard.ValidateURL(rawURL, c.allowPrivateIPs, nil); err != nil {
-		c.logger.Warn("rejecting DataHub URL by SSRF policy",
+		c.logger.Warn(
+			"rejecting DataHub URL by SSRF policy",
 			"url", rawURL,
 			"allowPrivateIPs", c.allowPrivateIPs,
 			"error", err,
@@ -402,7 +403,8 @@ func (c *Client) doGetWithRetry(ctx context.Context, url string, maxBytes int64)
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			lastErr = err
-			c.logger.Warn("DataHub request failed, retrying",
+			c.logger.Warn(
+				"DataHub request failed, retrying",
 				"url", url,
 				"attempt", attempt+1,
 				"error", err,
@@ -418,7 +420,8 @@ func (c *Client) doGetWithRetry(ctx context.Context, url string, maxBytes int64)
 			_, _ = io.CopyN(io.Discard, resp.Body, 1024)
 			_ = resp.Body.Close()
 			lastErr = fmt.Errorf("response Content-Length %d exceeds cap of %d bytes", resp.ContentLength, maxBytes)
-			c.logger.Warn("DataHub returned oversize Content-Length, retrying",
+			c.logger.Warn(
+				"DataHub returned oversize Content-Length, retrying",
 				"url", url,
 				"contentLength", resp.ContentLength,
 				"cap", maxBytes,
@@ -449,7 +452,8 @@ func (c *Client) doGetWithRetry(ctx context.Context, url string, maxBytes int64)
 			// Truncate the error body so a hostile server can't bloat our log
 			// lines either; readCapped already bounded it to maxBytes.
 			lastErr = fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, url, string(body))
-			c.logger.Warn("DataHub returned error, retrying",
+			c.logger.Warn(
+				"DataHub returned error, retrying",
 				"url", url,
 				"status", resp.StatusCode,
 				"attempt", attempt+1,
@@ -459,7 +463,8 @@ func (c *Client) doGetWithRetry(ctx context.Context, url string, maxBytes int64)
 
 		if readErr != nil {
 			lastErr = readErr
-			c.logger.Warn("DataHub response body read failed, retrying",
+			c.logger.Warn(
+				"DataHub response body read failed, retrying",
 				"url", url,
 				"attempt", attempt+1,
 				"error", readErr,

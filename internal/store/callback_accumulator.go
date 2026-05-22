@@ -58,7 +58,8 @@ func (s *aerospikeCallbackAccumulator) Append(blockHash, callbackURL string, txi
 	wp.RecordExistsAction = as.UPDATE
 	wp.Expiration = uint32(s.ttlSec) //nolint:gosec // ttlSec is config-validated and fits uint32
 
-	_, err = s.client.Client().Operate(wp, key,
+	_, err = s.client.Client().Operate(
+		wp, key,
 		as.ListAppendOp(accumEntriesBin, entry),
 	)
 	if err != nil {
@@ -90,7 +91,8 @@ func (s *aerospikeCallbackAccumulator) ReadAndDelete(blockHash string) (map[stri
 	wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
 	wp.RecordExistsAction = as.UPDATE_ONLY
 
-	record, err := s.client.Client().Operate(wp, key,
+	record, err := s.client.Client().Operate(
+		wp, key,
 		as.ListPopRangeFromOp(accumEntriesBin, 0),
 	)
 	if err != nil {

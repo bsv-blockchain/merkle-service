@@ -46,7 +46,8 @@ func (r *callbackURLRegistry) Add(callbackURL, callbackToken string) error {
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO callback_urls (callback_url, last_seen_at, callback_token) VALUES (%s, %s, %s) "+
 			"ON CONFLICT (callback_url) DO UPDATE SET last_seen_at = %s, callback_token = EXCLUDED.callback_token",
-		r.d.placeholder(1), r.d.now, r.d.placeholder(2), r.d.now)
+		r.d.placeholder(1), r.d.now, r.d.placeholder(2), r.d.now,
+	)
 	_, err := r.db.ExecContext(ctx, q, callbackURL, callbackToken)
 	return err
 }
@@ -63,7 +64,8 @@ func (r *callbackURLRegistry) GetAll() ([]storepkg.CallbackEntry, error) {
 		"SELECT callback_url, callback_token FROM callback_urls "+
 			"WHERE last_seen_at IS NULL OR last_seen_at >= %s "+
 			"ORDER BY callback_url",
-		r.d.intervalSeconds(cutoff))
+		r.d.intervalSeconds(cutoff),
+	)
 
 	rows, err := r.db.QueryContext(ctx, q)
 	if err != nil {

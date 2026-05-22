@@ -146,7 +146,8 @@ func (s *sweeper) sweepDataHubURLs(ctx context.Context) (int64, error) {
 	cutoff := -int(s.urlRetention / time.Second)
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"DELETE FROM datahub_urls WHERE last_seen_at IS NOT NULL AND last_seen_at < %s",
-		s.d.intervalSeconds(cutoff))
+		s.d.intervalSeconds(cutoff),
+	)
 	res, err := s.db.ExecContext(ctx, q)
 	if err != nil {
 		return 0, err
@@ -163,7 +164,8 @@ func (s *sweeper) sweepCallbackURLs(ctx context.Context) (int64, error) {
 	cutoff := -int(s.urlRetention / time.Second)
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"DELETE FROM callback_urls WHERE last_seen_at IS NOT NULL AND last_seen_at < %s",
-		s.d.intervalSeconds(cutoff))
+		s.d.intervalSeconds(cutoff),
+	)
 	res, err := s.db.ExecContext(ctx, q)
 	if err != nil {
 		return 0, err
@@ -223,11 +225,13 @@ func (s *sweeper) sweepTableBatch(ctx context.Context, t ttlTable, batch int) (i
 	if isPostgres(s.d) {
 		selectQ = fmt.Sprintf(
 			"SELECT %s FROM %s WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT %d",
-			t.parentKey, t.parent, batch)
+			t.parentKey, t.parent, batch,
+		)
 	} else {
 		selectQ = fmt.Sprintf(
 			"SELECT %s FROM %s WHERE expires_at IS NOT NULL AND expires_at < %s LIMIT %d",
-			t.parentKey, t.parent, s.d.now, batch)
+			t.parentKey, t.parent, s.d.now, batch,
+		)
 	}
 	rows, err := tx.QueryContext(ctx, selectQ)
 	if err != nil {
@@ -284,11 +288,13 @@ func (s *sweeper) sweepParentByPhysicalRowID(ctx context.Context, table string, 
 	if isPostgres(s.d) {
 		q = fmt.Sprintf(
 			"DELETE FROM %s WHERE ctid IN (SELECT ctid FROM %s WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT %d)",
-			table, table, batch)
+			table, table, batch,
+		)
 	} else {
 		q = fmt.Sprintf(
 			"DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE expires_at IS NOT NULL AND expires_at < %s LIMIT %d)",
-			table, table, s.d.now, batch)
+			table, table, s.d.now, batch,
+		)
 	}
 	res, err := s.db.ExecContext(ctx, q)
 	if err != nil {

@@ -11,31 +11,51 @@ import (
 // Outcome label constants. Use these everywhere the `outcome` label is set
 // so the values stay a bounded enum and don't drift across packages.
 const (
-	OutcomeSuccess           = "success"
-	OutcomeError             = "error"
-	OutcomeTimeout           = "timeout"
-	OutcomeNotFound          = "not_found"
-	OutcomeDLQ               = "dlq"
-	OutcomeRetry             = "retry"
-	OutcomeRetried           = "retried"
-	OutcomeProcessed         = "processed"
-	OutcomeSkippedUnhealthy  = "skipped_unhealthy"
-	OutcomeDecodeError       = "decode_error"
-	OutcomePermanentFailure  = "permanent_failure"
-	OutcomeDelivered         = "delivered"
-	OutcomeDedupHit          = "dedup_hit"
-	OutcomeRetryScheduled    = "retry_scheduled"
-	OutcomeStumpNotFound     = "stump_not_found"
-	OutcomePermanent4xx      = "permanent_4xx"
-	OutcomeHit               = "hit"
-	OutcomeMiss              = "miss"
-	OutcomeEmpty             = "empty"
-	OutcomeHandlerError      = "handler_error"
+	OutcomeSuccess          = "success"
+	OutcomeError            = "error"
+	OutcomeTimeout          = "timeout"
+	OutcomeNotFound         = "not_found"
+	OutcomeDLQ              = "dlq"
+	OutcomeRetry            = "retry"
+	OutcomeRetried          = "retried"
+	OutcomeProcessed        = "processed"
+	OutcomeSkippedUnhealthy = "skipped_unhealthy"
+	OutcomeDecodeError      = "decode_error"
+	OutcomePermanentFailure = "permanent_failure"
+	OutcomeDelivered        = "delivered"
+	OutcomeDedupHit         = "dedup_hit"
+	OutcomeRetryScheduled   = "retry_scheduled"
+	OutcomeStumpNotFound    = "stump_not_found"
+	OutcomePermanent4xx     = "permanent_4xx"
+	OutcomeHit              = "hit"
+	OutcomeMiss             = "miss"
+	OutcomeEmpty            = "empty"
+	OutcomeHandlerError     = "handler_error"
 )
 
 // Unknown is the fallback label value when an input cannot be classified
 // without risking unbounded cardinality.
 const Unknown = "unknown"
+
+// Label name constants. Used as the second argument to NewCounterVec /
+// NewHistogramVec / NewGaugeVec so the spelling stays consistent and the
+// goconst linter doesn't flag repeated string literals.
+const (
+	labelOutcome      = "outcome"
+	labelBackend      = "backend"
+	labelStore        = "store"
+	labelOp           = "op"
+	labelTopic        = "topic"
+	labelGroup        = "group"
+	labelCallbackHost = "callback_host"
+	labelPeerHost     = "peer_host"
+	labelKind         = "kind"
+	labelDirection    = "direction"
+	labelStatusClass  = "status_class"
+	labelRoute        = "route"
+	labelMethod       = "method"
+	labelStatus       = "status"
+)
 
 // maxHostLen caps the host label length defensively. A label value longer
 // than the DNS limit cannot be a real hostname; refusing it keeps a single

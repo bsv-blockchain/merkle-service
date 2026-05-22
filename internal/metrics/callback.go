@@ -12,7 +12,7 @@ var (
 			Name: "merkle_callback_messages_total",
 			Help: "Callback delivery messages classified by outcome.",
 		},
-		[]string{"outcome"},
+		[]string{labelOutcome},
 	)
 
 	callbackDeliveryDuration = prometheus.NewHistogramVec(
@@ -21,7 +21,7 @@ var (
 			Help:    "HTTP POST duration for callback deliveries, by callback host and status class.",
 			Buckets: HTTPBuckets,
 		},
-		[]string{"callback_host", "status_class"},
+		[]string{labelCallbackHost, labelStatusClass},
 	)
 
 	callbackPayloadSize = prometheus.NewHistogramVec(
@@ -30,7 +30,7 @@ var (
 			Help:    "Size of the JSON body POSTed to a callback URL.",
 			Buckets: MsgSizeBuckets,
 		},
-		[]string{"callback_host"},
+		[]string{labelCallbackHost},
 	)
 
 	callbackRetryAttempt = prometheus.NewHistogram(
@@ -47,7 +47,7 @@ var (
 			Help:    "Duration of the dedup Exists check.",
 			Buckets: DBBuckets,
 		},
-		[]string{"outcome"},
+		[]string{labelOutcome},
 	)
 
 	callbackDedupRecordDuration = prometheus.NewHistogramVec(
@@ -56,7 +56,7 @@ var (
 			Help:    "Duration of the dedup Record write after a successful delivery.",
 			Buckets: DBBuckets,
 		},
-		[]string{"outcome"},
+		[]string{labelOutcome},
 	)
 
 	callbackStumpFetchDuration = prometheus.NewHistogramVec(
@@ -65,7 +65,7 @@ var (
 			Help:    "Duration of STUMP blob fetches from the claim-check store.",
 			Buckets: DBBuckets,
 		},
-		[]string{"outcome"},
+		[]string{labelOutcome},
 	)
 )
 
@@ -85,7 +85,7 @@ func init() {
 // a callback delivery, plus the request payload size. Pass the raw status
 // code from the HTTP response (or 0 with err non-nil for transport
 // failures).
-func ObserveCallbackDelivery(callbackURL string, statusCode int, payloadSize int, d time.Duration, err error) {
+func ObserveCallbackDelivery(callbackURL string, statusCode, payloadSize int, d time.Duration, err error) {
 	host := HostLabel(callbackURL)
 	statusClass := StatusClass(statusCode, err)
 	callbackDeliveryDuration.WithLabelValues(host, statusClass).Observe(d.Seconds())

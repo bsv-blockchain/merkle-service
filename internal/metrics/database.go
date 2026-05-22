@@ -56,7 +56,7 @@ var (
 			Help:    "Database operation duration in seconds.",
 			Buckets: DBBuckets,
 		},
-		[]string{"backend", "store", "op", "outcome"},
+		[]string{labelBackend, labelStore, labelOp, labelOutcome},
 	)
 
 	dbOpTotal = prometheus.NewCounterVec(
@@ -64,7 +64,7 @@ var (
 			Name: "merkle_db_operations_total",
 			Help: "Total database operations.",
 		},
-		[]string{"backend", "store", "op", "outcome"},
+		[]string{labelBackend, labelStore, labelOp, labelOutcome},
 	)
 
 	dbBatchSize = prometheus.NewHistogramVec(
@@ -73,7 +73,7 @@ var (
 			Help:    "Number of keys per batch database operation.",
 			Buckets: CountBuckets,
 		},
-		[]string{"store", "op"},
+		[]string{labelStore, labelOp},
 	)
 
 	dbSQLPoolOpen = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -107,7 +107,7 @@ var (
 			Help:    "TTL sweeper run duration in seconds.",
 			Buckets: DBBuckets,
 		},
-		[]string{"store"},
+		[]string{labelStore},
 	)
 
 	dbSweeperRowsDeleted = prometheus.NewCounterVec(
@@ -115,7 +115,7 @@ var (
 			Name: "merkle_db_sweeper_rows_deleted_total",
 			Help: "Rows deleted by the TTL sweeper.",
 		},
-		[]string{"store"},
+		[]string{labelStore},
 	)
 )
 

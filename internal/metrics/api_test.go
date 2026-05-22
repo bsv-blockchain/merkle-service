@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -8,6 +9,19 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
+
+func mustGet(t *testing.T, url string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	_ = resp.Body.Close()
+}
 
 // TestChiMiddleware_RoutePatternLabel asserts the chi route-pattern path is
 // used for the route label, NOT the raw request URL. This is the load-bearing
@@ -31,17 +45,9 @@ func TestChiMiddleware_RoutePatternLabel(t *testing.T) {
 		"/api/lookup/aaaa000000000000000000000000000000000000000000000000000000000002",
 		"/api/lookup/aaaa000000000000000000000000000000000000000000000000000000000003",
 	} {
-		resp, err := http.Get(srv.URL + p) //nolint:gosec,noctx
-		if err != nil {
-			t.Fatalf("GET %s: %v", p, err)
-		}
-		_ = resp.Body.Close()
+		mustGet(t, srv.URL+p)
 	}
-	resp, err := http.Get(srv.URL + "/health") //nolint:gosec,noctx
-	if err != nil {
-		t.Fatalf("GET /health: %v", err)
-	}
-	_ = resp.Body.Close()
+	mustGet(t, srv.URL+"/health")
 
 	if got := testutil.ToFloat64(httpRequestsTotal.WithLabelValues("/api/lookup/{txid}", "GET", "2xx")); got != 3 {
 		t.Errorf("expected 3 hits on /api/lookup/{txid}, got %v", got)
@@ -51,11 +57,7 @@ func TestChiMiddleware_RoutePatternLabel(t *testing.T) {
 	}
 
 	// 404 path → "unmatched" route label so probes can't blow up cardinality.
-	resp, err = http.Get(srv.URL + "/does-not-exist") //nolint:gosec,noctx
-	if err != nil {
-		t.Fatalf("GET 404: %v", err)
-	}
-	_ = resp.Body.Close()
+	mustGet(t, srv.URL+"/does-not-exist")
 	if got := testutil.ToFloat64(httpRequestsTotal.WithLabelValues("unmatched", "GET", "4xx")); got != 1 {
 		t.Errorf("expected 1 hit on unmatched route, got %v", got)
 	}

@@ -213,7 +213,8 @@ func (h *consumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession,
 			metrics.ObserveKafkaHandle(msg.Topic, outcome, time.Since(start))
 			if err != nil {
 				metrics.IncKafkaConsumerError(msg.Topic, metrics.KafkaErrorHandler)
-				h.logger.Error("failed to handle message, stopping claim to preserve offset",
+				h.logger.Error(
+					"failed to handle message, stopping claim to preserve offset",
 					"topic", msg.Topic,
 					"partition", msg.Partition,
 					"offset", msg.Offset,

@@ -14,10 +14,10 @@ const (
 
 // Kafka error kind labels.
 const (
-	KafkaErrorDecode       = "decode"
-	KafkaErrorHandler      = "handler_error"
-	KafkaErrorRebalance    = "rebalance"
-	KafkaErrorBroker       = "broker"
+	KafkaErrorDecode    = "decode"
+	KafkaErrorHandler   = "handler_error"
+	KafkaErrorRebalance = "rebalance"
+	KafkaErrorBroker    = "broker"
 )
 
 var (
@@ -26,7 +26,7 @@ var (
 			Name: "merkle_kafka_messages_produced_total",
 			Help: "Messages produced to Kafka, by topic and outcome.",
 		},
-		[]string{"topic", "outcome"},
+		[]string{labelTopic, labelOutcome},
 	)
 
 	kafkaProduceDuration = prometheus.NewHistogramVec(
@@ -35,7 +35,7 @@ var (
 			Help:    "Producer SendMessage duration by topic and outcome.",
 			Buckets: DBBuckets,
 		},
-		[]string{"topic", "outcome"},
+		[]string{labelTopic, labelOutcome},
 	)
 
 	kafkaProducedMessageSize = prometheus.NewHistogramVec(
@@ -44,7 +44,7 @@ var (
 			Help:    "Size of produced Kafka messages by topic.",
 			Buckets: MsgSizeBuckets,
 		},
-		[]string{"topic"},
+		[]string{labelTopic},
 	)
 
 	kafkaMessagesConsumed = prometheus.NewCounterVec(
@@ -52,7 +52,7 @@ var (
 			Name: "merkle_kafka_messages_consumed_total",
 			Help: "Messages consumed from Kafka, by topic and consumer group.",
 		},
-		[]string{"topic", "group"},
+		[]string{labelTopic, labelGroup},
 	)
 
 	kafkaConsumeHandleDuration = prometheus.NewHistogramVec(
@@ -61,7 +61,7 @@ var (
 			Help:    "Duration of consumer message handler by topic and outcome.",
 			Buckets: DataHubBuckets,
 		},
-		[]string{"topic", "outcome"},
+		[]string{labelTopic, labelOutcome},
 	)
 
 	kafkaConsumerErrors = prometheus.NewCounterVec(
@@ -69,7 +69,7 @@ var (
 			Name: "merkle_kafka_consumer_errors_total",
 			Help: "Consumer-side error events by topic and error kind.",
 		},
-		[]string{"topic", "kind"},
+		[]string{labelTopic, labelKind},
 	)
 
 	kafkaMessageSize = prometheus.NewHistogramVec(
@@ -78,7 +78,7 @@ var (
 			Help:    "Kafka message payload size by topic and direction.",
 			Buckets: MsgSizeBuckets,
 		},
-		[]string{"topic", "direction"},
+		[]string{labelTopic, labelDirection},
 	)
 
 	kafkaInFlightMessages = prometheus.NewGaugeVec(
@@ -86,7 +86,7 @@ var (
 			Name: "merkle_kafka_in_flight_messages",
 			Help: "Messages currently being handled per topic + group.",
 		},
-		[]string{"topic", "group"},
+		[]string{labelTopic, labelGroup},
 	)
 )
 

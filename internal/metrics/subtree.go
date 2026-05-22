@@ -18,7 +18,7 @@ var (
 			Name: "merkle_subtree_messages_total",
 			Help: "Subtree messages handled by the subtree-fetcher, classified by outcome.",
 		},
-		[]string{"outcome"},
+		[]string{labelOutcome},
 	)
 
 	subtreeProcessingDuration = prometheus.NewHistogramVec(
@@ -27,7 +27,7 @@ var (
 			Help:    "End-to-end handleMessage duration for the subtree-fetcher.",
 			Buckets: DataHubBuckets,
 		},
-		[]string{"outcome"},
+		[]string{labelOutcome},
 	)
 
 	subtreeDataHubFetchDuration = prometheus.NewHistogramVec(
@@ -36,7 +36,7 @@ var (
 			Help:    "Duration of DataHub subtree fetch operations.",
 			Buckets: DataHubBuckets,
 		},
-		[]string{"peer_host", "outcome"},
+		[]string{labelPeerHost, labelOutcome},
 	)
 
 	subtreeDataHubFetchBytes = prometheus.NewHistogramVec(
@@ -45,7 +45,7 @@ var (
 			Help:    "Size of subtree payload fetched from DataHub.",
 			Buckets: MsgSizeBuckets,
 		},
-		[]string{"peer_host"},
+		[]string{labelPeerHost},
 	)
 
 	subtreeTxidCount = prometheus.NewHistogram(
@@ -70,7 +70,7 @@ var (
 			Help:    "Duration of SEEN callback encode+publish per (callback_host, kind).",
 			Buckets: DBBuckets,
 		},
-		[]string{"callback_host", "kind"},
+		[]string{labelCallbackHost, labelKind},
 	)
 
 	subtreeAttemptCount = prometheus.NewHistogram(

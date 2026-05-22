@@ -29,7 +29,8 @@ func (s *subtreeCounter) Init(blockHash string, count int) error {
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		`INSERT INTO subtree_counters (block_hash, remaining, expires_at) VALUES (%s, %s, %s)
         ON CONFLICT (block_hash) DO UPDATE SET remaining = EXCLUDED.remaining, expires_at = EXCLUDED.expires_at`,
-		s.d.placeholder(1), s.d.placeholder(2), s.d.intervalSeconds(s.ttlSec))
+		s.d.placeholder(1), s.d.placeholder(2), s.d.intervalSeconds(s.ttlSec),
+	)
 	_, err := s.db.ExecContext(ctx, q, blockHash, count)
 	return err
 }
@@ -76,7 +77,8 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	if isPostgres(s.d) {
 		q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 			"UPDATE subtree_counters SET remaining = remaining - 1 WHERE block_hash = %s RETURNING remaining",
-			s.d.placeholder(1))
+			s.d.placeholder(1),
+		)
 		var remaining int
 		if err := s.db.QueryRowContext(ctx, q, blockHash).Scan(&remaining); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -118,7 +120,8 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	remaining--
 	qUp := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"UPDATE subtree_counters SET remaining = %s WHERE block_hash = %s",
-		s.d.placeholder(1), s.d.placeholder(2))
+		s.d.placeholder(1), s.d.placeholder(2),
+	)
 	if _, err := conn.ExecContext(ctx, qUp, remaining, blockHash); err != nil {
 		return 0, err
 	}

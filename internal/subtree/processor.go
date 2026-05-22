@@ -162,7 +162,8 @@ func (p *Processor) Init(_ interface{}) error {
 	}
 	p.consumer = consumer
 
-	p.Logger.Info("subtree-fetcher initialized",
+	p.Logger.Info(
+		"subtree-fetcher initialized",
 		"storageMode", p.cfg.Subtree.StorageMode,
 		"subtreeTopic", p.cfg.Kafka.SubtreeTopic,
 		"subtreeDLQTopic", p.cfg.Kafka.SubtreeDLQTopic,
@@ -229,7 +230,8 @@ func (p *Processor) Stop() error {
 
 	p.SetStarted(false)
 	p.Cancel()
-	p.Logger.Info("subtree-fetcher stopped",
+	p.Logger.Info(
+		"subtree-fetcher stopped",
 		"messagesProcessed", int64(testutil.ToFloat64(metrics.SubtreeMessagesTotal.WithLabelValues(metrics.OutcomeProcessed))),
 		"messagesRetried", int64(testutil.ToFloat64(metrics.SubtreeMessagesTotal.WithLabelValues(metrics.OutcomeRetried))),
 		"messagesDLQ", int64(testutil.ToFloat64(metrics.SubtreeMessagesTotal.WithLabelValues(metrics.OutcomeDLQ))),
@@ -281,7 +283,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 		// re-driving — drop the offset by returning nil after logging. A
 		// decode failure is not DLQ-able because we don't have a structured
 		// message to wrap.
-		p.Logger.Error("failed to decode subtree message, dropping",
+		p.Logger.Error(
+			"failed to decode subtree message, dropping",
 			"offset", msg.Offset,
 			"partition", msg.Partition,
 			"error", err,
@@ -291,7 +294,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 		return nil
 	}
 
-	p.Logger.Debug("processing subtree announcement",
+	p.Logger.Debug(
+		"processing subtree announcement",
 		"hash", subtreeMsg.Hash,
 		"dataHubUrl", subtreeMsg.DataHubURL,
 		"attemptCount", subtreeMsg.AttemptCount,
@@ -311,7 +315,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	// dead peer from generating a steady stream of retries and DLQ
 	// entries on every announcement.
 	if ph := p.dataHubClient.PeerHealth(); ph != nil && !ph.IsHealthy(subtreeMsg.DataHubURL) {
-		p.Logger.Debug("skipping subtree fetch: peer marked unhealthy",
+		p.Logger.Debug(
+			"skipping subtree fetch: peer marked unhealthy",
 			"hash", subtreeMsg.Hash,
 			"dataHubUrl", subtreeMsg.DataHubURL,
 		)
@@ -403,7 +408,8 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 	}
 
 	if nextAttempt >= maxAttempts {
-		p.Logger.Error("subtree message exceeded max attempts, routing to DLQ",
+		p.Logger.Error(
+			"subtree message exceeded max attempts, routing to DLQ",
 			"hash", subtreeMsg.Hash,
 			"stage", stage,
 			"attemptCount", subtreeMsg.AttemptCount,
@@ -418,7 +424,8 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 		return nil
 	}
 
-	p.Logger.Warn("subtree message transient failure, re-publishing for retry",
+	p.Logger.Warn(
+		"subtree message transient failure, re-publishing for retry",
 		"hash", subtreeMsg.Hash,
 		"stage", stage,
 		"attemptCount", subtreeMsg.AttemptCount,
@@ -446,7 +453,8 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 // Returns nil on successful hand-off so the consumer acks the original
 // offset.
 func (p *Processor) handlePermanentFailure(subtreeMsg *kafka.SubtreeMessage, stage string, cause error, start time.Time) error {
-	p.Logger.Warn("subtree message permanent failure, routing to DLQ",
+	p.Logger.Warn(
+		"subtree message permanent failure, routing to DLQ",
 		"hash", subtreeMsg.Hash,
 		"stage", stage,
 		"dataHubUrl", subtreeMsg.DataHubURL,

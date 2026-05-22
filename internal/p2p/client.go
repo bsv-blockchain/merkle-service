@@ -124,7 +124,8 @@ func (c *Client) Init(_ interface{}) error {
 		return fmt.Errorf("block kafka producer is required")
 	}
 
-	c.Logger.Info("p2p client initialized",
+	c.Logger.Info(
+		"p2p client initialized",
 		"network", c.cfg.Network,
 		"storagePath", c.cfg.StoragePath,
 	)
@@ -162,7 +163,8 @@ func (c *Client) Start(ctx context.Context) error {
 	}
 	c.p2pClient = client
 
-	c.Logger.Info("p2p client created",
+	c.Logger.Info(
+		"p2p client created",
 		"peerID", client.GetID(),
 		"network", client.GetNetwork(),
 		"dhtMode", c.cfg.MsgBus.DHTMode,
@@ -378,7 +380,8 @@ func (c *Client) handleNodeStatusMessage(msg teranode.NodeStatusMessage) {
 
 	raw := pickDataHubURL(msg)
 	if raw == "" {
-		c.Logger.Debug("node_status has no datahub url",
+		c.Logger.Debug(
+			"node_status has no datahub url",
 			"peerID", msg.PeerID,
 			"clientName", msg.ClientName,
 		)
@@ -386,7 +389,8 @@ func (c *Client) handleNodeStatusMessage(msg teranode.NodeStatusMessage) {
 	}
 
 	if err := ssrfguard.ValidateURL(raw, c.allowPrivateIPs, nil); err != nil {
-		c.Logger.Warn("rejected discovered datahub url",
+		c.Logger.Warn(
+			"rejected discovered datahub url",
 			"peerID", msg.PeerID,
 			"url", raw,
 			"error", err,
@@ -402,7 +406,8 @@ func (c *Client) handleNodeStatusMessage(msg teranode.NodeStatusMessage) {
 		return
 	}
 	if err := c.dataHubRegistry.Add(normalized); err != nil {
-		c.Logger.Warn("failed to record discovered datahub url in registry",
+		c.Logger.Warn(
+			"failed to record discovered datahub url in registry",
 			"peerID", msg.PeerID,
 			"url", normalized,
 			"error", err,
@@ -410,7 +415,8 @@ func (c *Client) handleNodeStatusMessage(msg teranode.NodeStatusMessage) {
 		return
 	}
 
-	c.Logger.Debug("registered peer datahub url from node_status",
+	c.Logger.Debug(
+		"registered peer datahub url from node_status",
 		"peerID", msg.PeerID,
 		"clientName", msg.ClientName,
 		"url", normalized,
@@ -447,7 +453,8 @@ func (c *Client) processBlockMessages(ctx context.Context, ch <-chan teranode.Bl
 // ErrPublishExhausted). Encoding errors and transient publish errors are
 // logged and swallowed so the loop can continue on subsequent messages.
 func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeMessage) error {
-	c.Logger.Debug("received subtree announcement",
+	c.Logger.Debug(
+		"received subtree announcement",
 		"hash", msg.Hash,
 		"dataHubUrl", msg.DataHubURL,
 	)
@@ -461,7 +468,8 @@ func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeM
 
 	encoded, err := kafkaMsg.Encode()
 	if err != nil {
-		c.Logger.Error("failed to encode subtree message for kafka",
+		c.Logger.Error(
+			"failed to encode subtree message for kafka",
 			"hash", msg.Hash,
 			"error", err,
 		)
@@ -477,7 +485,8 @@ func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeM
 // ErrPublishExhausted). Encoding errors and transient publish errors are
 // logged and swallowed so the loop can continue on subsequent messages.
 func (c *Client) handleBlockMessage(ctx context.Context, msg teranode.BlockMessage) error {
-	c.Logger.Debug("received block announcement",
+	c.Logger.Debug(
+		"received block announcement",
 		"hash", msg.Hash,
 		"height", msg.Height,
 		"dataHubUrl", msg.DataHubURL,
@@ -495,7 +504,8 @@ func (c *Client) handleBlockMessage(ctx context.Context, msg teranode.BlockMessa
 
 	encoded, err := kafkaMsg.Encode()
 	if err != nil {
-		c.Logger.Error("failed to encode block message for kafka",
+		c.Logger.Error(
+			"failed to encode block message for kafka",
 			"hash", msg.Hash,
 			"error", err,
 		)
@@ -527,7 +537,8 @@ func (c *Client) publishWithRetry(ctx context.Context, producer *kafka.Producer,
 			return nil
 		}
 
-		c.Logger.Error("kafka publish failed",
+		c.Logger.Error(
+			"kafka publish failed",
 			"type", msgType,
 			"key", key,
 			"attempt", attempt,
@@ -536,7 +547,8 @@ func (c *Client) publishWithRetry(ctx context.Context, producer *kafka.Producer,
 		)
 
 		if attempt == maxPublishRetries {
-			c.Logger.Error("kafka publish exhausted all retries, signaling fatal shutdown",
+			c.Logger.Error(
+				"kafka publish exhausted all retries, signaling fatal shutdown",
 				"type", msgType,
 				"key", key,
 				"valueLen", len(value),

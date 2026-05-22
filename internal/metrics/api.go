@@ -19,7 +19,7 @@ var (
 			Name: "merkle_http_requests_total",
 			Help: "Total HTTP requests served by the API server.",
 		},
-		[]string{"route", "method", "status"},
+		[]string{labelRoute, labelMethod, labelStatus},
 	)
 
 	httpRequestDuration = prometheus.NewHistogramVec(
@@ -28,7 +28,7 @@ var (
 			Help:    "HTTP request duration in seconds.",
 			Buckets: HTTPBuckets,
 		},
-		[]string{"route", "method", "status"},
+		[]string{labelRoute, labelMethod, labelStatus},
 	)
 
 	httpRequestsInFlight = prometheus.NewGaugeVec(
@@ -36,7 +36,7 @@ var (
 			Name: "merkle_http_requests_in_flight",
 			Help: "HTTP requests currently being served.",
 		},
-		[]string{"route", "method"},
+		[]string{labelRoute, labelMethod},
 	)
 
 	httpRequestSize = prometheus.NewHistogramVec(
@@ -45,7 +45,7 @@ var (
 			Help:    "HTTP request body size in bytes.",
 			Buckets: MsgSizeBuckets,
 		},
-		[]string{"route", "method"},
+		[]string{labelRoute, labelMethod},
 	)
 
 	httpResponseSize = prometheus.NewHistogramVec(
@@ -54,7 +54,7 @@ var (
 			Help:    "HTTP response body size in bytes.",
 			Buckets: MsgSizeBuckets,
 		},
-		[]string{"route", "method"},
+		[]string{labelRoute, labelMethod},
 	)
 )
 

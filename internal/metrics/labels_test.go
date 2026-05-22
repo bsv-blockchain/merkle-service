@@ -53,7 +53,7 @@ func TestStatusClass(t *testing.T) {
 		{"599", 599, nil, "5xx"},
 		{"deadline-exceeded", 0, context.DeadlineExceeded, "timeout"},
 		{"plain-error", 0, errors.New("boom"), "error"},
-		{"net-timeout", 0, &fakeTimeoutErr{}, "timeout"},
+		{"net-timeout", 0, &fakeTimeoutError{}, "timeout"},
 		{"unknown-code", 100, nil, "error"},
 	}
 	for _, tc := range cases {
@@ -66,17 +66,17 @@ func TestStatusClass(t *testing.T) {
 	}
 }
 
-type fakeTimeoutErr struct{}
+type fakeTimeoutError struct{}
 
-func (e *fakeTimeoutErr) Error() string { return "i/o timeout" }
-func (e *fakeTimeoutErr) Timeout() bool { return true }
-func (e *fakeTimeoutErr) Temporary() bool {
+func (e *fakeTimeoutError) Error() string { return "i/o timeout" }
+func (e *fakeTimeoutError) Timeout() bool { return true }
+func (e *fakeTimeoutError) Temporary() bool {
 	return false
 }
 
-// Compile-time check that fakeTimeoutErr satisfies net.Error so the
+// Compile-time check that fakeTimeoutError satisfies net.Error so the
 // errors.As branch in isTimeoutErr exercises it.
-var _ net.Error = (*fakeTimeoutErr)(nil)
+var _ net.Error = (*fakeTimeoutError)(nil)
 
 func TestClassifyDBError(t *testing.T) {
 	if got := ClassifyDBError(BackendSQL, nil); got != OutcomeSuccess {
