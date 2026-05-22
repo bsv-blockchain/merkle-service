@@ -12,9 +12,18 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 )
+
+// callbackCount returns the current value of the named outcome counter.
+// Tests assert on the delta against a pre-call snapshot so cross-test
+// pollution from the shared metrics registry doesn't break expectations.
+func callbackCount(outcome string) int64 {
+	return int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(outcome)))
+}
 
 // These tests cover the durability contract that handleMessage must obey
 // after F-021: returning nil ONLY when the message has reached a durable
@@ -55,6 +64,7 @@ func TestHandleMessage_HappyPathReturnsNilAfterDelivery(t *testing.T) {
 		TxID:        "tx-happy",
 	}
 
+	before := callbackCount(metrics.OutcomeDelivered)
 	if err := ds.handleMessage(context.Background(), encodeConsumerMessage(t, msg)); err != nil {
 		t.Fatalf("expected nil, got error: %v", err)
 	}
@@ -67,8 +77,8 @@ func TestHandleMessage_HappyPathReturnsNilAfterDelivery(t *testing.T) {
 	if got := len(dlqMock.getMessages()); got != 0 {
 		t.Errorf("expected 0 DLQ publishes for happy path, got %d", got)
 	}
-	if ds.messagesProcessed.Load() != 1 {
-		t.Errorf("expected messagesProcessed=1, got %d", ds.messagesProcessed.Load())
+	if delta := callbackCount(metrics.OutcomeDelivered) - before; delta != 1 {
+		t.Errorf("expected delivered counter delta=1, got %d", delta)
 	}
 }
 
@@ -133,6 +143,7 @@ func TestHandleMessage_HTTPFailureRetriesExhausted_RoutesToDLQBeforeAck(t *testi
 		RetryCount:  3,
 	}
 
+	before := callbackCount(metrics.OutcomeDLQ)
 	if err := ds.handleMessage(context.Background(), encodeConsumerMessage(t, msg)); err != nil {
 		t.Fatalf("expected nil after successful DLQ publish, got error: %v", err)
 	}
@@ -144,8 +155,8 @@ func TestHandleMessage_HTTPFailureRetriesExhausted_RoutesToDLQBeforeAck(t *testi
 	if len(dlqMsgs) != 1 {
 		t.Fatalf("expected 1 DLQ publish, got %d", len(dlqMsgs))
 	}
-	if ds.messagesFailed.Load() != 1 {
-		t.Errorf("expected messagesFailed=1, got %d", ds.messagesFailed.Load())
+	if delta := callbackCount(metrics.OutcomeDLQ) - before; delta != 1 {
+		t.Errorf("expected DLQ counter delta=1, got %d", delta)
 	}
 }
 
@@ -172,12 +183,13 @@ func TestHandleMessage_DLQPublishFailureReturnsError(t *testing.T) {
 		RetryCount:  3,
 	}
 
+	before := callbackCount(metrics.OutcomeDLQ)
 	err := ds.handleMessage(context.Background(), encodeConsumerMessage(t, msg))
 	if err == nil {
 		t.Fatal("expected handleMessage to return non-nil error when DLQ publish fails")
 	}
-	if ds.messagesFailed.Load() != 0 {
-		t.Errorf("expected messagesFailed=0 (DLQ never durably accepted), got %d", ds.messagesFailed.Load())
+	if delta := callbackCount(metrics.OutcomeDLQ) - before; delta != 0 {
+		t.Errorf("expected DLQ counter delta=0 (DLQ never durably accepted), got %d", delta)
 	}
 }
 

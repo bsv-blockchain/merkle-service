@@ -5,8 +5,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/IBM/sarama"
+
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 )
 
 // Producer wraps a Sarama sync producer with topic and partition configuration.
@@ -50,7 +53,9 @@ func (p *Producer) Publish(key string, value []byte) error {
 		Value: sarama.ByteEncoder(value),
 	}
 
+	start := time.Now()
 	partition, offset, err := p.producer.SendMessage(msg)
+	metrics.ObserveKafkaProduce(p.topic, len(value), time.Since(start), err)
 	if err != nil {
 		return fmt.Errorf("failed to publish to %s: %w", p.topic, err)
 	}

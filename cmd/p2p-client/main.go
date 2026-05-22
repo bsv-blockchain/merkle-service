@@ -9,6 +9,7 @@ import (
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/p2p"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -83,6 +84,22 @@ func run() error {
 	// P2P session.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+
+	var metricsSrv *metrics.Server
+	if cfg.Metrics.Enabled {
+		metricsSrv = metrics.NewServer(cfg.Metrics, logger)
+		if err := metricsSrv.Init(nil); err != nil {
+			return err
+		}
+		if err := metricsSrv.Start(ctx); err != nil {
+			return err
+		}
+		defer func() {
+			if err := metricsSrv.Stop(); err != nil {
+				logger.Error("failed to stop metrics server", "error", err)
+			}
+		}()
+	}
 
 	runErr := client.Run(ctx)
 	if stopErr := client.Stop(); stopErr != nil {

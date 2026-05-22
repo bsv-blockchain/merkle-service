@@ -11,6 +11,7 @@ import (
 	_ "modernc.org/sqlite"             // pure-go sqlite driver
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	storepkg "github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
@@ -74,6 +75,7 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 	sweeperCtx, cancelSweeper := context.WithCancel(context.Background())
 	sw := newSweeper(db, d, sweepInterval, urlRetention, logger)
 	go sw.run(sweeperCtx)
+	go metrics.RunSQLPoolSampler(sweeperCtx, db, 15*time.Second, logger)
 
 	r := &storepkg.Registry{
 		Registration:        newRegistrationStore(db, d, cfg.Registry.MaxCallbacksPerTxID),

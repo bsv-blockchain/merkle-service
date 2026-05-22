@@ -14,14 +14,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/IBM/sarama"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -106,11 +107,6 @@ type DeliveryService struct {
 	httpClient    *http.Client
 	dedupStore    CallbackDeduper
 	stumpStore    store.StumpStore
-
-	messagesProcessed atomic.Int64
-	messagesRetried   atomic.Int64
-	messagesFailed    atomic.Int64
-	messagesDedupe    atomic.Int64
 }
 
 // NewDeliveryService creates a new callback DeliveryService. stumpStore is
@@ -239,9 +235,9 @@ func (d *DeliveryService) Stop() error {
 	d.SetStarted(false)
 	d.Cancel()
 	d.Logger.Info("callback delivery service stopped",
-		"messagesProcessed", d.messagesProcessed.Load(),
-		"messagesRetried", d.messagesRetried.Load(),
-		"messagesFailed", d.messagesFailed.Load(),
+		"messagesProcessed", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDelivered))),
+		"messagesRetried", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeRetryScheduled))),
+		"messagesFailed", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDLQ))),
 	)
 	return firstErr
 }
@@ -257,9 +253,9 @@ func (d *DeliveryService) Health() service.HealthStatus {
 		Name:   d.Name,
 		Status: status,
 		Details: map[string]string{
-			"messagesProcessed": fmt.Sprintf("%d", d.messagesProcessed.Load()),
-			"messagesRetried":   fmt.Sprintf("%d", d.messagesRetried.Load()),
-			"messagesFailed":    fmt.Sprintf("%d", d.messagesFailed.Load()),
+			"messagesProcessed": fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDelivered)))),
+			"messagesRetried":   fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeRetryScheduled)))),
+			"messagesFailed":    fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDLQ)))),
 		},
 	}
 }
@@ -285,6 +281,8 @@ func (d *DeliveryService) handleMessage(ctx context.Context, msg *sarama.Consume
 			"partition", msg.Partition,
 			"error", err,
 		)
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDecodeError).Inc()
+		metrics.IncKafkaConsumerError(msg.Topic, metrics.KafkaErrorDecode)
 		return nil
 	}
 
@@ -335,7 +333,15 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 	if d.dedupStore != nil {
 		dedupKey := dedupKeyForMessage(cbMsg)
 		if dedupKey != "" {
+			checkStart := time.Now()
 			exists, err := d.dedupStore.Exists(dedupKey, cbMsg.CallbackURL, string(cbMsg.Type))
+			checkOutcome := metrics.OutcomeMiss
+			if err != nil {
+				checkOutcome = metrics.OutcomeError
+			} else if exists {
+				checkOutcome = metrics.OutcomeHit
+			}
+			metrics.ObserveCallbackDedupCheck(checkOutcome, time.Since(checkStart))
 			if err != nil {
 				// Previous behavior was "proceed with delivery" — but if a
 				// prior attempt had succeeded and Aerospike is briefly
@@ -360,7 +366,7 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 					"blockHash", cbMsg.BlockHash,
 					"subtreeIndex", cbMsg.SubtreeIndex,
 				)
-				d.messagesDedupe.Add(1)
+				metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDedupHit).Inc()
 				return nil
 			}
 		}
@@ -375,13 +381,19 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 		if d.dedupStore != nil {
 			dedupKey := dedupKeyForMessage(cbMsg)
 			if dedupKey != "" {
+				recordStart := time.Now()
 				ttl := time.Duration(d.cfg.Callback.DedupTTLSec) * time.Second
-				if recErr := d.dedupStore.Record(dedupKey, cbMsg.CallbackURL, string(cbMsg.Type), ttl); recErr != nil {
+				recErr := d.dedupStore.Record(dedupKey, cbMsg.CallbackURL, string(cbMsg.Type), ttl)
+				recordOutcome := metrics.OutcomeSuccess
+				if recErr != nil {
+					recordOutcome = metrics.OutcomeError
 					d.Logger.Error("failed to record callback dedup", "error", recErr, "dedupKey", dedupKey, "callbackUrl", cbMsg.CallbackURL)
 				}
+				metrics.ObserveCallbackDedupRecord(recordOutcome, time.Since(recordStart))
 			}
 		}
-		d.messagesProcessed.Add(1)
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDelivered).Inc()
+		metrics.ObserveCallbackRetryAttempt(cbMsg.RetryCount)
 		d.Logger.Debug("callback delivered successfully",
 			"callbackUrl", cbMsg.CallbackURL,
 			"txid", cbMsg.TxID,
@@ -480,7 +492,7 @@ func (d *DeliveryService) republishForRetry(cbMsg *kafka.CallbackTopicMessage, r
 		)
 		return fmt.Errorf("retry republish (%s): %w", reason, err)
 	}
-	d.messagesRetried.Add(1)
+	metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeRetryScheduled).Inc()
 	return nil
 }
 
@@ -506,7 +518,7 @@ func (d *DeliveryService) publishToDLQDurably(cbMsg *kafka.CallbackTopicMessage)
 			)
 			continue
 		}
-		d.messagesFailed.Add(1)
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDLQ).Inc()
 		return nil
 	}
 	d.Logger.Error("DLQ publish exhausted all retries, leaving Kafka offset uncommitted",
@@ -531,10 +543,10 @@ func (d *DeliveryService) heartbeat(ctx context.Context) {
 			return
 		case <-ticker.C:
 			d.Logger.Info("callback delivery heartbeat",
-				"messagesProcessed", d.messagesProcessed.Load(),
-				"messagesRetried", d.messagesRetried.Load(),
-				"messagesFailed", d.messagesFailed.Load(),
-				"messagesDedupe", d.messagesDedupe.Load(),
+				"messagesProcessed", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDelivered))),
+				"messagesRetried", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeRetryScheduled))),
+				"messagesFailed", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDLQ))),
+				"messagesDedupe", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDedupHit))),
 			)
 		}
 	}
@@ -561,11 +573,22 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 		if d.stumpStore == nil {
 			return errPermanentDelivery(fmt.Errorf("stump store not configured for STUMP delivery"))
 		}
+		stumpStart := time.Now()
 		stumpBytes, err := d.stumpStore.Get(msg.StumpRef)
+		stumpOutcome := metrics.OutcomeSuccess
+		if err != nil {
+			if errors.Is(err, store.ErrStumpNotFound) {
+				stumpOutcome = metrics.OutcomeNotFound
+			} else {
+				stumpOutcome = metrics.OutcomeError
+			}
+		}
+		metrics.ObserveCallbackStumpFetch(stumpOutcome, time.Since(stumpStart))
 		if err != nil {
 			if errors.Is(err, store.ErrStumpNotFound) {
 				// Blob expired (DAH) or never written — no amount of retry will
 				// produce it. Fail permanently so processDelivery routes to DLQ.
+				metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeStumpNotFound).Inc()
 				return errPermanentDelivery(fmt.Errorf("stump blob missing for ref %s: %w", msg.StumpRef, err))
 			}
 			return fmt.Errorf("fetching stump ref %s: %w", msg.StumpRef, err)
@@ -609,9 +632,11 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 			"subtreeIndex", msg.SubtreeIndex,
 			"error", err,
 		)
+		metrics.ObserveCallbackDelivery(msg.CallbackURL, 0, len(body), time.Since(start), err)
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	metrics.ObserveCallbackDelivery(msg.CallbackURL, resp.StatusCode, len(body), time.Since(start), nil)
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
@@ -652,6 +677,7 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 	// every block for the full retry budget. 408/429 stay retryable because
 	// they are explicit "try again later" signals.
 	if isNonRetryable4xx(resp.StatusCode) {
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomePermanent4xx).Inc()
 		return errPermanentDelivery(statusErr)
 	}
 	return statusErr

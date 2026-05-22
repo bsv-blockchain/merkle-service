@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	_ "github.com/bsv-blockchain/merkle-service/internal/store/sql" // register SQL backend
@@ -27,6 +28,22 @@ func main() {
 	defer func() { _ = registry.Close() }()
 
 	processor := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree)
+
+	var metricsSrv *metrics.Server
+	if cfg.Metrics.Enabled {
+		metricsSrv = metrics.NewServer(cfg.Metrics, logger)
+		if err := metricsSrv.Init(nil); err != nil {
+			log.Fatal("failed to init metrics server: ", err)
+		}
+		if err := metricsSrv.Start(ctx); err != nil {
+			log.Fatal("failed to start metrics server: ", err)
+		}
+		defer func() {
+			if err := metricsSrv.Stop(); err != nil {
+				logger.Error("failed to stop metrics server", "error", err)
+			}
+		}()
+	}
 
 	if err := processor.Init(nil); err != nil {
 		log.Fatal("failed to init subtree processor: ", err)

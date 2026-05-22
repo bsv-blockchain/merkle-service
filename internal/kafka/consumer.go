@@ -2,12 +2,16 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/IBM/sarama"
+
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 )
 
 // exitFunc is the process-termination hook used when the consumer goroutine
@@ -42,6 +46,7 @@ func newConsumerConfig() *sarama.Config {
 // Consumer wraps a Sarama consumer group.
 type Consumer struct {
 	group   sarama.ConsumerGroup
+	groupID string
 	topics  []string
 	handler MessageHandler
 	logger  *slog.Logger
@@ -71,6 +76,7 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 
 	return &Consumer{
 		group:   group,
+		groupID: groupID,
 		topics:  topics,
 		handler: handler,
 		logger:  logger,
@@ -97,6 +103,12 @@ func (c *Consumer) Start(ctx context.Context) error {
 				if !ok {
 					return
 				}
+				var consumerErr *sarama.ConsumerError
+				topic := ""
+				if errors.As(err, &consumerErr) {
+					topic = consumerErr.Topic
+				}
+				metrics.IncKafkaConsumerError(topic, metrics.KafkaErrorBroker)
 				c.logger.Error("sarama consumer group error", "error", err)
 			}
 		}
@@ -119,6 +131,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 		for {
 			handler := &consumerGroupHandler{
 				handler: c.handler,
+				groupID: c.groupID,
 				logger:  c.logger,
 				ready:   c.ready,
 			}
@@ -149,6 +162,7 @@ func (c *Consumer) Stop() error {
 // consumerGroupHandler implements sarama.ConsumerGroupHandler.
 type consumerGroupHandler struct {
 	handler MessageHandler
+	groupID string
 	logger  *slog.Logger
 	ready   chan struct{}
 }
@@ -186,7 +200,19 @@ func (h *consumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession,
 			if !ok {
 				return nil
 			}
-			if err := h.handler(session.Context(), msg); err != nil {
+			metrics.ObserveKafkaConsumed(msg.Topic, h.groupID, len(msg.Value))
+			gauge := metrics.KafkaInFlight(msg.Topic, h.groupID)
+			gauge.Inc()
+			start := time.Now()
+			err := h.handler(session.Context(), msg)
+			gauge.Dec()
+			outcome := metrics.OutcomeSuccess
+			if err != nil {
+				outcome = metrics.OutcomeHandlerError
+			}
+			metrics.ObserveKafkaHandle(msg.Topic, outcome, time.Since(start))
+			if err != nil {
+				metrics.IncKafkaConsumerError(msg.Topic, metrics.KafkaErrorHandler)
 				h.logger.Error("failed to handle message, stopping claim to preserve offset",
 					"topic", msg.Topic,
 					"partition", msg.Partition,

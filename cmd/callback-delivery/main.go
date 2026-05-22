@@ -6,6 +6,7 @@ import (
 
 	"github.com/bsv-blockchain/merkle-service/internal/callback"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	_ "github.com/bsv-blockchain/merkle-service/internal/store/sql" // register SQL backend
@@ -27,6 +28,22 @@ func main() {
 	defer func() { _ = registry.Close() }()
 
 	deliverySvc := callback.NewDeliveryService(cfg, registry.CallbackDedup, registry.Stump)
+
+	var metricsSrv *metrics.Server
+	if cfg.Metrics.Enabled {
+		metricsSrv = metrics.NewServer(cfg.Metrics, logger)
+		if err := metricsSrv.Init(nil); err != nil {
+			log.Fatal("failed to init metrics server: ", err)
+		}
+		if err := metricsSrv.Start(ctx); err != nil {
+			log.Fatal("failed to start metrics server: ", err)
+		}
+		defer func() {
+			if err := metricsSrv.Stop(); err != nil {
+				logger.Error("failed to stop metrics server", "error", err)
+			}
+		}()
+	}
 
 	if err := deliverySvc.Init(nil); err != nil {
 		log.Fatal("failed to init callback delivery service: ", err)

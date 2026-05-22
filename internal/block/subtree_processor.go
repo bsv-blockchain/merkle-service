@@ -10,6 +10,7 @@ import (
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	"github.com/bsv-blockchain/merkle-service/internal/stump"
 )
@@ -198,13 +199,18 @@ func ProcessBlockSubtree(
 	}
 
 	// 6.7: Build STUMP.
+	buildStart := time.Now()
 	s := stump.Build(blockHeight, leaves, internalNodes, registeredIndices)
 	if s == nil {
+		metrics.ObserveBumpBuild(time.Since(buildStart), len(leaves), len(registeredIndices), 0, true)
 		return nil, nil
 	}
+	metrics.ObserveBumpBuild(time.Since(buildStart), len(leaves), len(registeredIndices), int(s.TreeHeight), false)
 
 	// 6.8: Encode STUMP to BRC-0074 binary.
+	encodeStart := time.Now()
 	stumpData := s.Encode()
+	metrics.ObserveBumpEncode(time.Since(encodeStart), len(stumpData))
 
 	// 6.9: Group txids by callback URL.
 	callbackGroups := stump.GroupByCallback(registrationsByTxID)

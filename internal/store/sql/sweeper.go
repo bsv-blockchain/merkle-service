@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 )
 
 // ttlTable describes a single TTL-bearing parent table, plus any child tables
@@ -98,7 +100,9 @@ func (s *sweeper) waitStopped() {
 
 func (s *sweeper) sweepOnce(ctx context.Context) {
 	for _, t := range ttlTables {
+		start := time.Now()
 		rows, err := s.sweepTable(ctx, t)
+		metrics.ObserveSweep(t.parent, time.Since(start), int(rows))
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Warn("ttl sweeper: delete failed", "table", t.parent, "error", err)
@@ -113,7 +117,9 @@ func (s *sweeper) sweepOnce(ctx context.Context) {
 	// every Add) so it doesn't fit the expires_at-driven ttlTable shape.
 	// Sweep it separately, gated on a positive retention.
 	if s.urlRetention > 0 {
+		start := time.Now()
 		rows, err := s.sweepCallbackURLs(ctx)
+		metrics.ObserveSweep("callback_urls", time.Since(start), int(rows))
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Warn("ttl sweeper: callback_urls delete failed", "error", err)
@@ -121,7 +127,9 @@ func (s *sweeper) sweepOnce(ctx context.Context) {
 		} else if rows > 0 && s.logger != nil {
 			s.logger.Debug("ttl sweeper: expired callback URLs deleted", "rows", rows)
 		}
+		start = time.Now()
 		rows, err = s.sweepDataHubURLs(ctx)
+		metrics.ObserveSweep("datahub_urls", time.Since(start), int(rows))
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Warn("ttl sweeper: datahub_urls delete failed", "error", err)

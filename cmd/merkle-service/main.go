@@ -11,6 +11,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/p2p"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -47,6 +48,7 @@ func main() {
 
 	apiServer := api.NewServer(cfg.API, registry.Registration, registry.CallbackURLRegistry, registry.Health, logger)
 	apiServer.SetAllowPrivateCallbackIPs(cfg.Callback.AllowPrivateIPs)
+	apiServer.SetBackend(cfg.Store.Backend)
 	apiDataHubClient := datahub.NewClientWithSSRFGuard(
 		cfg.DataHub.TimeoutSec,
 		cfg.DataHub.MaxRetries,
@@ -79,7 +81,11 @@ func main() {
 	subtreeWorker := block.NewSubtreeWorkerService(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.Stump, registry.CallbackURLRegistry, registry.SubtreeCounter, logger)
 	callbackDelivery := callback.NewDeliveryService(cfg, registry.CallbackDedup, registry.Stump)
 
-	services := []service.Service{apiServer, p2pClient, subtreeFetcher, blockProcessor, subtreeWorker, callbackDelivery}
+	services := []service.Service{}
+	if cfg.Metrics.Enabled {
+		services = append(services, metrics.NewServer(cfg.Metrics, logger))
+	}
+	services = append(services, apiServer, p2pClient, subtreeFetcher, blockProcessor, subtreeWorker, callbackDelivery)
 	for _, svc := range services {
 		if err := svc.Init(nil); err != nil {
 			log.Fatal("failed to init service: ", err)

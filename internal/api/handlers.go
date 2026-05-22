@@ -13,6 +13,7 @@ import (
 
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
@@ -116,7 +117,10 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store registration
-	if err := s.regStore.Add(req.TxID, req.CallbackURL, req.CallbackToken); err != nil {
+	addStart := time.Now()
+	err := s.regStore.Add(req.TxID, req.CallbackURL, req.CallbackToken)
+	metrics.ObserveDB(s.backendLabel(), metrics.StoreRegistration, metrics.OpAdd, addStart, err)
+	if err != nil {
 		// F-050: surface the per-txid callback cap as a 429 so the caller can
 		// distinguish a quota error from a transient backend failure and back
 		// off accordingly. The body still uses the standard ErrorResponse shape.
@@ -137,8 +141,11 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	// alongside so BLOCK_PROCESSED fan-out (which iterates urlRegistry rather
 	// than the per-txid map) can attach the same Authorization header.
 	if s.urlRegistry != nil {
-		if err := s.urlRegistry.Add(req.CallbackURL, req.CallbackToken); err != nil {
-			s.Logger.Warn("failed to add callback URL to registry", "url", req.CallbackURL, "error", err)
+		regStart := time.Now()
+		regErr := s.urlRegistry.Add(req.CallbackURL, req.CallbackToken)
+		metrics.ObserveDB(s.backendLabel(), metrics.StoreCallbackURLRegistry, metrics.OpAdd, regStart, regErr)
+		if regErr != nil {
+			s.Logger.Warn("failed to add callback URL to registry", "url", req.CallbackURL, "error", regErr)
 		}
 	}
 
@@ -181,7 +188,9 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	getStart := time.Now()
 	entries, err := s.regStore.Get(txid)
+	metrics.ObserveDB(s.backendLabel(), metrics.StoreRegistration, metrics.OpGet, getStart, err)
 	if err != nil {
 		s.Logger.Error("failed to lookup registration", "txid", txid, "error", err)
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal server error"})

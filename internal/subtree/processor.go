@@ -4,15 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/IBM/sarama"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
@@ -59,11 +60,6 @@ type Processor struct {
 	regCache          RegCache
 	dedupCache        *cache.DedupCache
 	dataHubClient     *datahub.Client
-
-	messagesProcessed        atomic.Int64
-	messagesRetried          atomic.Int64
-	messagesDLQ              atomic.Int64
-	messagesSkippedUnhealthy atomic.Int64
 }
 
 // NewProcessor creates a new subtree Processor.
@@ -234,10 +230,10 @@ func (p *Processor) Stop() error {
 	p.SetStarted(false)
 	p.Cancel()
 	p.Logger.Info("subtree-fetcher stopped",
-		"messagesProcessed", p.messagesProcessed.Load(),
-		"messagesRetried", p.messagesRetried.Load(),
-		"messagesDLQ", p.messagesDLQ.Load(),
-		"messagesSkippedUnhealthy", p.messagesSkippedUnhealthy.Load(),
+		"messagesProcessed", int64(testutil.ToFloat64(metrics.SubtreeMessagesTotal.WithLabelValues(metrics.OutcomeProcessed))),
+		"messagesRetried", int64(testutil.ToFloat64(metrics.SubtreeMessagesTotal.WithLabelValues(metrics.OutcomeRetried))),
+		"messagesDLQ", int64(testutil.ToFloat64(metrics.SubtreeMessagesTotal.WithLabelValues(metrics.OutcomeDLQ))),
+		"messagesSkippedUnhealthy", int64(testutil.ToFloat64(metrics.SubtreeMessagesTotal.WithLabelValues(metrics.OutcomeSkippedUnhealthy))),
 	)
 	return firstErr
 }
@@ -253,8 +249,8 @@ func (p *Processor) Health() service.HealthStatus {
 		Name:   p.Name,
 		Status: status,
 		Details: map[string]string{
-			"messagesProcessed":        fmt.Sprintf("%d", p.messagesProcessed.Load()),
-			"messagesSkippedUnhealthy": fmt.Sprintf("%d", p.messagesSkippedUnhealthy.Load()),
+			"messagesProcessed":        fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.SubtreeMessagesTotal.WithLabelValues(metrics.OutcomeProcessed)))),
+			"messagesSkippedUnhealthy": fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.SubtreeMessagesTotal.WithLabelValues(metrics.OutcomeSkippedUnhealthy)))),
 		},
 	}
 }
@@ -277,6 +273,8 @@ func (p *Processor) Health() service.HealthStatus {
 // don't lose data, but they indicate Kafka-side trouble rather than a poison
 // pill.
 func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
+	start := time.Now()
+
 	subtreeMsg, err := kafka.DecodeSubtreeMessage(msg.Value)
 	if err != nil {
 		// Malformed bytes at the head of the partition cannot be recovered by
@@ -288,6 +286,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 			"partition", msg.Partition,
 			"error", err,
 		)
+		metrics.ObserveSubtreeProcessing(metrics.OutcomeDecodeError, time.Since(start))
+		metrics.IncKafkaConsumerError(msg.Topic, metrics.KafkaErrorDecode)
 		return nil
 	}
 
@@ -300,6 +300,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	// Check dedup cache — skip if already successfully processed.
 	if p.dedupCache != nil && p.dedupCache.Contains(subtreeMsg.Hash) {
 		p.Logger.Debug("skipping duplicate subtree message", "hash", subtreeMsg.Hash)
+		metrics.ObserveSubtreeProcessing(metrics.OutcomeDedupHit, time.Since(start))
 		return nil
 	}
 
@@ -314,12 +315,14 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 			"hash", subtreeMsg.Hash,
 			"dataHubUrl", subtreeMsg.DataHubURL,
 		)
-		p.messagesSkippedUnhealthy.Add(1)
+		metrics.ObserveSubtreeProcessing(metrics.OutcomeSkippedUnhealthy, time.Since(start))
 		return nil
 	}
 
 	// 3.2: Fetch binary subtree data from DataHub.
+	fetchStart := time.Now()
 	rawData, err := p.dataHubClient.FetchSubtreeRaw(ctx, subtreeMsg.DataHubURL, subtreeMsg.Hash)
+	metrics.ObserveSubtreeDataHubFetch(subtreeMsg.DataHubURL, time.Since(fetchStart), len(rawData), err)
 	if err != nil {
 		// A 404 from the announcing peer is permanent for that peer: subtrees
 		// are content-addressable, so retrying the same URL cannot recover.
@@ -328,15 +331,15 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 		// from the same host to short-circuit at the IsHealthy gate above
 		// once the threshold is reached.
 		if errors.Is(err, datahub.ErrNotFound) {
-			return p.handlePermanentFailure(subtreeMsg, "fetching subtree from DataHub", err)
+			return p.handlePermanentFailure(subtreeMsg, "fetching subtree from DataHub", err, start)
 		}
-		return p.handleTransientFailure(subtreeMsg, "fetching subtree from DataHub", err)
+		return p.handleTransientFailure(subtreeMsg, "fetching subtree from DataHub", err, start)
 	}
 
 	// 3.3: Store raw binary data in the subtree blob store.
 	if p.cfg.Subtree.StorageMode == "realtime" {
 		if err = p.subtreeStore.StoreSubtree(subtreeMsg.Hash, rawData, 0); err != nil {
-			return p.handleTransientFailure(subtreeMsg, "storing subtree", err)
+			return p.handleTransientFailure(subtreeMsg, "storing subtree", err, start)
 		}
 	}
 
@@ -344,23 +347,26 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	// DataHub returns concatenated 32-byte hashes, not full go-subtree Serialize() format.
 	txids, err := datahub.ParseRawTxids(rawData)
 	if err != nil {
-		return p.handleTransientFailure(subtreeMsg, "parsing subtree txids", err)
+		return p.handleTransientFailure(subtreeMsg, "parsing subtree txids", err, start)
 	}
 	p.Logger.Debug("processing subtree txids", "length", len(txids), "hash", subtreeMsg.Hash)
+	metrics.ObserveSubtreeCounts(len(txids), 0)
 
 	if len(txids) == 0 {
 		if p.dedupCache != nil {
 			p.dedupCache.Add(subtreeMsg.Hash)
 		}
-		p.messagesProcessed.Add(1)
+		metrics.ObserveSubtreeAttemptCount(subtreeMsg.AttemptCount)
+		metrics.ObserveSubtreeProcessing(metrics.OutcomeProcessed, time.Since(start))
 		return nil
 	}
 
 	// 4.2-4.4: Check registrations via cache and Aerospike.
 	registeredTxids, err := p.findRegisteredTxids(txids)
 	if err != nil {
-		return p.handleTransientFailure(subtreeMsg, "checking registrations", err)
+		return p.handleTransientFailure(subtreeMsg, "checking registrations", err, start)
 	}
+	metrics.ObserveSubtreeCounts(0, len(registeredTxids))
 
 	// 4.5-4.6: Emit batched callbacks grouped by callbackURL.
 	//
@@ -371,7 +377,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	// consumers permanently lose SEEN notifications during a Kafka
 	// callback-topic outage (F-057).
 	if err := p.emitBatchedSeenCallbacks(registeredTxids, subtreeMsg.Hash); err != nil {
-		return p.handleTransientFailure(subtreeMsg, "publishing batched SEEN callbacks", err)
+		return p.handleTransientFailure(subtreeMsg, "publishing batched SEEN callbacks", err, start)
 	}
 
 	// Mark subtree as successfully processed for dedup.
@@ -379,7 +385,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 		p.dedupCache.Add(subtreeMsg.Hash)
 	}
 
-	p.messagesProcessed.Add(1)
+	metrics.ObserveSubtreeAttemptCount(subtreeMsg.AttemptCount)
+	metrics.ObserveSubtreeProcessing(metrics.OutcomeProcessed, time.Since(start))
 	return nil
 }
 
@@ -388,7 +395,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 // it on subtree-dlq. Returns nil on successful hand-off so the consumer acks
 // the original offset; returns an error only when the producer itself is
 // broken (partition stall is preferable to silent loss in that case).
-func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, stage string, cause error) error {
+func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, stage string, cause error, start time.Time) error {
 	nextAttempt := subtreeMsg.AttemptCount + 1
 	maxAttempts := p.cfg.Subtree.MaxAttempts
 	if maxAttempts <= 0 {
@@ -404,7 +411,11 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 			"error", cause,
 		)
 		subtreeMsg.AttemptCount = nextAttempt
-		return p.publishToDLQ(subtreeMsg)
+		if err := p.publishToDLQ(subtreeMsg); err != nil {
+			return err
+		}
+		metrics.ObserveSubtreeProcessing(metrics.OutcomeDLQ, time.Since(start))
+		return nil
 	}
 
 	p.Logger.Warn("subtree message transient failure, re-publishing for retry",
@@ -422,7 +433,7 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 	if pubErr := p.retryProducer.Publish(subtreeMsg.Hash, data); pubErr != nil {
 		return fmt.Errorf("re-publishing subtree message for retry: %w", pubErr)
 	}
-	p.messagesRetried.Add(1)
+	metrics.ObserveSubtreeProcessing(metrics.OutcomeRetried, time.Since(start))
 	return nil
 }
 
@@ -434,7 +445,7 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 // AttemptCount=0 is distinguishable from a transient-exhausted entry.
 // Returns nil on successful hand-off so the consumer acks the original
 // offset.
-func (p *Processor) handlePermanentFailure(subtreeMsg *kafka.SubtreeMessage, stage string, cause error) error {
+func (p *Processor) handlePermanentFailure(subtreeMsg *kafka.SubtreeMessage, stage string, cause error, start time.Time) error {
 	p.Logger.Warn("subtree message permanent failure, routing to DLQ",
 		"hash", subtreeMsg.Hash,
 		"stage", stage,
@@ -442,7 +453,11 @@ func (p *Processor) handlePermanentFailure(subtreeMsg *kafka.SubtreeMessage, sta
 		"attemptCount", subtreeMsg.AttemptCount,
 		"error", cause,
 	)
-	return p.publishToDLQ(subtreeMsg)
+	if err := p.publishToDLQ(subtreeMsg); err != nil {
+		return err
+	}
+	metrics.ObserveSubtreeProcessing(metrics.OutcomePermanentFailure, time.Since(start))
+	return nil
 }
 
 // publishToDLQ encodes subtreeMsg and publishes it to subtree-dlq. The
@@ -459,7 +474,6 @@ func (p *Processor) publishToDLQ(subtreeMsg *kafka.SubtreeMessage) error {
 	if pubErr := p.dlqProducer.Publish(subtreeMsg.Hash, data); pubErr != nil {
 		return fmt.Errorf("publishing subtree message to DLQ: %w", pubErr)
 	}
-	p.messagesDLQ.Add(1)
 	return nil
 }
 
@@ -478,7 +492,10 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]store.Call
 	var registeredFromStore map[string][]store.CallbackEntry
 	if len(uncached) > 0 {
 		var err error
+		metrics.ObserveDBBatchSize(metrics.StoreRegistration, metrics.OpBatchGet, len(uncached))
+		t := metrics.StartDB(p.backendLabel(), metrics.StoreRegistration, metrics.OpBatchGet)
 		registeredFromStore, err = p.registrationStore.BatchGet(uncached)
+		t.End(err)
 		if err != nil {
 			return nil, fmt.Errorf("batch get registrations: %w", err)
 		}
@@ -516,7 +533,10 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]store.Call
 	// re-drives via handleTransientFailure (which leaves the dedup cache
 	// untouched).
 	if len(cachedRegistered) > 0 {
+		metrics.ObserveDBBatchSize(metrics.StoreRegistration, metrics.OpBatchGet, len(cachedRegistered))
+		t := metrics.StartDB(p.backendLabel(), metrics.StoreRegistration, metrics.OpBatchGet)
 		cachedEntries, err := p.registrationStore.BatchGet(cachedRegistered)
+		t.End(err)
 		if err != nil {
 			return nil, fmt.Errorf("batch get callbackURLs for cached txids: %w", err)
 		}
@@ -584,6 +604,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 				SubtreeHash:   subtreeID,
 				TxIDs:         chunk,
 			}
+			emitStart := time.Now()
 			data, err := msg.Encode()
 			if err != nil {
 				p.Logger.Error("failed to encode batched SEEN_ON_NETWORK", "callbackURL", callbackURL, "error", err)
@@ -598,6 +619,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 					firstErr = fmt.Errorf("publishing SEEN_ON_NETWORK for %s: %w", callbackURL, err)
 				}
 			}
+			metrics.ObserveSubtreeEmitSeen(callbackURL, metrics.SeenKindOnNetwork, time.Since(emitStart))
 		}
 	}
 
@@ -613,7 +635,9 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 	// best-effort increment + threshold callback on this attempt.
 	thresholdGroups := make(map[string][]string) // callbackURL → threshold-reached txids
 	for txid, entries := range registeredTxids {
+		incStart := time.Now()
 		result, err := p.seenCounterStore.Increment(txid, subtreeID)
+		metrics.ObserveDB(p.backendLabel(), metrics.StoreSeenCounter, metrics.OpIncrement, incStart, err)
 		if err != nil {
 			p.Logger.Error("failed to increment seen counter", "txid", txid, "subtreeID", subtreeID, "error", err)
 			if firstErr == nil {
@@ -638,6 +662,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 				SubtreeHash:   subtreeID,
 				TxIDs:         chunk,
 			}
+			emitStart := time.Now()
 			data, err := msg.Encode()
 			if err != nil {
 				p.Logger.Error("failed to encode batched SEEN_MULTIPLE_NODES", "callbackURL", callbackURL, "error", err)
@@ -652,10 +677,21 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 					firstErr = fmt.Errorf("publishing SEEN_MULTIPLE_NODES for %s: %w", callbackURL, err)
 				}
 			}
+			metrics.ObserveSubtreeEmitSeen(callbackURL, metrics.SeenKindMultipleNodes, time.Since(emitStart))
 		}
 	}
 
 	return firstErr
+}
+
+// backendLabel returns the store-backend label for DB metrics: "aerospike"
+// or "sql" depending on cfg.Store.Backend. Falls back to "aerospike" (the
+// default) when cfg is nil or unset, matching config.Load() behavior.
+func (p *Processor) backendLabel() string {
+	if p.cfg != nil && p.cfg.Store.Backend == config.BackendSQL {
+		return metrics.BackendSQL
+	}
+	return metrics.BackendAerospike
 }
 
 // callbackBatchChunkSize caps txids per batched callback message so the JSON

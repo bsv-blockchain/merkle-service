@@ -25,6 +25,21 @@ type Config struct {
 	BlobStore BlobStoreConfig `yaml:"blobStore" mapstructure:"blobstore"`
 	DataHub   DataHubConfig   `yaml:"datahub"   mapstructure:"datahub"`
 	Registry  RegistryConfig  `yaml:"registry"  mapstructure:"registry"`
+	Metrics   MetricsConfig   `yaml:"metrics"   mapstructure:"metrics"`
+}
+
+// MetricsConfig controls the Prometheus /metrics exporter. Each binary that
+// runs services (api-server, block-processor, callback-delivery,
+// subtree-fetcher, subtree-worker, p2p-client, all-in-one) starts a dedicated
+// metrics HTTP server on Port. In all-in-one mode a single server is shared
+// across the in-process services via the package-level metrics.Registry.
+//
+// Operators running multiple sub-binaries on the same host MUST override Port
+// per-binary to avoid bind conflicts.
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	Port    int    `yaml:"port"    mapstructure:"port"`
+	Path    string `yaml:"path"    mapstructure:"path"`
 }
 
 // RegistryConfig holds policy for the txid -> callback URL registration store.
@@ -452,6 +467,11 @@ func registerDefaults(v *viper.Viper) {
 
 	// Registry
 	v.SetDefault("registry.maxcallbackspertxid", 10)
+
+	// Metrics
+	v.SetDefault("metrics.enabled", true)
+	v.SetDefault("metrics.port", 9090)
+	v.SetDefault("metrics.path", "/metrics")
 }
 
 // bindEnvVars explicitly binds environment variable names to Viper keys.
@@ -575,6 +595,11 @@ func bindEnvVars(v *viper.Viper) {
 
 		// Registry
 		"registry.maxcallbackspertxid": "REGISTRY_MAX_CALLBACKS_PER_TXID",
+
+		// Metrics
+		"metrics.enabled": "METRICS_ENABLED",
+		"metrics.port":    "METRICS_PORT",
+		"metrics.path":    "METRICS_PATH",
 	}
 
 	for key, env := range bindings {
