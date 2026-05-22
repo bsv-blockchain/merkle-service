@@ -504,6 +504,42 @@ func TestHandleMessage_HappyPath_DecrementsExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_CounterNotFound_AcksWithoutRetry verifies that when the
+// per-block subtree counter has expired (Decrement returns
+// store.ErrCounterNotFound), the work item is ack'd (handleMessage returns
+// nil) and is NOT re-published or routed to DLQ. Before the fix a vanished
+// counter was treated as a transient failure, so every remaining subtree work
+// item for a large block re-published itself forever — the unbounded
+// subtree-work republish loop.
+func TestHandleMessage_CounterNotFound_AcksWithoutRetry(t *testing.T) {
+	cbMock := &callbackFailingProducer{}
+	retryMock := &callbackFailingProducer{}
+	dlqMock := &callbackFailingProducer{}
+
+	counter := newCountingSubtreeCounter()
+	counter.decrementErr = store.ErrCounterNotFound
+
+	stumpStore := &stubStumpStore{}
+
+	subtreePayload := buildRawSubtreeBytes(t, 2)
+	server := rawSubtreeServer(subtreePayload)
+	defer server.Close()
+
+	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
+
+	value := makeWorkMessageBytes(t, "block-gone", "subtree-gone", server.URL, 0)
+	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage with missing counter: expected nil error (ack), got: %v", err)
+	}
+
+	if got := retryMock.sentCount(); got != 0 {
+		t.Errorf("expected zero retry publishes when counter is gone, got %d", got)
+	}
+	if got := dlqMock.sentCount(); got != 0 {
+		t.Errorf("expected zero DLQ publishes when counter is gone, got %d", got)
+	}
+}
+
 // TestHandleMessage_StumpStoreFailure_RetriesAndDoesNotDecrement covers the
 // other half of F-012: a blob-store write failure (not Kafka) during callback
 // publishing must also re-drive via the retry pipeline.

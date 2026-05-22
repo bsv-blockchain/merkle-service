@@ -2,6 +2,7 @@ package block
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -429,6 +430,23 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideU
 	counterKey := SubtreeCounterKey(blockHash, overrideURL)
 	remaining, err := s.subtreeCounter.Decrement(counterKey)
 	if err != nil {
+		if errors.Is(err, store.ErrCounterNotFound) {
+			// The per-block counter is gone (TTL expired before the block
+			// finished). A worker cannot recreate it, so retrying this work
+			// item is futile — that futile retry, repeated across every
+			// remaining subtree, was the unbounded subtree-work republish
+			// loop. Ack the item (return nil) and emit a loud ALERT: the
+			// block must be reprocessed to rebuild its counter and re-emit
+			// BLOCK_PROCESSED. The subtree's STUMP/MINED callbacks have
+			// already been published by this point, so only the
+			// BLOCK_PROCESSED coordination is lost.
+			s.Logger.Error(
+				"ALERT: subtree counter missing (TTL expired); acking work item without retry — block must be reprocessed",
+				"blockHash", blockHash,
+				"counterKey", counterKey,
+			)
+			return nil
+		}
 		s.Logger.Error(
 			"failed to decrement subtree counter",
 			"blockHash", blockHash,

@@ -375,7 +375,12 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.callbackurlregistry", "merkle_callback_urls")
 	v.SetDefault("aerospike.callbackurlregistryttlsec", 7*24*60*60)
 	v.SetDefault("aerospike.subtreecounterset", "merkle_subtree_counters")
-	v.SetDefault("aerospike.subtreecounterttlsec", 600)
+	// 1h. With Decrement re-stamping the TTL on every subtree, this is an
+	// inactivity window, not a hard block-processing deadline — it only fires
+	// if a block makes zero subtree progress for a full hour. The former 600s
+	// default expired mid-flight on large (tens-of-thousands-of-subtree)
+	// blocks even while they were actively progressing.
+	v.SetDefault("aerospike.subtreecounterttlsec", 3600)
 	v.SetDefault("aerospike.callbackaccumulatorset", "merkle_callback_accum")
 	v.SetDefault("aerospike.callbackaccumulatorttlsec", 600)
 	v.SetDefault("aerospike.datahubregistry", "merkle_datahub_urls")
