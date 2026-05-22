@@ -42,7 +42,8 @@ func (s *callbackAccumulator) Append(blockHash, callbackURL string, txids []stri
 	qParent := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		`INSERT INTO callback_accumulator (block_hash, expires_at) VALUES (%s, %s)
         ON CONFLICT (block_hash) DO UPDATE SET expires_at = EXCLUDED.expires_at`,
-		s.d.placeholder(1), s.d.intervalSeconds(s.ttlSec))
+		s.d.placeholder(1), s.d.intervalSeconds(s.ttlSec),
+	)
 	if _, err := tx.ExecContext(ctx, qParent, blockHash); err != nil {
 		return fmt.Errorf("upsert accumulator: %w", err)
 	}
@@ -50,7 +51,8 @@ func (s *callbackAccumulator) Append(blockHash, callbackURL string, txids []stri
 	qEntry := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		`INSERT INTO callback_accumulator_entries (block_hash, callback_url, subtree_index, txids_json, stump_data)
         VALUES (%s, %s, %s, %s, %s)`,
-		s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3), s.d.placeholder(4), s.d.placeholder(5))
+		s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3), s.d.placeholder(4), s.d.placeholder(5),
+	)
 	if _, err := tx.ExecContext(ctx, qEntry, blockHash, callbackURL, subtreeIndex, string(txidsJSON), stumpData); err != nil {
 		return fmt.Errorf("insert entry: %w", err)
 	}
@@ -114,7 +116,8 @@ func (s *callbackAccumulator) ReadAndDelete(blockHash string) (map[string]*store
 	// PostgreSQL and SQLite >= 3.35 (modernc.org/sqlite is well past that).
 	qDelEntries := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		`DELETE FROM callback_accumulator_entries WHERE block_hash = %s
-        RETURNING callback_url, subtree_index, txids_json, stump_data`, s.d.placeholder(1))
+        RETURNING callback_url, subtree_index, txids_json, stump_data`, s.d.placeholder(1),
+	)
 	rows, err := tx.QueryContext(ctx, qDelEntries, blockHash)
 	if err != nil {
 		return nil, err

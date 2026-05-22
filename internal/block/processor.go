@@ -184,7 +184,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 		return err
 	}
 
-	p.Logger.Info("processing block announcement",
+	p.Logger.Info(
+		"processing block announcement",
 		"hash", blockMsg.Hash,
 		"height", blockMsg.Height,
 		"dataHubUrl", blockMsg.DataHubURL,
@@ -223,7 +224,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 
 	// 5.3: Extract subtree hashes from block metadata.
 	subtreeHashes := meta.Subtrees
-	p.Logger.Info("block metadata fetched",
+	p.Logger.Info(
+		"block metadata fetched",
 		"hash", blockMsg.Hash,
 		"height", meta.Height,
 		"subtreeCount", len(subtreeHashes),
@@ -281,7 +283,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 		}
 		data, encErr := workMsg.Encode()
 		if encErr != nil {
-			p.Logger.Error("failed to encode subtree work message",
+			p.Logger.Error(
+				"failed to encode subtree work message",
 				"subtreeHash", stHash,
 				"blockHash", blockMsg.Hash,
 				"subtreeIndex", i,
@@ -303,7 +306,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	counterKey := SubtreeCounterKey(blockMsg.Hash, blockMsg.OverrideCallbackURL)
 	if p.subtreeCounter != nil {
 		if err := p.subtreeCounter.Init(counterKey, len(encoded)); err != nil {
-			p.Logger.Error("failed to init subtree counter",
+			p.Logger.Error(
+				"failed to init subtree counter",
 				"blockHash", blockMsg.Hash,
 				"counterKey", counterKey,
 				"count", len(encoded),
@@ -322,7 +326,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 	// duplicate fan-out is safe.
 	for i, ew := range encoded {
 		if err := p.subtreeWorkProducer.PublishWithHashKey(ew.subtreeHash, ew.payload); err != nil {
-			p.Logger.Error("failed to publish subtree work message",
+			p.Logger.Error(
+				"failed to publish subtree work message",
 				"subtreeHash", ew.subtreeHash,
 				"blockHash", blockMsg.Hash,
 				"subtreeIndex", i,
@@ -335,7 +340,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessa
 		}
 	}
 
-	p.Logger.Info("dispatched subtree work items",
+	p.Logger.Info(
+		"dispatched subtree work items",
 		"blockHash", blockMsg.Hash,
 		"subtreeCount", len(encoded),
 	)
@@ -420,7 +426,8 @@ func (p *Processor) fetchBlockMetadataWithFailover(
 		cancel()
 		if err == nil {
 			if a.url != announcedURL {
-				p.Logger.Info("block metadata served by failover DataHub",
+				p.Logger.Info(
+					"block metadata served by failover DataHub",
 					"hash", blockHash,
 					"announcedUrl", announcedURL,
 					"resolvedUrl", a.url,
@@ -429,7 +436,8 @@ func (p *Processor) fetchBlockMetadataWithFailover(
 			return meta, a.url, nil
 		}
 		lastErr = err
-		p.Logger.Debug("DataHub failover candidate failed",
+		p.Logger.Debug(
+			"DataHub failover candidate failed",
 			"hash", blockHash,
 			"url", a.url,
 			"notFound", errors.Is(err, datahub.ErrNotFound),

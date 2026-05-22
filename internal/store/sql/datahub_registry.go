@@ -35,7 +35,8 @@ func (r *dataHubRegistry) Add(dataHubURL string) error {
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO datahub_urls (datahub_url, last_seen_at) VALUES (%s, %s) "+
 			"ON CONFLICT (datahub_url) DO UPDATE SET last_seen_at = %s",
-		r.d.placeholder(1), r.d.now, r.d.now)
+		r.d.placeholder(1), r.d.now, r.d.now,
+	)
 	_, err := r.db.ExecContext(ctx, q, dataHubURL)
 	return err
 }
@@ -49,7 +50,8 @@ func (r *dataHubRegistry) GetAll() ([]string, error) {
 		"SELECT datahub_url FROM datahub_urls "+
 			"WHERE last_seen_at IS NULL OR last_seen_at >= %s "+
 			"ORDER BY datahub_url",
-		r.d.intervalSeconds(cutoff))
+		r.d.intervalSeconds(cutoff),
+	)
 
 	rows, err := r.db.QueryContext(ctx, q)
 	if err != nil {

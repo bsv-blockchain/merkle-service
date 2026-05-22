@@ -95,7 +95,8 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 	if s.blockCfg.RegCacheMaxMB > 0 {
 		regCache, err := cache.NewRegistrationCache(s.blockCfg.RegCacheMaxMB, s.Logger)
 		if err != nil {
-			s.Logger.Warn("failed to create block registration cache, proceeding without",
+			s.Logger.Warn(
+				"failed to create block registration cache, proceeding without",
 				"error", err,
 				"maxMB", s.blockCfg.RegCacheMaxMB,
 			)
@@ -156,7 +157,8 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 	}
 	s.consumer = consumer
 
-	s.Logger.Info("subtree worker service initialized",
+	s.Logger.Info(
+		"subtree worker service initialized",
 		"subtreeWorkTopic", s.kafkaCfg.SubtreeWorkTopic,
 		"subtreeWorkDLQTopic", dlqTopic,
 		"maxAttempts", s.maxAttempts(),
@@ -250,7 +252,8 @@ func (s *SubtreeWorkerService) maxAttempts() int {
 func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
 	workMsg, err := kafka.DecodeSubtreeWorkMessage(msg.Value)
 	if err != nil {
-		s.Logger.Error("failed to decode subtree work message, dropping",
+		s.Logger.Error(
+			"failed to decode subtree work message, dropping",
 			"offset", msg.Offset,
 			"partition", msg.Partition,
 			"error", err,
@@ -260,7 +263,8 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.Co
 		return nil
 	}
 
-	s.Logger.Debug("processing subtree work item",
+	s.Logger.Debug(
+		"processing subtree work item",
 		"subtreeHash", workMsg.SubtreeHash,
 		"blockHash", workMsg.BlockHash,
 		"blockHeight", workMsg.BlockHeight,
@@ -331,7 +335,8 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 	maxAttempts := s.maxAttempts()
 
 	if nextAttempt >= maxAttempts {
-		s.Logger.Error("subtree work item exceeded max attempts, routing to DLQ",
+		s.Logger.Error(
+			"subtree work item exceeded max attempts, routing to DLQ",
 			"subtreeHash", workMsg.SubtreeHash,
 			"blockHash", workMsg.BlockHash,
 			"subtreeIndex", workMsg.SubtreeIndex,
@@ -358,7 +363,8 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 		// will repeat, but that's preferable to silently acking with the
 		// counter still > 0 and BLOCK_PROCESSED never firing (F-013).
 		if decErr := s.decrementCounterAndMaybeEmit(workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken); decErr != nil {
-			s.Logger.Error("ALERT: subtree counter decrement failed on DLQ path; BLOCK_PROCESSED delayed until counter store recovers",
+			s.Logger.Error(
+				"ALERT: subtree counter decrement failed on DLQ path; BLOCK_PROCESSED delayed until counter store recovers",
 				"subtreeHash", workMsg.SubtreeHash,
 				"blockHash", workMsg.BlockHash,
 				"subtreeIndex", workMsg.SubtreeIndex,
@@ -370,7 +376,8 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 		return nil
 	}
 
-	s.Logger.Warn("subtree work item transient failure, re-publishing for retry",
+	s.Logger.Warn(
+		"subtree work item transient failure, re-publishing for retry",
 		"subtreeHash", workMsg.SubtreeHash,
 		"blockHash", workMsg.BlockHash,
 		"subtreeIndex", workMsg.SubtreeIndex,
@@ -422,7 +429,8 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideU
 	counterKey := SubtreeCounterKey(blockHash, overrideURL)
 	remaining, err := s.subtreeCounter.Decrement(counterKey)
 	if err != nil {
-		s.Logger.Error("failed to decrement subtree counter",
+		s.Logger.Error(
+			"failed to decrement subtree counter",
 			"blockHash", blockHash,
 			"counterKey", counterKey,
 			"error", err,
@@ -436,7 +444,8 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideU
 	// not silently lost. Receiver-side dedup handles the duplicate.
 	if remaining <= 0 {
 		if emitErr := s.emitBlockProcessed(blockHash, overrideURL, overrideToken); emitErr != nil {
-			s.Logger.Error("failed to emit BLOCK_PROCESSED; work item will be redelivered",
+			s.Logger.Error(
+				"failed to emit BLOCK_PROCESSED; work item will be redelivered",
 				"blockHash", blockHash,
 				"remaining", remaining,
 				"error", emitErr,
@@ -460,7 +469,8 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideU
 // decrementing the counter — see F-012.
 func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWorkMessage, result *SubtreeResult) error {
 	if s.stumpStore == nil {
-		s.Logger.Error("stump store not configured; cannot publish STUMP callbacks",
+		s.Logger.Error(
+			"stump store not configured; cannot publish STUMP callbacks",
 			"blockHash", workMsg.BlockHash,
 			"subtreeIndex", workMsg.SubtreeIndex,
 		)
@@ -472,7 +482,8 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 	if err != nil {
 		// Without a ref, downstream delivery can't fetch the STUMP — skip this
 		// subtree's callbacks entirely rather than publishing broken messages.
-		s.Logger.Error("failed to store STUMP blob; skipping subtree callbacks",
+		s.Logger.Error(
+			"failed to store STUMP blob; skipping subtree callbacks",
 			"blockHash", workMsg.BlockHash,
 			"subtreeIndex", workMsg.SubtreeIndex,
 			"callbackURLs", len(result.CallbackGroups),
@@ -605,7 +616,8 @@ func emitBlockProcessedCallbacks(
 		}
 		data, encErr := msg.Encode()
 		if encErr != nil {
-			logger.Error("failed to encode BLOCK_PROCESSED message",
+			logger.Error(
+				"failed to encode BLOCK_PROCESSED message",
 				"callbackURL", entry.URL,
 				"error", encErr,
 			)
@@ -615,7 +627,8 @@ func emitBlockProcessedCallbacks(
 			continue
 		}
 		if pubErr := producer.PublishWithHashKey(msg.PartitionKey(), data); pubErr != nil {
-			logger.Error("failed to publish BLOCK_PROCESSED callback",
+			logger.Error(
+				"failed to publish BLOCK_PROCESSED callback",
 				"callbackURL", entry.URL,
 				"error", pubErr,
 			)
@@ -626,7 +639,8 @@ func emitBlockProcessedCallbacks(
 	}
 
 	if firstErr == nil {
-		logger.Info("emitted BLOCK_PROCESSED callbacks",
+		logger.Info(
+			"emitted BLOCK_PROCESSED callbacks",
 			"blockHash", blockHash,
 			"callbackURLs", len(entries),
 		)

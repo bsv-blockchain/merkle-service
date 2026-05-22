@@ -462,7 +462,8 @@ func TestCallbackURLRegistry_RetentionWindow(t *testing.T) {
 	stale := "http://stale"
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO callback_urls (callback_url, last_seen_at) VALUES (%s, %s)",
-		d.placeholder(1), d.intervalSeconds(-2*int(time.Hour/time.Second)))
+		d.placeholder(1), d.intervalSeconds(-2*int(time.Hour/time.Second)),
+	)
 	if _, err := db.ExecContext(context.Background(), q, stale); err != nil {
 		t.Fatalf("seed stale row: %v", err)
 	}
@@ -508,7 +509,8 @@ func TestCallbackURLRegistry_SweeperEvicts(t *testing.T) {
 	stale := "http://ancient"
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
 		"INSERT INTO callback_urls (callback_url, last_seen_at) VALUES (%s, %s)",
-		d.placeholder(1), d.intervalSeconds(-2*int(time.Hour/time.Second)))
+		d.placeholder(1), d.intervalSeconds(-2*int(time.Hour/time.Second)),
+	)
 	if _, err := db.ExecContext(context.Background(), q, stale); err != nil {
 		t.Fatalf("seed stale row: %v", err)
 	}

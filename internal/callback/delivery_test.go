@@ -18,6 +18,7 @@ import (
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
@@ -465,6 +466,7 @@ func TestProcessDelivery_RetriesViaKafkaRepublish(t *testing.T) {
 		RetryCount:   0,
 	}
 
+	retriedBefore := callbackCount(metrics.OutcomeRetryScheduled)
 	if err := ds.processDelivery(context.Background(), msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
@@ -480,8 +482,8 @@ func TestProcessDelivery_RetriesViaKafkaRepublish(t *testing.T) {
 	if republished.NextRetryAt.IsZero() {
 		t.Error("expected republished NextRetryAt to be set")
 	}
-	if ds.messagesRetried.Load() != 1 {
-		t.Errorf("expected messagesRetried=1, got %d", ds.messagesRetried.Load())
+	if delta := callbackCount(metrics.OutcomeRetryScheduled) - retriedBefore; delta != 1 {
+		t.Errorf("expected retry counter delta=1, got %d", delta)
 	}
 }
 
@@ -506,6 +508,7 @@ func TestProcessDelivery_RetryRepublishFailureSurfacesError(t *testing.T) {
 		SubtreeIndex: 1,
 	}
 
+	before := callbackCount(metrics.OutcomeRetryScheduled)
 	err := ds.processDelivery(context.Background(), msg)
 	if err == nil {
 		t.Fatal("expected error from processDelivery when retry republish fails")
@@ -513,8 +516,8 @@ func TestProcessDelivery_RetryRepublishFailureSurfacesError(t *testing.T) {
 	if got := len(retryMock.getMessages()); got != 0 {
 		t.Errorf("expected 0 retry messages captured (mock failed), got %d", got)
 	}
-	if ds.messagesRetried.Load() != 0 {
-		t.Errorf("expected messagesRetried=0 when republish fails, got %d", ds.messagesRetried.Load())
+	if delta := callbackCount(metrics.OutcomeRetryScheduled) - before; delta != 0 {
+		t.Errorf("expected retry counter delta=0 when republish fails, got %d", delta)
 	}
 }
 
@@ -536,6 +539,7 @@ func TestProcessDelivery_PublishesToDLQAfterMaxRetries(t *testing.T) {
 		RetryCount:   3, // Already at max retries.
 	}
 
+	before := callbackCount(metrics.OutcomeDLQ)
 	if err := ds.processDelivery(context.Background(), msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
@@ -549,8 +553,8 @@ func TestProcessDelivery_PublishesToDLQAfterMaxRetries(t *testing.T) {
 	if len(dlqMsgs) != 1 {
 		t.Fatalf("expected 1 DLQ message, got %d", len(dlqMsgs))
 	}
-	if ds.messagesFailed.Load() != 1 {
-		t.Errorf("expected messagesFailed=1, got %d", ds.messagesFailed.Load())
+	if delta := callbackCount(metrics.OutcomeDLQ) - before; delta != 1 {
+		t.Errorf("expected DLQ counter delta=1, got %d", delta)
 	}
 }
 
@@ -576,6 +580,7 @@ func TestProcessDelivery_DLQPublishFailureSurfacesError(t *testing.T) {
 		SubtreeIndex: 1,
 	}
 
+	before := callbackCount(metrics.OutcomeDLQ)
 	start := time.Now()
 	err := ds.processDelivery(context.Background(), msg)
 	if err == nil {
@@ -584,8 +589,8 @@ func TestProcessDelivery_DLQPublishFailureSurfacesError(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("DLQ retries took too long: %v", elapsed)
 	}
-	if ds.messagesFailed.Load() != 0 {
-		t.Errorf("expected messagesFailed=0 when DLQ publish never succeeded, got %d", ds.messagesFailed.Load())
+	if delta := callbackCount(metrics.OutcomeDLQ) - before; delta != 0 {
+		t.Errorf("expected DLQ counter delta=0 when DLQ publish never succeeded, got %d", delta)
 	}
 }
 
@@ -612,6 +617,7 @@ func TestProcessDelivery_MissingStumpBlobGoesStraightToDLQ(t *testing.T) {
 		RetryCount:   0,
 	}
 
+	before := callbackCount(metrics.OutcomeDLQ)
 	if err := ds.processDelivery(context.Background(), msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
@@ -623,8 +629,8 @@ func TestProcessDelivery_MissingStumpBlobGoesStraightToDLQ(t *testing.T) {
 	if len(dlqMsgs) != 1 {
 		t.Fatalf("expected 1 DLQ message, got %d", len(dlqMsgs))
 	}
-	if ds.messagesFailed.Load() != 1 {
-		t.Errorf("expected messagesFailed=1, got %d", ds.messagesFailed.Load())
+	if delta := callbackCount(metrics.OutcomeDLQ) - before; delta != 1 {
+		t.Errorf("expected DLQ counter delta=1, got %d", delta)
 	}
 }
 
@@ -643,12 +649,13 @@ func TestProcessDelivery_SuccessIncrementsCounter(t *testing.T) {
 		TxID:        "tx-counter",
 	}
 
+	before := callbackCount(metrics.OutcomeDelivered)
 	if err := ds.processDelivery(context.Background(), msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
 
-	if ds.messagesProcessed.Load() != 1 {
-		t.Errorf("expected messagesProcessed=1, got %d", ds.messagesProcessed.Load())
+	if delta := callbackCount(metrics.OutcomeDelivered) - before; delta != 1 {
+		t.Errorf("expected delivered counter delta=1, got %d", delta)
 	}
 }
 
@@ -671,6 +678,7 @@ func TestProcessDelivery_DedupSkipsDuplicate(t *testing.T) {
 		SubtreeIndex: 3,
 	}
 
+	before := callbackCount(metrics.OutcomeDedupHit)
 	if err := ds.processDelivery(context.Background(), msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
@@ -678,8 +686,8 @@ func TestProcessDelivery_DedupSkipsDuplicate(t *testing.T) {
 	if requestCount.Load() != 0 {
 		t.Errorf("expected no HTTP requests for dedup hit, got %d", requestCount.Load())
 	}
-	if ds.messagesDedupe.Load() != 1 {
-		t.Errorf("expected messagesDedupe=1, got %d", ds.messagesDedupe.Load())
+	if delta := callbackCount(metrics.OutcomeDedupHit) - before; delta != 1 {
+		t.Errorf("expected dedup_hit counter delta=1, got %d", delta)
 	}
 }
 

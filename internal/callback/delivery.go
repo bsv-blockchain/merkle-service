@@ -14,14 +14,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/IBM/sarama"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -106,11 +107,6 @@ type DeliveryService struct {
 	httpClient    *http.Client
 	dedupStore    CallbackDeduper
 	stumpStore    store.StumpStore
-
-	messagesProcessed atomic.Int64
-	messagesRetried   atomic.Int64
-	messagesFailed    atomic.Int64
-	messagesDedupe    atomic.Int64
 }
 
 // NewDeliveryService creates a new callback DeliveryService. stumpStore is
@@ -173,7 +169,8 @@ func (d *DeliveryService) Init(_ interface{}) error {
 	}
 	d.consumer = consumer
 
-	d.Logger.Info("callback delivery service initialized",
+	d.Logger.Info(
+		"callback delivery service initialized",
 		"callbackTopic", d.cfg.Kafka.CallbackTopic,
 		"callbackDlqTopic", d.cfg.Kafka.CallbackDLQTopic,
 		"maxRetries", d.cfg.Callback.MaxRetries,
@@ -238,10 +235,11 @@ func (d *DeliveryService) Stop() error {
 
 	d.SetStarted(false)
 	d.Cancel()
-	d.Logger.Info("callback delivery service stopped",
-		"messagesProcessed", d.messagesProcessed.Load(),
-		"messagesRetried", d.messagesRetried.Load(),
-		"messagesFailed", d.messagesFailed.Load(),
+	d.Logger.Info(
+		"callback delivery service stopped",
+		"messagesProcessed", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDelivered))),
+		"messagesRetried", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeRetryScheduled))),
+		"messagesFailed", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDLQ))),
 	)
 	return firstErr
 }
@@ -257,9 +255,9 @@ func (d *DeliveryService) Health() service.HealthStatus {
 		Name:   d.Name,
 		Status: status,
 		Details: map[string]string{
-			"messagesProcessed": fmt.Sprintf("%d", d.messagesProcessed.Load()),
-			"messagesRetried":   fmt.Sprintf("%d", d.messagesRetried.Load()),
-			"messagesFailed":    fmt.Sprintf("%d", d.messagesFailed.Load()),
+			"messagesProcessed": fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDelivered)))),
+			"messagesRetried":   fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeRetryScheduled)))),
+			"messagesFailed":    fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDLQ)))),
 		},
 	}
 }
@@ -280,11 +278,14 @@ func (d *DeliveryService) handleMessage(ctx context.Context, msg *sarama.Consume
 		// A poison-pill message that cannot be decoded should not block the
 		// partition forever. Log and ack so the consumer can advance — the
 		// raw bytes are still inspectable via Kafka's retention.
-		d.Logger.Error("failed to decode callback message, skipping",
+		d.Logger.Error(
+			"failed to decode callback message, skipping",
 			"offset", msg.Offset,
 			"partition", msg.Partition,
 			"error", err,
 		)
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDecodeError).Inc()
+		metrics.IncKafkaConsumerError(msg.Topic, metrics.KafkaErrorDecode)
 		return nil
 	}
 
@@ -323,7 +324,8 @@ func (d *DeliveryService) handleMessage(ctx context.Context, msg *sarama.Consume
 // message reaches a durable terminal state; a non-nil return means the
 // Kafka offset must NOT be marked so the message is re-consumed.
 func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.CallbackTopicMessage) error {
-	d.Logger.Debug("processing callback message",
+	d.Logger.Debug(
+		"processing callback message",
 		"callbackUrl", cbMsg.CallbackURL,
 		"txid", cbMsg.TxID,
 		"type", cbMsg.Type,
@@ -335,7 +337,15 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 	if d.dedupStore != nil {
 		dedupKey := dedupKeyForMessage(cbMsg)
 		if dedupKey != "" {
+			checkStart := time.Now()
 			exists, err := d.dedupStore.Exists(dedupKey, cbMsg.CallbackURL, string(cbMsg.Type))
+			checkOutcome := metrics.OutcomeMiss
+			if err != nil {
+				checkOutcome = metrics.OutcomeError
+			} else if exists {
+				checkOutcome = metrics.OutcomeHit
+			}
+			metrics.ObserveCallbackDedupCheck(checkOutcome, time.Since(checkStart))
 			if err != nil {
 				// Previous behavior was "proceed with delivery" — but if a
 				// prior attempt had succeeded and Aerospike is briefly
@@ -353,14 +363,15 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 				// clear the stale dedup state — see
 				// bsv-blockchain/merkle-service#122 for the full
 				// post-DLQ failure mode.
-				d.Logger.Info("skipping duplicate callback delivery",
+				d.Logger.Info(
+					"skipping duplicate callback delivery",
 					"dedupKey", dedupKey,
 					"callbackUrl", cbMsg.CallbackURL,
 					"type", cbMsg.Type,
 					"blockHash", cbMsg.BlockHash,
 					"subtreeIndex", cbMsg.SubtreeIndex,
 				)
-				d.messagesDedupe.Add(1)
+				metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDedupHit).Inc()
 				return nil
 			}
 		}
@@ -375,14 +386,21 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 		if d.dedupStore != nil {
 			dedupKey := dedupKeyForMessage(cbMsg)
 			if dedupKey != "" {
+				recordStart := time.Now()
 				ttl := time.Duration(d.cfg.Callback.DedupTTLSec) * time.Second
-				if recErr := d.dedupStore.Record(dedupKey, cbMsg.CallbackURL, string(cbMsg.Type), ttl); recErr != nil {
+				recErr := d.dedupStore.Record(dedupKey, cbMsg.CallbackURL, string(cbMsg.Type), ttl)
+				recordOutcome := metrics.OutcomeSuccess
+				if recErr != nil {
+					recordOutcome = metrics.OutcomeError
 					d.Logger.Error("failed to record callback dedup", "error", recErr, "dedupKey", dedupKey, "callbackUrl", cbMsg.CallbackURL)
 				}
+				metrics.ObserveCallbackDedupRecord(recordOutcome, time.Since(recordStart))
 			}
 		}
-		d.messagesProcessed.Add(1)
-		d.Logger.Debug("callback delivered successfully",
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDelivered).Inc()
+		metrics.ObserveCallbackRetryAttempt(cbMsg.RetryCount)
+		d.Logger.Debug(
+			"callback delivered successfully",
 			"callbackUrl", cbMsg.CallbackURL,
 			"txid", cbMsg.TxID,
 			"type", cbMsg.Type,
@@ -391,7 +409,8 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 		return nil
 	}
 
-	d.Logger.Warn("callback delivery failed",
+	d.Logger.Warn(
+		"callback delivery failed",
 		"callbackUrl", cbMsg.CallbackURL,
 		"txid", cbMsg.TxID,
 		"type", cbMsg.Type,
@@ -410,7 +429,8 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 	// Permanent failures (e.g. STUMP blob expired) skip the retry budget and
 	// go straight to the DLQ — retrying cannot recover them.
 	if isPermanentDeliveryError(cause) {
-		d.Logger.Error("callback permanently failed, publishing to DLQ",
+		d.Logger.Error(
+			"callback permanently failed, publishing to DLQ",
 			"callbackUrl", cbMsg.CallbackURL,
 			"txid", cbMsg.TxID,
 			"type", cbMsg.Type,
@@ -424,7 +444,8 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 
 	// Retry budget exhausted: route to DLQ.
 	if cbMsg.RetryCount >= d.cfg.Callback.MaxRetries {
-		d.Logger.Error("callback retries exhausted, publishing to DLQ",
+		d.Logger.Error(
+			"callback retries exhausted, publishing to DLQ",
 			"callbackUrl", cbMsg.CallbackURL,
 			"txid", cbMsg.TxID,
 			"type", cbMsg.Type,
@@ -442,7 +463,8 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 	backoffSec := d.cfg.Callback.BackoffBaseSec * cbMsg.RetryCount
 	cbMsg.NextRetryAt = time.Now().Add(time.Duration(backoffSec) * time.Second)
 
-	d.Logger.Info("scheduling callback retry via Kafka republish",
+	d.Logger.Info(
+		"scheduling callback retry via Kafka republish",
 		"callbackUrl", cbMsg.CallbackURL,
 		"txid", cbMsg.TxID,
 		"retryCount", cbMsg.RetryCount,
@@ -471,7 +493,8 @@ func (d *DeliveryService) republishForRetry(cbMsg *kafka.CallbackTopicMessage, r
 		return fmt.Errorf("encode callback message for retry republish (%s): %w", reason, err)
 	}
 	if err := d.retryProducer.PublishWithHashKey(cbMsg.PartitionKey(), data); err != nil {
-		d.Logger.Error("retry republish failed, leaving Kafka offset uncommitted",
+		d.Logger.Error(
+			"retry republish failed, leaving Kafka offset uncommitted",
 			"callbackUrl", cbMsg.CallbackURL,
 			"txid", cbMsg.TxID,
 			"retryCount", cbMsg.RetryCount,
@@ -480,7 +503,7 @@ func (d *DeliveryService) republishForRetry(cbMsg *kafka.CallbackTopicMessage, r
 		)
 		return fmt.Errorf("retry republish (%s): %w", reason, err)
 	}
-	d.messagesRetried.Add(1)
+	metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeRetryScheduled).Inc()
 	return nil
 }
 
@@ -498,7 +521,8 @@ func (d *DeliveryService) publishToDLQDurably(cbMsg *kafka.CallbackTopicMessage)
 		}
 		if err := d.publishToDLQ(cbMsg); err != nil {
 			lastErr = err
-			d.Logger.Warn("DLQ publish attempt failed",
+			d.Logger.Warn(
+				"DLQ publish attempt failed",
 				"attempt", i+1,
 				"callbackUrl", cbMsg.CallbackURL,
 				"txid", cbMsg.TxID,
@@ -506,10 +530,11 @@ func (d *DeliveryService) publishToDLQDurably(cbMsg *kafka.CallbackTopicMessage)
 			)
 			continue
 		}
-		d.messagesFailed.Add(1)
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDLQ).Inc()
 		return nil
 	}
-	d.Logger.Error("DLQ publish exhausted all retries, leaving Kafka offset uncommitted",
+	d.Logger.Error(
+		"DLQ publish exhausted all retries, leaving Kafka offset uncommitted",
 		"callbackUrl", cbMsg.CallbackURL,
 		"txid", cbMsg.TxID,
 		"type", cbMsg.Type,
@@ -530,11 +555,12 @@ func (d *DeliveryService) heartbeat(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			d.Logger.Info("callback delivery heartbeat",
-				"messagesProcessed", d.messagesProcessed.Load(),
-				"messagesRetried", d.messagesRetried.Load(),
-				"messagesFailed", d.messagesFailed.Load(),
-				"messagesDedupe", d.messagesDedupe.Load(),
+			d.Logger.Info(
+				"callback delivery heartbeat",
+				"messagesProcessed", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDelivered))),
+				"messagesRetried", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeRetryScheduled))),
+				"messagesFailed", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDLQ))),
+				"messagesDedupe", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDedupHit))),
 			)
 		}
 	}
@@ -561,11 +587,22 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 		if d.stumpStore == nil {
 			return errPermanentDelivery(fmt.Errorf("stump store not configured for STUMP delivery"))
 		}
+		stumpStart := time.Now()
 		stumpBytes, err := d.stumpStore.Get(msg.StumpRef)
+		stumpOutcome := metrics.OutcomeSuccess
+		if err != nil {
+			if errors.Is(err, store.ErrStumpNotFound) {
+				stumpOutcome = metrics.OutcomeNotFound
+			} else {
+				stumpOutcome = metrics.OutcomeError
+			}
+		}
+		metrics.ObserveCallbackStumpFetch(stumpOutcome, time.Since(stumpStart))
 		if err != nil {
 			if errors.Is(err, store.ErrStumpNotFound) {
 				// Blob expired (DAH) or never written — no amount of retry will
 				// produce it. Fail permanently so processDelivery routes to DLQ.
+				metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeStumpNotFound).Inc()
 				return errPermanentDelivery(fmt.Errorf("stump blob missing for ref %s: %w", msg.StumpRef, err))
 			}
 			return fmt.Errorf("fetching stump ref %s: %w", msg.StumpRef, err)
@@ -600,7 +637,8 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 	start := time.Now()
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
-		d.Logger.Debug("callback http transport error",
+		d.Logger.Debug(
+			"callback http transport error",
 			"callbackUrl", msg.CallbackURL,
 			"durationMs", time.Since(start).Milliseconds(),
 			"idempotencyKey", idempotencyKey,
@@ -609,16 +647,19 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 			"subtreeIndex", msg.SubtreeIndex,
 			"error", err,
 		)
+		metrics.ObserveCallbackDelivery(msg.CallbackURL, 0, len(body), time.Since(start), err)
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	metrics.ObserveCallbackDelivery(msg.CallbackURL, resp.StatusCode, len(body), time.Since(start), nil)
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
 	}
 
 	bodyBytes, truncated := readBodyCapped(resp.Body, 4*1024)
-	d.Logger.Debug("callback http error response",
+	d.Logger.Debug(
+		"callback http error response",
 		"callbackUrl", msg.CallbackURL,
 		"status", resp.StatusCode,
 		"statusText", resp.Status,
@@ -652,6 +693,7 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 	// every block for the full retry budget. 408/429 stay retryable because
 	// they are explicit "try again later" signals.
 	if isNonRetryable4xx(resp.StatusCode) {
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomePermanent4xx).Inc()
 		return errPermanentDelivery(statusErr)
 	}
 	return statusErr

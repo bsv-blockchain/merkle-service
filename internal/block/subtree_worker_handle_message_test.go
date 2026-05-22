@@ -130,6 +130,7 @@ func (s *stubStumpStore) Put(data []byte, blockHeight uint64) (string, error) {
 	s.lastRef = "stump-ref-stub"
 	return s.lastRef, nil
 }
+
 func (s *stubStumpStore) Get(ref string) ([]byte, error) { return nil, errors.New("not implemented") }
 func (s *stubStumpStore) Delete(ref string) error        { return nil }
 
