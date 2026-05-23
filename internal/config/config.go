@@ -662,6 +662,15 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid store.backend %q: must be %q or %q", cfg.Store.Backend, BackendAerospike, BackendSQL)
 	}
 
+	// SubtreeCounterTTLSec must be strictly positive. Zero or negative values
+	// silently produce dangerous Aerospike record TTLs: 0 means "use namespace
+	// default" (may be never-expire), and a negative int truncated to uint32
+	// becomes the Aerospike never-expire sentinel — either way the counter
+	// becomes a permanent record that the sweeper never reclaims.
+	if cfg.Aerospike.SubtreeCounterTTLSec <= 0 {
+		return nil, fmt.Errorf("invalid aerospike.subtreeCounterTTLSec %d: must be > 0", cfg.Aerospike.SubtreeCounterTTLSec)
+	}
+
 	return &cfg, nil
 }
 

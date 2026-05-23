@@ -107,3 +107,20 @@ func TestStoreBackend_EnvOverride(t *testing.T) {
 		t.Fatalf("dsn = %q, want postgres://x", cfg.Store.SQL.DSN)
 	}
 }
+
+// Zero or negative subtreeCounterTTLSec silently produce dangerous Aerospike
+// record TTLs (namespace default / never-expire), turning the counter into a
+// permanent record. Load() must reject those at startup.
+func TestSubtreeCounterTTLSec_RejectsZero(t *testing.T) {
+	_, err := loadWith(t, map[string]string{"AEROSPIKE_SUBTREE_COUNTER_TTL_SEC": "0"}, "")
+	if err == nil {
+		t.Fatal("expected error for subtreeCounterTTLSec=0, got nil")
+	}
+}
+
+func TestSubtreeCounterTTLSec_RejectsNegative(t *testing.T) {
+	_, err := loadWith(t, map[string]string{"AEROSPIKE_SUBTREE_COUNTER_TTL_SEC": "-1"}, "")
+	if err == nil {
+		t.Fatal("expected error for subtreeCounterTTLSec=-1, got nil")
+	}
+}
