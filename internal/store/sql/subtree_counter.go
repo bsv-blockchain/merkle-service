@@ -60,16 +60,19 @@ func (s *subtreeCounter) Init(blockHash string, count int) error {
 //     the codebase opens connections without it.
 //
 // Missing rows: if the counter row does not exist (sql.ErrNoRows), Decrement
-// returns (0, nil) rather than propagating the error. The row may legitimately
-// be absent because the sweeper purged an expired counter, an Init never ran
-// (e.g. process crash between Init and message publish), or the row was
-// already consumed by an earlier successful Decrement that lost its return
-// value. Treating "missing" as "already drained" lets the F-013 DLQ path ack
-// its work item and lets BLOCK_PROCESSED fire; the alternative (propagate
-// ErrNoRows forever) wedges the partition on a redelivery loop because the
-// DLQ-path Decrement also fails, so the message is never ack'd. Receiver-side
-// dedup at the callback delivery service deduplicates any extra
-// BLOCK_PROCESSED that this might trigger, keyed by (blockHash, callbackURL).
+// returns (0, storepkg.ErrCounterNotFound) — matching the Aerospike backend.
+// The row may legitimately be absent because the sweeper purged an expired
+// counter, an Init never ran (e.g. process crash between Init and message
+// publish), or the row was already consumed by an earlier successful
+// Decrement. The worker handles ErrCounterNotFound by acking without emitting
+// BLOCK_PROCESSED and logging an ALERT for operator reprocess. Returning
+// (0, nil) here was the previous behavior — it triggered a premature
+// BLOCK_PROCESSED emission via the worker's `remaining <= 0` branch while
+// other subtrees of the same block were still in flight (and on the
+// Aerospike backend the same condition correctly logged an ALERT and
+// suppressed the emit). The unbounded-redelivery-loop concern that justified
+// the old behavior was eliminated when the worker started ack'ing on
+// ErrCounterNotFound — see fix/subtree-counter-ttl-leak.
 func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -82,7 +85,7 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 		var remaining int
 		if err := s.db.QueryRowContext(ctx, q, blockHash).Scan(&remaining); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return 0, nil
+				return 0, storepkg.ErrCounterNotFound
 			}
 			return 0, err
 		}
@@ -113,7 +116,7 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	qSel := fmt.Sprintf("SELECT remaining FROM subtree_counters WHERE block_hash = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
 	if err := conn.QueryRowContext(ctx, qSel, blockHash).Scan(&remaining); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, nil
+			return 0, storepkg.ErrCounterNotFound
 		}
 		return 0, err
 	}
