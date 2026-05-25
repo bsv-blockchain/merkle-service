@@ -150,7 +150,6 @@ func (s *Server) Init(cfg interface{}) error {
 
 	// Middleware
 	s.router.Use(middleware.RequestID)
-	s.router.Use(middleware.RealIP)
 	s.router.Use(middlewareLogger(s.Logger))
 	s.router.Use(metrics.ChiMiddleware)
 	s.router.Use(middleware.Recoverer)
