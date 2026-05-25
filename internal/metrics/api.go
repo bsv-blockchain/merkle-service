@@ -69,8 +69,8 @@ func init() {
 }
 
 // ChiMiddleware records RED metrics for every HTTP request. Insert it
-// after middleware.RealIP and before middleware.Recoverer in the chain so
-// it sees the final response status (Recoverer turns panics into 500s).
+// before middleware.Recoverer in the chain so it sees the final response
+// status (Recoverer turns panics into 500s).
 //
 // The route label uses chi.RouteContext(ctx).RoutePattern() captured AFTER
 // the inner handler runs — chi sets the matched pattern during routing.
