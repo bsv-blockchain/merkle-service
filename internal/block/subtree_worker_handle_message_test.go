@@ -504,6 +504,42 @@ func TestHandleMessage_HappyPath_DecrementsExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_CounterNotFound_AcksWithoutRetry verifies that when the
+// per-block subtree counter has expired (Decrement returns
+// store.ErrCounterNotFound), the work item is ack'd (handleMessage returns
+// nil) and is NOT re-published or routed to DLQ. Before the fix a vanished
+// counter was treated as a transient failure, so every remaining subtree work
+// item for a large block re-published itself forever — the unbounded
+// subtree-work republish loop.
+func TestHandleMessage_CounterNotFound_AcksWithoutRetry(t *testing.T) {
+	cbMock := &callbackFailingProducer{}
+	retryMock := &callbackFailingProducer{}
+	dlqMock := &callbackFailingProducer{}
+
+	counter := newCountingSubtreeCounter()
+	counter.decrementErr = store.ErrCounterNotFound
+
+	stumpStore := &stubStumpStore{}
+
+	subtreePayload := buildRawSubtreeBytes(t, 2)
+	server := rawSubtreeServer(subtreePayload)
+	defer server.Close()
+
+	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
+
+	value := makeWorkMessageBytes(t, "block-gone", "subtree-gone", server.URL, 0)
+	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+		t.Fatalf("handleMessage with missing counter: expected nil error (ack), got: %v", err)
+	}
+
+	if got := retryMock.sentCount(); got != 0 {
+		t.Errorf("expected zero retry publishes when counter is gone, got %d", got)
+	}
+	if got := dlqMock.sentCount(); got != 0 {
+		t.Errorf("expected zero DLQ publishes when counter is gone, got %d", got)
+	}
+}
+
 // TestHandleMessage_StumpStoreFailure_RetriesAndDoesNotDecrement covers the
 // other half of F-012: a blob-store write failure (not Kafka) during callback
 // publishing must also re-drive via the retry pipeline.
@@ -598,10 +634,10 @@ func TestHandleMessage_DecrementFailureOnSuccessPath_RetriesAndPreservesCount(t 
 
 // TestHandleMessage_DecrementFailureOnDLQPath_ReturnsError covers the harder
 // F-013 case: a callback-publish failure that has reached max attempts (so
-// the work item is DLQ'd) plus a Decrement failure. The DLQ publish itself
-// has already happened, but the Decrement error must surface to the caller
-// so the consumer redelivers — silently acking would leave the per-block
-// counter > 0 forever and BLOCK_PROCESSED would never fire.
+// the work item is DLQ'd) plus a Decrement failure. Decrement now runs
+// BEFORE the DLQ publish, so its failure short-circuits the DLQ publish
+// entirely — the error surfaces, the consumer redelivers, and no duplicate
+// DLQ entries pile up while the counter store is degraded.
 func TestHandleMessage_DecrementFailureOnDLQPath_ReturnsError(t *testing.T) {
 	// Force DLQ path: callback publish always fails, AttemptCount = max-1.
 	cbMock := &callbackFailingProducer{failAll: true, failErr: errors.New("kafka unavailable")}
@@ -629,10 +665,11 @@ func TestHandleMessage_DecrementFailureOnDLQPath_ReturnsError(t *testing.T) {
 		t.Fatalf("expected non-nil error when Decrement fails on DLQ path so consumer redelivers, got nil")
 	}
 
-	// DLQ was published BEFORE the decrement attempt — that ordering matches
-	// PR #77's terminal-failure semantics.
-	if got := dlqMock.sentCount(); got != 1 {
-		t.Errorf("expected exactly 1 DLQ publish, got %d", got)
+	// DLQ publish must NOT have happened — Decrement failed first, and
+	// publishing anyway would produce a duplicate DLQ entry on every
+	// redelivery while the counter store stays degraded.
+	if got := dlqMock.sentCount(); got != 0 {
+		t.Errorf("expected zero DLQ publishes when Decrement fails first, got %d", got)
 	}
 	if got := retryMock.sentCount(); got != 0 {
 		t.Errorf("expected zero retry publishes at max attempts, got %d", got)
@@ -928,12 +965,14 @@ func TestHandleMessage_BlockProcessedEmitRetry_ReEmitsOnRedelivery(t *testing.T)
 
 // TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsError
 // covers the worst-case F-014 path: a STUMP-publish failure forces DLQ, and
-// the DLQ-path decrement-and-emit hits the F-014 emit failure too. The DLQ
-// publish has already happened, but the emit-failure is propagated so the
-// consumer redelivers — silently acking would leave the registered endpoint
-// without BLOCK_PROCESSED forever. This matches the F-013 DLQ-path
-// Decrement-failure semantics from PR #88: prefer a duplicate DLQ publish
-// over silently losing the BLOCK_PROCESSED notification.
+// the DLQ-path decrement-and-emit hits the F-014 emit failure too. Decrement
+// runs BEFORE the DLQ publish, so an emit-failure (which is surfaced from
+// decrementCounterAndMaybeEmit) short-circuits the DLQ publish entirely.
+// The error propagates so the consumer redelivers; on redelivery the counter
+// goes negative, emit is re-attempted, and receiver-side dedup absorbs any
+// duplicate. The DLQ is never written to during a sustained Kafka outage,
+// which is strictly better than the previous behavior of writing a duplicate
+// DLQ entry every redelivery.
 func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsError(t *testing.T) {
 	// Producer fails ALL callback publishes — STUMP fails (forcing DLQ) AND
 	// BLOCK_PROCESSED fails (forcing the F-014 path on the DLQ-decrement).
@@ -963,13 +1002,15 @@ func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsErr
 		t.Fatalf("expected non-nil error so consumer redelivers when emit fails on DLQ path, got nil")
 	}
 
-	if got := dlqMock.sentCount(); got != 1 {
-		t.Errorf("expected exactly 1 DLQ publish at max attempts, got %d", got)
+	// DLQ publish must NOT have happened — decrement-and-emit failed first.
+	if got := dlqMock.sentCount(); got != 0 {
+		t.Errorf("expected zero DLQ publishes when emit fails first, got %d", got)
 	}
 	if got := retryMock.sentCount(); got != 0 {
 		t.Errorf("expected zero retry publishes at max attempts, got %d", got)
 	}
-	// Counter Decrement was attempted exactly once on the DLQ path.
+	// Counter Decrement was attempted (and succeeded — emit is what failed)
+	// exactly once.
 	if got := counter.decrementCount(); got != 1 {
 		t.Errorf("expected counter Decrement called once on DLQ path, got %d", got)
 	}

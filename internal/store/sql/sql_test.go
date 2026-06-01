@@ -635,22 +635,22 @@ func TestSubtreeCounter_InitAndDecrement(t *testing.T) {
 }
 
 // TestSubtreeCounter_DecrementMissingRow verifies that Decrement returns
-// (0, nil) — not sql.ErrNoRows — when the counter row doesn't exist. This is
-// the production scenario where an Init never ran (or the sweeper purged the
-// row before all subtrees finished). Propagating ErrNoRows from this path
-// wedges the F-013 DLQ branch in subtree_worker.go: that branch republishes
-// the work item to the DLQ topic and then calls Decrement to drive
-// BLOCK_PROCESSED, but if Decrement keeps failing the message is never
-// ack'd and the partition gets stuck in an infinite redelivery loop.
-// Treating the missing row as "already drained" lets the DLQ branch ack and
-// the partition advance.
+// (0, storepkg.ErrCounterNotFound) — not sql.ErrNoRows, and not (0, nil) —
+// when the counter row doesn't exist. The row may legitimately be absent
+// because Init never ran (e.g. process crash between Init and message
+// publish), or the sweeper purged an expired counter. Returning a typed
+// "not found" error lets the worker ack the item without emitting a
+// premature BLOCK_PROCESSED while other subtrees of the same block may
+// still be in flight; the Aerospike backend behaves the same way, and the
+// unbounded-redelivery-loop concern that previously justified (0, nil) was
+// resolved when the worker started ack'ing on ErrCounterNotFound.
 func TestSubtreeCounter_DecrementMissingRow(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)
 
 	got, err := s.Decrement("nonexistent-block")
-	if err != nil {
-		t.Fatalf("Decrement on missing row should not return error, got: %v", err)
+	if !errors.Is(err, storepkg.ErrCounterNotFound) {
+		t.Fatalf("Decrement on missing row = (%d, %v), want (0, ErrCounterNotFound)", got, err)
 	}
 	if got != 0 {
 		t.Fatalf("Decrement on missing row = %d, want 0", got)
@@ -665,14 +665,56 @@ func TestSubtreeCounter_DecrementMissingRow(t *testing.T) {
 		t.Fatalf("Decrement on existing row: %v", decErr)
 	}
 	got, err = s.Decrement("still-nonexistent")
-	if err != nil {
-		t.Fatalf("Decrement on missing row should not return error, got: %v", err)
+	if !errors.Is(err, storepkg.ErrCounterNotFound) {
+		t.Fatalf("Decrement on missing row = (%d, %v), want (0, ErrCounterNotFound)", got, err)
 	}
 	if got != 0 {
 		t.Fatalf("Decrement on missing row = %d, want 0", got)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("Decrement leaked sql.ErrNoRows for missing row")
+	}
+}
+
+// TestSubtreeCounter_DecrementRestampsTTL verifies that Decrement refreshes
+// expires_at on every call, matching the Aerospike backend's inactivity-window
+// semantics. Without this, the Init-time TTL is a hard deadline on the whole
+// block: a block that drains slower than ttlSec would have its counter swept
+// mid-flight, after which Decrement maps the missing row to ErrCounterNotFound
+// and the worker acks the remaining items with no BLOCK_PROCESSED.
+func TestSubtreeCounter_DecrementRestampsTTL(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newSubtreeCounter(db, d, 600)
+
+	if err := s.Init("blk", 3); err != nil {
+		t.Fatal(err)
+	}
+
+	// Backdate the row's expiry firmly into the past — the state the sweeper
+	// would see for a block that has outlived its Init TTL.
+	if _, err := db.ExecContext(
+		context.Background(),
+		fmt.Sprintf("UPDATE subtree_counters SET expires_at = %s WHERE block_hash = %s", d.intervalSeconds(-3600), d.placeholder(1)),
+		"blk",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Decrement("blk"); err != nil {
+		t.Fatal(err)
+	}
+
+	// After Decrement the expiry must be back in the future.
+	var future bool
+	if err := db.QueryRowContext(
+		context.Background(),
+		fmt.Sprintf("SELECT expires_at > %s FROM subtree_counters WHERE block_hash = %s", d.now, d.placeholder(1)),
+		"blk",
+	).Scan(&future); err != nil {
+		t.Fatal(err)
+	}
+	if !future {
+		t.Fatal("Decrement did not re-stamp expires_at into the future")
 	}
 }
 

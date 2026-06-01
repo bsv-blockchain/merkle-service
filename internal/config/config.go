@@ -375,7 +375,12 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.callbackurlregistry", "merkle_callback_urls")
 	v.SetDefault("aerospike.callbackurlregistryttlsec", 7*24*60*60)
 	v.SetDefault("aerospike.subtreecounterset", "merkle_subtree_counters")
-	v.SetDefault("aerospike.subtreecounterttlsec", 600)
+	// 1h. With Decrement re-stamping the TTL on every subtree, this is an
+	// inactivity window, not a hard block-processing deadline — it only fires
+	// if a block makes zero subtree progress for a full hour. The former 600s
+	// default expired mid-flight on large (tens-of-thousands-of-subtree)
+	// blocks even while they were actively progressing.
+	v.SetDefault("aerospike.subtreecounterttlsec", 3600)
 	v.SetDefault("aerospike.callbackaccumulatorset", "merkle_callback_accum")
 	v.SetDefault("aerospike.callbackaccumulatorttlsec", 600)
 	v.SetDefault("aerospike.datahubregistry", "merkle_datahub_urls")
@@ -655,6 +660,15 @@ func Load() (*Config, error) {
 	case BackendAerospike, BackendSQL:
 	default:
 		return nil, fmt.Errorf("invalid store.backend %q: must be %q or %q", cfg.Store.Backend, BackendAerospike, BackendSQL)
+	}
+
+	// SubtreeCounterTTLSec must be strictly positive. Zero or negative values
+	// silently produce dangerous Aerospike record TTLs: 0 means "use namespace
+	// default" (may be never-expire), and a negative int truncated to uint32
+	// becomes the Aerospike never-expire sentinel — either way the counter
+	// becomes a permanent record that the sweeper never reclaims.
+	if cfg.Aerospike.SubtreeCounterTTLSec <= 0 {
+		return nil, fmt.Errorf("invalid aerospike.subtreeCounterTTLSec %d: must be > 0", cfg.Aerospike.SubtreeCounterTTLSec)
 	}
 
 	return &cfg, nil
