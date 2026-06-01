@@ -676,6 +676,48 @@ func TestSubtreeCounter_DecrementMissingRow(t *testing.T) {
 	}
 }
 
+// TestSubtreeCounter_DecrementRestampsTTL verifies that Decrement refreshes
+// expires_at on every call, matching the Aerospike backend's inactivity-window
+// semantics. Without this, the Init-time TTL is a hard deadline on the whole
+// block: a block that drains slower than ttlSec would have its counter swept
+// mid-flight, after which Decrement maps the missing row to ErrCounterNotFound
+// and the worker acks the remaining items with no BLOCK_PROCESSED.
+func TestSubtreeCounter_DecrementRestampsTTL(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newSubtreeCounter(db, d, 600)
+
+	if err := s.Init("blk", 3); err != nil {
+		t.Fatal(err)
+	}
+
+	// Backdate the row's expiry firmly into the past — the state the sweeper
+	// would see for a block that has outlived its Init TTL.
+	if _, err := db.ExecContext(
+		context.Background(),
+		fmt.Sprintf("UPDATE subtree_counters SET expires_at = %s WHERE block_hash = %s", d.intervalSeconds(-3600), d.placeholder(1)),
+		"blk",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Decrement("blk"); err != nil {
+		t.Fatal(err)
+	}
+
+	// After Decrement the expiry must be back in the future.
+	var future bool
+	if err := db.QueryRowContext(
+		context.Background(),
+		fmt.Sprintf("SELECT expires_at > %s FROM subtree_counters WHERE block_hash = %s", d.now, d.placeholder(1)),
+		"blk",
+	).Scan(&future); err != nil {
+		t.Fatal(err)
+	}
+	if !future {
+		t.Fatal("Decrement did not re-stamp expires_at into the future")
+	}
+}
+
 func TestSubtreeCounter_ConcurrentDecrement(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)

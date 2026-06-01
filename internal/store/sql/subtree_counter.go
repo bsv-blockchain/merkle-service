@@ -59,6 +59,10 @@ func (s *subtreeCounter) Init(blockHash string, count int) error {
 //     opened with the `_txlock=immediate` URL parameter, and the rest of
 //     the codebase opens connections without it.
 //
+// TTL: like the Aerospike backend, Decrement re-stamps expires_at on every
+// call so the counter survives ttlSec of *inactivity* rather than expiring
+// ttlSec after Init (which would be a hard deadline on the whole block).
+//
 // Missing rows: if the counter row does not exist (sql.ErrNoRows), Decrement
 // returns (0, storepkg.ErrCounterNotFound) — matching the Aerospike backend.
 // The row may legitimately be absent because the sweeper purged an expired
@@ -78,9 +82,16 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	defer cancel()
 
 	if isPostgres(s.d) {
+		// Re-stamp expires_at on every decrement so the counter expires only
+		// after ttlSec of *inactivity*, mirroring the Aerospike backend. The
+		// value written by Init is otherwise a hard deadline on the whole
+		// block: a block that keeps making subtree progress longer than ttlSec
+		// would have its counter swept mid-flight, after which Decrement maps
+		// the missing row to ErrCounterNotFound and the worker acks the
+		// remaining items without ever emitting BLOCK_PROCESSED.
 		q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-			"UPDATE subtree_counters SET remaining = remaining - 1 WHERE block_hash = %s RETURNING remaining",
-			s.d.placeholder(1),
+			"UPDATE subtree_counters SET remaining = remaining - 1, expires_at = %s WHERE block_hash = %s RETURNING remaining",
+			s.d.intervalSeconds(s.ttlSec), s.d.placeholder(1),
 		)
 		var remaining int
 		if err := s.db.QueryRowContext(ctx, q, blockHash).Scan(&remaining); err != nil {
@@ -121,9 +132,12 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 		return 0, err
 	}
 	remaining--
+	// Re-stamp expires_at alongside remaining (see the Postgres branch above):
+	// keeps the counter alive for ttlSec of inactivity rather than ttlSec
+	// after Init, so a slow-draining block isn't swept mid-flight.
 	qUp := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-		"UPDATE subtree_counters SET remaining = %s WHERE block_hash = %s",
-		s.d.placeholder(1), s.d.placeholder(2),
+		"UPDATE subtree_counters SET remaining = %s, expires_at = %s WHERE block_hash = %s",
+		s.d.placeholder(1), s.d.intervalSeconds(s.ttlSec), s.d.placeholder(2),
 	)
 	if _, err := conn.ExecContext(ctx, qUp, remaining, blockHash); err != nil {
 		return 0, err
