@@ -3,22 +3,22 @@ module github.com/bsv-blockchain/merkle-service
 go 1.26.2
 
 require (
-	github.com/IBM/sarama v1.49.0
+	github.com/IBM/sarama v1.50.1
 	github.com/aerospike/aerospike-client-go/v7 v7.10.2
-	github.com/bsv-blockchain/go-bt/v2 v2.6.4
-	github.com/bsv-blockchain/go-subtree v1.4.2
+	github.com/bsv-blockchain/go-bt/v2 v2.6.5
+	github.com/bsv-blockchain/go-subtree v1.4.3
 	github.com/bsv-blockchain/go-teranode-p2p-client v0.2.5
 	github.com/bsv-blockchain/teranode v0.15.1
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/go-chi/chi/v5 v5.3.0
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/viper v1.21.0
 	github.com/testcontainers/testcontainers-go v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
-	modernc.org/sqlite v1.50.1
+	modernc.org/sqlite v1.51.0
 )
 
 require (
@@ -57,8 +57,8 @@ require (
 	github.com/bsv-blockchain/go-lockfree-queue v1.2.0 // indirect
 	github.com/bsv-blockchain/go-p2p-message-bus v0.1.18 // indirect
 	github.com/bsv-blockchain/go-safe-conversion v1.2.0 // indirect
-	github.com/bsv-blockchain/go-sdk v1.2.23 // indirect
-	github.com/bsv-blockchain/go-tx-map v1.3.7 // indirect
+	github.com/bsv-blockchain/go-sdk v1.2.24 // indirect
+	github.com/bsv-blockchain/go-tx-map v1.3.8 // indirect
 	github.com/bsv-blockchain/go-wire v1.2.6 // indirect
 	github.com/bsv-blockchain/testcontainers-aerospike-go v0.3.7 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
@@ -82,7 +82,6 @@ require (
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/eapache/go-resiliency v1.7.0 // indirect
-	github.com/eapache/queue v1.1.0 // indirect
 	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
