@@ -6,6 +6,7 @@ require (
 	github.com/IBM/sarama v1.50.1
 	github.com/aerospike/aerospike-client-go/v7 v7.10.2
 	github.com/bsv-blockchain/go-bt/v2 v2.6.5
+	github.com/bsv-blockchain/go-sdk v1.2.24
 	github.com/bsv-blockchain/go-subtree v1.4.3
 	github.com/bsv-blockchain/go-teranode-p2p-client v0.2.6
 	github.com/bsv-blockchain/teranode v0.15.1
@@ -57,7 +58,6 @@ require (
 	github.com/bsv-blockchain/go-lockfree-queue v1.2.0 // indirect
 	github.com/bsv-blockchain/go-p2p-message-bus v0.1.19 // indirect
 	github.com/bsv-blockchain/go-safe-conversion v1.2.0 // indirect
-	github.com/bsv-blockchain/go-sdk v1.2.24 // indirect
 	github.com/bsv-blockchain/go-tx-map v1.3.8 // indirect
 	github.com/bsv-blockchain/go-wire v1.2.7 // indirect
 	github.com/bsv-blockchain/testcontainers-aerospike-go v0.3.7 // indirect
