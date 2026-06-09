@@ -194,7 +194,7 @@ func TestEmitBlockProcessed_OverrideSkipsRegistry(t *testing.T) {
 
 	const overrideURL = "https://arcade.example/cb"
 	const overrideToken = "tok-override"
-	if err := s.emitBlockProcessed("blk-override", overrideURL, overrideToken); err != nil {
+	if err := s.emitBlockProcessed("blk-override", overrideURL, overrideToken, nil); err != nil {
 		t.Fatalf("emitBlockProcessed: %v", err)
 	}
 	if err := mock.Close(); err != nil {
@@ -248,7 +248,7 @@ func TestEmitBlockProcessed_OverridePayload(t *testing.T) {
 
 	const overrideURL = "https://arcade.example/cb"
 	const overrideToken = "tok-override"
-	if err := s.emitBlockProcessed("blk-override", overrideURL, overrideToken); err != nil {
+	if err := s.emitBlockProcessed("blk-override", overrideURL, overrideToken, nil); err != nil {
 		t.Fatalf("emitBlockProcessed: %v", err)
 	}
 	if got := len(mock.captured); got != 1 {

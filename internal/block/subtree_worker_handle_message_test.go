@@ -143,32 +143,37 @@ type countingSubtreeCounter struct {
 	decrementCalls int
 	initCalls      int
 	values         map[string]int
+	data           map[string]*store.BlockProcessedData
 	decrementErr   error
 }
 
 func newCountingSubtreeCounter() *countingSubtreeCounter {
-	return &countingSubtreeCounter{values: map[string]int{}}
+	return &countingSubtreeCounter{values: map[string]int{}, data: map[string]*store.BlockProcessedData{}}
 }
 
-func (c *countingSubtreeCounter) Init(blockHash string, count int) error {
+func (c *countingSubtreeCounter) Init(blockHash string, count int, data *store.BlockProcessedData) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.initCalls++
 	c.values[blockHash] = count
+	c.data[blockHash] = data
 	return nil
 }
 
-func (c *countingSubtreeCounter) Decrement(blockHash string) (int, error) {
+func (c *countingSubtreeCounter) Decrement(blockHash string) (int, *store.BlockProcessedData, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.decrementCalls++
 	if c.decrementErr != nil {
 		// Do NOT mutate the stored value on failure — emulates an Aerospike/SQL
 		// transient where the operation never committed.
-		return 0, c.decrementErr
+		return 0, nil, c.decrementErr
 	}
 	c.values[blockHash]--
-	return c.values[blockHash], nil
+	if c.values[blockHash] <= 0 {
+		return c.values[blockHash], c.data[blockHash], nil
+	}
+	return c.values[blockHash], nil, nil
 }
 
 func (c *countingSubtreeCounter) decrementCount() int {
@@ -431,7 +436,7 @@ func TestHandleMessage_CallbackPublishFailure_AtMaxAttempts_DLQAndDecrement(t *t
 	dlqMock := &callbackFailingProducer{}
 
 	counter := newCountingSubtreeCounter()
-	_ = counter.Init("block-dlq", 1)
+	_ = counter.Init("block-dlq", 1, nil)
 	// Reset init bookkeeping after pre-seed so test assertions only count
 	// what handleMessage drives.
 	counter.initCalls = 0
@@ -474,7 +479,7 @@ func TestHandleMessage_HappyPath_DecrementsExactlyOnce(t *testing.T) {
 	dlqMock := &callbackFailingProducer{}
 
 	counter := newCountingSubtreeCounter()
-	_ = counter.Init("block-happy", 1)
+	_ = counter.Init("block-happy", 1, nil)
 	counter.initCalls = 0
 
 	stumpStore := &stubStumpStore{}
@@ -588,7 +593,7 @@ func TestHandleMessage_DecrementFailureOnSuccessPath_RetriesAndPreservesCount(t 
 
 	const blockHash = "block-dec-fail"
 	counter := newCountingSubtreeCounter()
-	_ = counter.Init(blockHash, 3)
+	_ = counter.Init(blockHash, 3, nil)
 	counter.initCalls = 0
 	counter.decrementErr = errors.New("aerospike timeout")
 
@@ -646,7 +651,7 @@ func TestHandleMessage_DecrementFailureOnDLQPath_ReturnsError(t *testing.T) {
 
 	const blockHash = "block-dlq-dec-fail"
 	counter := newCountingSubtreeCounter()
-	_ = counter.Init(blockHash, 1)
+	_ = counter.Init(blockHash, 1, nil)
 	counter.initCalls = 0
 	counter.decrementErr = errors.New("aerospike cluster degraded")
 
@@ -697,7 +702,7 @@ func TestHandleMessage_HappyPath_DecrementToZeroEmitsBlockProcessed(t *testing.T
 	const blockHash = "block-zero-emit"
 	counter := newCountingSubtreeCounter()
 	// Pre-seed counter at 1 so the single subtree work item drives it to 0.
-	_ = counter.Init(blockHash, 1)
+	_ = counter.Init(blockHash, 1, nil)
 	counter.initCalls = 0
 
 	stumpStore := &stubStumpStore{}
@@ -766,7 +771,7 @@ func TestEmitBlockProcessed_PublishFailureReturnsError(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	err := s.emitBlockProcessed("blk-emit-fail", "", "")
+	err := s.emitBlockProcessed("blk-emit-fail", "", "", nil)
 	if err == nil {
 		t.Fatalf("expected error from emitBlockProcessed when callback publish fails")
 	}
@@ -793,7 +798,7 @@ func TestEmitBlockProcessed_PartialFailureContinuesAndReturnsFirstError(t *testi
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	err := s.emitBlockProcessed("blk-partial", "", "")
+	err := s.emitBlockProcessed("blk-partial", "", "", nil)
 	if err == nil {
 		t.Fatalf("expected non-nil error when BLOCK_PROCESSED publishes fail")
 	}
@@ -821,11 +826,52 @@ func TestEmitBlockProcessed_HappyPath(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	if err := s.emitBlockProcessed("blk-happy", "", ""); err != nil {
+	if err := s.emitBlockProcessed("blk-happy", "", "", nil); err != nil {
 		t.Fatalf("expected nil error on happy path, got: %v", err)
 	}
 	if got := cbMock.sentCountOfType(kafka.CallbackBlockProcessed); got != 2 {
 		t.Errorf("expected 2 BLOCK_PROCESSED messages, got %d", got)
+	}
+}
+
+// TestEmitBlockProcessed_CarriesBlockData verifies the BLOCK_PROCESSED
+// enrichment (merkle root, subtree count, subtree hashes, coinbase BUMP) read
+// back from the counter is attached to every emitted CallbackTopicMessage.
+func TestEmitBlockProcessed_CarriesBlockData(t *testing.T) {
+	cbMock := &callbackFailingProducer{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := &SubtreeWorkerService{
+		urlRegistry: &fakeURLRegistry{urls: []string{"http://cb.example.test/a"}},
+	}
+	s.InitBase("subtree-worker-test")
+	s.Logger = logger
+	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
+
+	blockData := &store.BlockProcessedData{
+		MerkleRoot:    "aabbcc",
+		SubtreeCount:  16,
+		SubtreeHashes: []string{"deadbeef", "feedface"},
+		CoinbaseBUMP:  "0102030405",
+	}
+	if err := s.emitBlockProcessed("blk-enriched", "", "", blockData); err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+
+	msgs := cbMock.messages
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	b, ok := msgs[0].Value.(sarama.ByteEncoder)
+	if !ok {
+		t.Fatal("message value is not ByteEncoder")
+	}
+	decoded, err := kafka.DecodeCallbackTopicMessage([]byte(b))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.MerkleRoot != "aabbcc" || decoded.SubtreeCount != 16 ||
+		decoded.CoinbaseBUMP != "0102030405" || len(decoded.SubtreeHashes) != 2 {
+		t.Errorf("block data not propagated to callback message: %+v", decoded)
 	}
 }
 
@@ -842,7 +888,7 @@ func TestEmitBlockProcessed_RegistryFailureReturnsError(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	if err := s.emitBlockProcessed("blk-registry-fail", "", ""); err == nil {
+	if err := s.emitBlockProcessed("blk-registry-fail", "", "", nil); err == nil {
 		t.Fatalf("expected error when URL registry GetAll fails")
 	}
 	if got := cbMock.sentCount(); got != 0 {
@@ -869,7 +915,7 @@ func TestHandleMessage_BlockProcessedEmitFailure_RetriesAndDoesNotAck(t *testing
 	const blockHash = "block-emit-fail"
 	counter := newCountingSubtreeCounter()
 	// Pre-seed at 1 so the single subtree drives the counter to 0 → emit fires.
-	_ = counter.Init(blockHash, 1)
+	_ = counter.Init(blockHash, 1, nil)
 	counter.initCalls = 0
 
 	stumpStore := &stubStumpStore{}
@@ -927,7 +973,7 @@ func TestHandleMessage_BlockProcessedEmitRetry_ReEmitsOnRedelivery(t *testing.T)
 	// decremented to 0 (and either succeeded-emit or failed-emit). The
 	// retry's decrement will drive the counter to -1, and remaining<=0 must
 	// still trigger emit so a previously-failed BLOCK_PROCESSED is retried.
-	_ = counter.Init(blockHash, 0)
+	_ = counter.Init(blockHash, 0, nil)
 	counter.initCalls = 0
 
 	stumpStore := &stubStumpStore{}
@@ -982,7 +1028,7 @@ func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsErr
 
 	const blockHash = "block-emit-dlq"
 	counter := newCountingSubtreeCounter()
-	_ = counter.Init(blockHash, 1)
+	_ = counter.Init(blockHash, 1, nil)
 	counter.initCalls = 0
 
 	stumpStore := &stubStumpStore{}

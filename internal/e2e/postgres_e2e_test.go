@@ -220,7 +220,7 @@ func TestPostgres_SubtreeCounterConcurrent(t *testing.T) {
 
 	const initial = 100
 	blockHash := "block-001"
-	if err := registry.SubtreeCounter.Init(blockHash, initial); err != nil {
+	if err := registry.SubtreeCounter.Init(blockHash, initial, nil); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 
@@ -231,7 +231,7 @@ func TestPostgres_SubtreeCounterConcurrent(t *testing.T) {
 	results := make(chan outcome, initial)
 	for i := 0; i < initial; i++ {
 		go func() {
-			v, err := registry.SubtreeCounter.Decrement(blockHash)
+			v, _, err := registry.SubtreeCounter.Decrement(blockHash)
 			results <- outcome{v, err}
 		}()
 	}

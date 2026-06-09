@@ -91,12 +91,37 @@ type SeenCounterStore interface {
 	Threshold() int
 }
 
+// BlockProcessedData is the canonical block-level data the producer attaches
+// to a BLOCK_PROCESSED callback so downstream consumers can build and validate
+// a compound BUMP without fetching the block from a teranode datahub.
+//
+// It is stamped onto the per-block subtree-counter record at Init time (when
+// the block processor has the data in hand) and read back when the counter
+// drains to zero and BLOCK_PROCESSED fires. All hashes are display-order hex
+// (matching BlockHash / the chainhash.String() convention used elsewhere on
+// the wire); SubtreeHashes are the canonical (coinbase-placeholder-based)
+// subtree roots exactly as teranode stores them — consumers correct index 0
+// using CoinbaseBUMP. CoinbaseBUMP is the hex-encoded BRC-74 merkle path of the
+// coinbase transaction up to the block merkle root; it is empty when the
+// producer could not build it (the consumer then falls back to a datahub).
+type BlockProcessedData struct {
+	MerkleRoot    string   `json:"merkleRoot,omitempty"`
+	SubtreeCount  int      `json:"subtreeCount"`
+	SubtreeHashes []string `json:"subtreeHashes,omitempty"`
+	CoinbaseBUMP  string   `json:"coinbaseBump,omitempty"`
+}
+
 // SubtreeCounterStore coordinates BLOCK_PROCESSED emission: Init sets the
-// expected subtree count for a block, Decrement atomically counts one subtree
-// as done and returns the remaining count (caller fires BLOCK_PROCESSED at 0).
+// expected subtree count for a block (and stashes the BlockProcessedData to
+// surface on the callback), Decrement atomically counts one subtree as done
+// and returns the remaining count (caller fires BLOCK_PROCESSED at 0). When the
+// returned remaining count is <= 0, Decrement also returns the stashed
+// BlockProcessedData so the caller can populate the callback without an extra
+// round trip; it is nil otherwise (and may be nil even at zero if Init was
+// called without data or the record was rewritten).
 type SubtreeCounterStore interface {
-	Init(blockHash string, count int) error
-	Decrement(blockHash string) (remaining int, err error)
+	Init(blockHash string, count int, data *BlockProcessedData) error
+	Decrement(blockHash string) (remaining int, data *BlockProcessedData, err error)
 }
 
 // BackendHealth reports whether the underlying backend (Aerospike cluster, SQL

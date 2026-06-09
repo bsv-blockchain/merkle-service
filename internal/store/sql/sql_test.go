@@ -620,11 +620,11 @@ func TestSubtreeCounter_InitAndDecrement(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)
 
-	if err := s.Init("blk", 3); err != nil {
+	if err := s.Init("blk", 3, nil); err != nil {
 		t.Fatal(err)
 	}
 	for want := 2; want >= 0; want-- {
-		got, err := s.Decrement("blk")
+		got, _, err := s.Decrement("blk")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -648,7 +648,7 @@ func TestSubtreeCounter_DecrementMissingRow(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)
 
-	got, err := s.Decrement("nonexistent-block")
+	got, _, err := s.Decrement("nonexistent-block")
 	if !errors.Is(err, storepkg.ErrCounterNotFound) {
 		t.Fatalf("Decrement on missing row = (%d, %v), want (0, ErrCounterNotFound)", got, err)
 	}
@@ -658,13 +658,13 @@ func TestSubtreeCounter_DecrementMissingRow(t *testing.T) {
 
 	// Sanity check: real ErrNoRows must not leak through even after an
 	// underlying failure has been observed once.
-	if initErr := s.Init("real-blk", 1); initErr != nil {
+	if initErr := s.Init("real-blk", 1, nil); initErr != nil {
 		t.Fatal(initErr)
 	}
-	if _, decErr := s.Decrement("real-blk"); decErr != nil {
+	if _, _, decErr := s.Decrement("real-blk"); decErr != nil {
 		t.Fatalf("Decrement on existing row: %v", decErr)
 	}
-	got, err = s.Decrement("still-nonexistent")
+	got, _, err = s.Decrement("still-nonexistent")
 	if !errors.Is(err, storepkg.ErrCounterNotFound) {
 		t.Fatalf("Decrement on missing row = (%d, %v), want (0, ErrCounterNotFound)", got, err)
 	}
@@ -686,7 +686,7 @@ func TestSubtreeCounter_DecrementRestampsTTL(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)
 
-	if err := s.Init("blk", 3); err != nil {
+	if err := s.Init("blk", 3, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -700,7 +700,7 @@ func TestSubtreeCounter_DecrementRestampsTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := s.Decrement("blk"); err != nil {
+	if _, _, err := s.Decrement("blk"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -723,7 +723,7 @@ func TestSubtreeCounter_ConcurrentDecrement(t *testing.T) {
 	s := newSubtreeCounter(db, d, 600)
 
 	const initial = 50
-	if err := s.Init("blk", initial); err != nil {
+	if err := s.Init("blk", initial, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -733,7 +733,7 @@ func TestSubtreeCounter_ConcurrentDecrement(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			v, err := s.Decrement("blk")
+			v, _, err := s.Decrement("blk")
 			if err != nil {
 				t.Errorf("Decrement: %v", err)
 				return
@@ -788,7 +788,7 @@ func TestSubtreeCounter_ConcurrentDecrementMultiConn(t *testing.T) {
 
 	s := newSubtreeCounter(db, d, 600)
 	const initial = 64
-	if err := s.Init("blk", initial); err != nil {
+	if err := s.Init("blk", initial, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -800,7 +800,7 @@ func TestSubtreeCounter_ConcurrentDecrementMultiConn(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			v, err := s.Decrement("blk")
+			v, _, err := s.Decrement("blk")
 			if err != nil {
 				t.Errorf("Decrement: %v", err)
 				return

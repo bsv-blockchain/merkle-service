@@ -3,6 +3,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -23,16 +24,43 @@ func newSubtreeCounter(db *sql.DB, d *dialect, ttlSec int) *subtreeCounter {
 }
 
 // Init upserts the counter with the initial remaining count and a fresh TTL.
-func (s *subtreeCounter) Init(blockHash string, count int) error {
+// When data is non-nil it is JSON-encoded into the block_data column so the
+// final Decrement can surface it on BLOCK_PROCESSED without a second query.
+func (s *subtreeCounter) Init(blockHash string, count int, data *storepkg.BlockProcessedData) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	var blockData any // nil → NULL column
+	if data != nil {
+		encoded, err := json.Marshal(data)
+		if err != nil {
+			return fmt.Errorf("encode block-processed data: %w", err)
+		}
+		blockData = string(encoded)
+	}
+
 	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-		`INSERT INTO subtree_counters (block_hash, remaining, expires_at) VALUES (%s, %s, %s)
-        ON CONFLICT (block_hash) DO UPDATE SET remaining = EXCLUDED.remaining, expires_at = EXCLUDED.expires_at`,
-		s.d.placeholder(1), s.d.placeholder(2), s.d.intervalSeconds(s.ttlSec),
+		`INSERT INTO subtree_counters (block_hash, remaining, block_data, expires_at) VALUES (%s, %s, %s, %s)
+        ON CONFLICT (block_hash) DO UPDATE SET remaining = EXCLUDED.remaining, block_data = EXCLUDED.block_data, expires_at = EXCLUDED.expires_at`,
+		s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3), s.d.intervalSeconds(s.ttlSec),
 	)
-	_, err := s.db.ExecContext(ctx, q, blockHash, count)
+	_, err := s.db.ExecContext(ctx, q, blockHash, count, blockData)
 	return err
+}
+
+// decodeBlockData unmarshals the block_data column (NULL → nil) and logs but
+// never fails on a malformed value: a counter that drained but can't surface
+// its block data still emits BLOCK_PROCESSED, and the consumer falls back to a
+// datahub.
+func decodeBlockData(raw sql.NullString) *storepkg.BlockProcessedData {
+	if !raw.Valid || raw.String == "" {
+		return nil
+	}
+	var d storepkg.BlockProcessedData
+	if err := json.Unmarshal([]byte(raw.String), &d); err != nil {
+		return nil
+	}
+	return &d
 }
 
 // Decrement atomically decrements the remaining count and returns the new
@@ -77,7 +105,7 @@ func (s *subtreeCounter) Init(blockHash string, count int) error {
 // suppressed the emit). The unbounded-redelivery-loop concern that justified
 // the old behavior was eliminated when the worker started ack'ing on
 // ErrCounterNotFound — see fix/subtree-counter-ttl-leak.
-func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
+func (s *subtreeCounter) Decrement(blockHash string) (int, *storepkg.BlockProcessedData, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -90,17 +118,22 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 		// the missing row to ErrCounterNotFound and the worker acks the
 		// remaining items without ever emitting BLOCK_PROCESSED.
 		q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-			"UPDATE subtree_counters SET remaining = remaining - 1, expires_at = %s WHERE block_hash = %s RETURNING remaining",
+			"UPDATE subtree_counters SET remaining = remaining - 1, expires_at = %s WHERE block_hash = %s RETURNING remaining, block_data",
 			s.d.intervalSeconds(s.ttlSec), s.d.placeholder(1),
 		)
 		var remaining int
-		if err := s.db.QueryRowContext(ctx, q, blockHash).Scan(&remaining); err != nil {
+		var blockData sql.NullString
+		if err := s.db.QueryRowContext(ctx, q, blockHash).Scan(&remaining, &blockData); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return 0, storepkg.ErrCounterNotFound
+				return 0, nil, storepkg.ErrCounterNotFound
 			}
-			return 0, err
+			return 0, nil, err
 		}
-		return remaining, nil
+		// Only surface the stashed block data on the final decrement.
+		if remaining <= 0 {
+			return remaining, decodeBlockData(blockData), nil
+		}
+		return remaining, nil, nil
 	}
 
 	// SQLite path. Pin a connection, open the transaction with `BEGIN
@@ -109,12 +142,12 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	// which is deferred and reintroduces the read-modify-write race.
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return 0, fmt.Errorf("begin immediate: %w", err)
+		return 0, nil, fmt.Errorf("begin immediate: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -124,12 +157,13 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 	}()
 
 	var remaining int
-	qSel := fmt.Sprintf("SELECT remaining FROM subtree_counters WHERE block_hash = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
-	if err := conn.QueryRowContext(ctx, qSel, blockHash).Scan(&remaining); err != nil {
+	var blockData sql.NullString
+	qSel := fmt.Sprintf("SELECT remaining, block_data FROM subtree_counters WHERE block_hash = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
+	if err := conn.QueryRowContext(ctx, qSel, blockHash).Scan(&remaining, &blockData); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, storepkg.ErrCounterNotFound
+			return 0, nil, storepkg.ErrCounterNotFound
 		}
-		return 0, err
+		return 0, nil, err
 	}
 	remaining--
 	// Re-stamp expires_at alongside remaining (see the Postgres branch above):
@@ -140,11 +174,15 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, error) {
 		s.d.placeholder(1), s.d.intervalSeconds(s.ttlSec), s.d.placeholder(2),
 	)
 	if _, err := conn.ExecContext(ctx, qUp, remaining, blockHash); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
+		return 0, nil, fmt.Errorf("commit: %w", err)
 	}
 	committed = true
-	return remaining, nil
+	// Only surface the stashed block data on the final decrement.
+	if remaining <= 0 {
+		return remaining, decodeBlockData(blockData), nil
+	}
+	return remaining, nil, nil
 }
