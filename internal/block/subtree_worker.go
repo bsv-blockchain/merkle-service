@@ -636,7 +636,7 @@ func emitBlockProcessedCallbacks(
 		// consumer then falls back to a datahub.
 		if blockData != nil {
 			msg.MerkleRoot = blockData.MerkleRoot
-			msg.SubtreeCount = blockData.SubtreeCount
+			msg.SubtreeCount = &blockData.SubtreeCount
 			msg.SubtreeHashes = blockData.SubtreeHashes
 			msg.CoinbaseBUMP = blockData.CoinbaseBUMP
 		}

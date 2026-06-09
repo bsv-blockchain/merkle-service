@@ -208,6 +208,7 @@ func TestNewConsumerConfig_InitialOffsetOldest(t *testing.T) {
 	cfg := newConsumerConfig()
 	if cfg == nil {
 		t.Fatal("newConsumerConfig returned nil")
+		return // unreachable after Fatal; guards the derefs below
 	}
 	if got, want := cfg.Consumer.Offsets.Initial, sarama.OffsetOldest; got != want {
 		t.Errorf("Consumer.Offsets.Initial = %d, want %d (sarama.OffsetOldest); a new consumer group must replay the backlog, not jump to the topic head", got, want)

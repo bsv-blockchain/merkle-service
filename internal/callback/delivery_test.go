@@ -427,12 +427,13 @@ func TestDeliverCallback_BlockProcessedEnrichmentInPayload(t *testing.T) {
 	cfg := defaultTestConfig()
 	ds, _, _ := newTestDeliveryService(t, cfg, server.Client())
 
+	subtreeCount := 16
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:   server.URL + "/callback",
 		Type:          kafka.CallbackBlockProcessed,
 		BlockHash:     testBlockHash,
 		MerkleRoot:    "aabbccdd",
-		SubtreeCount:  16,
+		SubtreeCount:  &subtreeCount,
 		SubtreeHashes: []string{"deadbeef", "feedface"},
 		CoinbaseBUMP:  "0102030405",
 	}

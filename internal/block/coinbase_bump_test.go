@@ -32,6 +32,7 @@ func rootOf(t *testing.T, nodes []subtreepkg.Node) chainhash.Hash {
 	r := (&subtreepkg.Subtree{Nodes: nodes}).RootHash()
 	if r == nil {
 		t.Fatal("nil root hash")
+		return chainhash.Hash{} // unreachable after Fatal; guards the deref below
 	}
 	return *r
 }

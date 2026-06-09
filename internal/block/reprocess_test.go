@@ -108,6 +108,7 @@ func TestProcessBlockSubtree_FilterURL_ScopesToRequester(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatalf("expected non-nil result for filterURL match")
+		return // unreachable after Fatalf; guards the derefs below
 	}
 	if _, ok := result.CallbackGroups[urlA]; !ok {
 		t.Errorf("expected CallbackGroups to contain urlA, got %v", keys(result.CallbackGroups))

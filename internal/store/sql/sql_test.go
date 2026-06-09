@@ -620,16 +620,37 @@ func TestSubtreeCounter_InitAndDecrement(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)
 
-	if err := s.Init("blk", 3, nil); err != nil {
+	// Stash BlockProcessedData at Init: it must round-trip through block_data and
+	// surface only on the final (remaining == 0) decrement — never before.
+	wantData := &storepkg.BlockProcessedData{
+		MerkleRoot:    "aabbcc",
+		SubtreeCount:  3,
+		SubtreeHashes: []string{"deadbeef", "feedface"},
+		CoinbaseBUMP:  "0102030405",
+	}
+	if err := s.Init("blk", 3, wantData); err != nil {
 		t.Fatal(err)
 	}
 	for want := 2; want >= 0; want-- {
-		got, _, err := s.Decrement("blk")
+		got, data, err := s.Decrement("blk")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got != want {
 			t.Fatalf("Decrement = %d, want %d", got, want)
+		}
+		if want > 0 {
+			if data != nil {
+				t.Fatalf("expected nil block data on intermediate decrement (remaining %d), got %+v", got, data)
+			}
+			continue
+		}
+		// Final decrement: the stashed data must surface and match. The nil check
+		// short-circuits the field comparisons, so data is never dereferenced
+		// when nil.
+		if data == nil || data.MerkleRoot != wantData.MerkleRoot || data.SubtreeCount != wantData.SubtreeCount ||
+			data.CoinbaseBUMP != wantData.CoinbaseBUMP || len(data.SubtreeHashes) != len(wantData.SubtreeHashes) {
+			t.Fatalf("block data round-trip mismatch on final decrement: got %+v, want %+v", data, wantData)
 		}
 	}
 }

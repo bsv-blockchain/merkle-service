@@ -73,7 +73,7 @@ type callbackPayload struct {
 	// BLOCK_PROCESSED enrichment — see CallbackTopicMessage. Additive and
 	// omitempty so consumers that don't read them are unaffected.
 	MerkleRoot    string   `json:"merkleRoot,omitempty"`
-	SubtreeCount  int      `json:"subtreeCount,omitempty"`
+	SubtreeCount  *int     `json:"subtreeCount,omitempty"`
 	SubtreeHashes []string `json:"subtreeHashes,omitempty"`
 	CoinbaseBUMP  string   `json:"coinbaseBump,omitempty"`
 }

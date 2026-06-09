@@ -869,7 +869,7 @@ func TestEmitBlockProcessed_CarriesBlockData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if decoded.MerkleRoot != "aabbcc" || decoded.SubtreeCount != 16 ||
+	if decoded.MerkleRoot != "aabbcc" || decoded.SubtreeCount == nil || *decoded.SubtreeCount != 16 ||
 		decoded.CoinbaseBUMP != "0102030405" || len(decoded.SubtreeHashes) != 2 {
 		t.Errorf("block data not propagated to callback message: %+v", decoded)
 	}

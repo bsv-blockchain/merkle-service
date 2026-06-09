@@ -91,7 +91,9 @@ type CallbackTopicMessage struct {
 	// BLOCK_PROCESSED messages.
 	//
 	//   - MerkleRoot:   canonical block header merkle root (display-order hex).
-	//   - SubtreeCount: canonical number of subtrees in the block.
+	//   - SubtreeCount: canonical number of subtrees in the block. A pointer so
+	//     a coinbase-only block's legitimate 0 is emitted (omitempty drops a nil
+	//     pointer, not a *0); only set for BLOCK_PROCESSED, nil for other types.
 	//   - SubtreeHashes: canonical (coinbase-placeholder-based) subtree roots,
 	//     display-order hex, in subtree-index order — exactly as teranode
 	//     stores them; the consumer corrects index 0 using CoinbaseBUMP.
@@ -99,7 +101,7 @@ type CallbackTopicMessage struct {
 	//     the block merkle root. Empty when the producer couldn't build it (the
 	//     consumer then falls back to a datahub).
 	MerkleRoot    string   `json:"merkleRoot,omitempty"`
-	SubtreeCount  int      `json:"subtreeCount,omitempty"`
+	SubtreeCount  *int     `json:"subtreeCount,omitempty"`
 	SubtreeHashes []string `json:"subtreeHashes,omitempty"`
 	CoinbaseBUMP  string   `json:"coinbaseBump,omitempty"`
 }

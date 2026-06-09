@@ -48,10 +48,10 @@ func (s *subtreeCounter) Init(blockHash string, count int, data *storepkg.BlockP
 	return err
 }
 
-// decodeBlockData unmarshals the block_data column (NULL → nil) and logs but
-// never fails on a malformed value: a counter that drained but can't surface
-// its block data still emits BLOCK_PROCESSED, and the consumer falls back to a
-// datahub.
+// decodeBlockData unmarshals the block_data column (NULL → nil) and never fails
+// on a malformed value, returning nil instead: a counter that drained but can't
+// surface its block data still emits BLOCK_PROCESSED, and the consumer falls
+// back to a datahub.
 func decodeBlockData(raw sql.NullString) *storepkg.BlockProcessedData {
 	if !raw.Valid || raw.String == "" {
 		return nil
@@ -117,8 +117,12 @@ func (s *subtreeCounter) Decrement(blockHash string) (int, *storepkg.BlockProces
 		// would have its counter swept mid-flight, after which Decrement maps
 		// the missing row to ErrCounterNotFound and the worker acks the
 		// remaining items without ever emitting BLOCK_PROCESSED.
+		// Only return block_data on the final decrement (remaining <= 0). The
+		// CASE keeps the hot path from shipping the (potentially large) JSON
+		// blob across the wire on every subtree completion — in RETURNING,
+		// `remaining` already reflects the post-decrement value.
 		q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-			"UPDATE subtree_counters SET remaining = remaining - 1, expires_at = %s WHERE block_hash = %s RETURNING remaining, block_data",
+			"UPDATE subtree_counters SET remaining = remaining - 1, expires_at = %s WHERE block_hash = %s RETURNING remaining, CASE WHEN remaining <= 0 THEN block_data END",
 			s.d.intervalSeconds(s.ttlSec), s.d.placeholder(1),
 		)
 		var remaining int

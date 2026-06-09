@@ -274,18 +274,24 @@ func TestCallbackTopicMessage_BlockProcessed(t *testing.T) {
 	if strings.Contains(string(data), "merkleRoot") || strings.Contains(string(data), "coinbaseBump") {
 		t.Errorf("enrichment fields should be omitted when unset: %s", data)
 	}
-	if decoded.SubtreeCount != 0 || decoded.MerkleRoot != "" || decoded.CoinbaseBUMP != "" || decoded.SubtreeHashes != nil {
+	if decoded.SubtreeCount != nil || decoded.MerkleRoot != "" || decoded.CoinbaseBUMP != "" || decoded.SubtreeHashes != nil {
 		t.Errorf("expected zero-value enrichment fields, got %+v", decoded)
+	}
+	// subtreeCount is a pointer, so an unset value must also be omitted from the
+	// JSON for non-BLOCK_PROCESSED messages.
+	if strings.Contains(string(data), "subtreeCount") {
+		t.Errorf("subtreeCount should be omitted when unset: %s", data)
 	}
 }
 
 func TestCallbackTopicMessage_BlockProcessed_Enriched(t *testing.T) {
+	subtreeCount := 16
 	msg := &CallbackTopicMessage{
 		CallbackURL:   "https://arcade.example.com/callback",
 		Type:          CallbackBlockProcessed,
 		BlockHash:     "000000000000000003a2d78e5f7c9012",
 		MerkleRoot:    "aabbcc",
-		SubtreeCount:  16,
+		SubtreeCount:  &subtreeCount,
 		SubtreeHashes: []string{"deadbeef", "feedface"},
 		CoinbaseBUMP:  "0102030405",
 	}
@@ -302,8 +308,8 @@ func TestCallbackTopicMessage_BlockProcessed_Enriched(t *testing.T) {
 	if decoded.MerkleRoot != msg.MerkleRoot {
 		t.Errorf("merkleRoot mismatch: got %q", decoded.MerkleRoot)
 	}
-	if decoded.SubtreeCount != msg.SubtreeCount {
-		t.Errorf("subtreeCount mismatch: got %d", decoded.SubtreeCount)
+	if decoded.SubtreeCount == nil || *decoded.SubtreeCount != *msg.SubtreeCount {
+		t.Errorf("subtreeCount mismatch: got %v", decoded.SubtreeCount)
 	}
 	if len(decoded.SubtreeHashes) != 2 || decoded.SubtreeHashes[0] != "deadbeef" {
 		t.Errorf("subtreeHashes mismatch: got %v", decoded.SubtreeHashes)
@@ -316,6 +322,36 @@ func TestCallbackTopicMessage_BlockProcessed_Enriched(t *testing.T) {
 		if !strings.Contains(string(data), key) {
 			t.Errorf("expected JSON to contain %s: %s", key, data)
 		}
+	}
+}
+
+// TestCallbackTopicMessage_BlockProcessed_ZeroSubtreeCount locks in the
+// coinbase-only-block contract (issue #124): subtreeCount is a *int so a
+// legitimate value of 0 is emitted on the wire rather than dropped by omitempty.
+func TestCallbackTopicMessage_BlockProcessed_ZeroSubtreeCount(t *testing.T) {
+	zero := 0
+	msg := &CallbackTopicMessage{
+		CallbackURL:  "https://arcade.example.com/callback",
+		Type:         CallbackBlockProcessed,
+		BlockHash:    "000000000000000003a2d78e5f7c9012",
+		MerkleRoot:   "aabbcc",
+		SubtreeCount: &zero,
+	}
+
+	data, err := msg.Encode()
+	if err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	if !strings.Contains(string(data), `"subtreeCount":0`) {
+		t.Errorf("expected subtreeCount:0 to be present for coinbase-only block: %s", data)
+	}
+
+	decoded, err := DecodeCallbackTopicMessage(data)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if decoded.SubtreeCount == nil || *decoded.SubtreeCount != 0 {
+		t.Errorf("expected decoded subtreeCount 0, got %v", decoded.SubtreeCount)
 	}
 }
 
