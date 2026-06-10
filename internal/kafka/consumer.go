@@ -136,9 +136,17 @@ func (c *Consumer) Start(parent context.Context) error {
 		c.pollLoop(ctx)
 	}()
 
-	<-c.ready
-	c.logger.Info("consumer ready", "topics", c.topics)
-	return nil
+	// Wait for readiness, but honor the caller's context. franz self-heals an
+	// unreachable broker by retrying the dial indefinitely, so PollFetches (and
+	// therefore signalReady) may never fire; without this guard Start would
+	// block forever even after the caller's context is canceled or times out.
+	select {
+	case <-c.ready:
+		c.logger.Info("consumer ready", "topics", c.topics)
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("consumer start canceled before ready: %w", ctx.Err())
+	}
 }
 
 // pollLoop is the franz PollFetches consume loop. It commits offsets only for
