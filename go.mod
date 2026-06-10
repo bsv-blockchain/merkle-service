@@ -3,9 +3,9 @@ module github.com/bsv-blockchain/merkle-service
 go 1.26.2
 
 require (
-	github.com/IBM/sarama v1.50.1
+	github.com/IBM/sarama v1.50.2
 	github.com/aerospike/aerospike-client-go/v7 v7.10.2
-	github.com/bsv-blockchain/go-bt/v2 v2.6.5
+	github.com/bsv-blockchain/go-bt/v2 v2.6.6
 	github.com/bsv-blockchain/go-sdk v1.2.24
 	github.com/bsv-blockchain/go-subtree v1.4.3
 	github.com/bsv-blockchain/go-teranode-p2p-client v0.2.6
@@ -17,9 +17,9 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/testcontainers/testcontainers-go v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
-	golang.org/x/sync v0.20.0
-	golang.org/x/sys v0.45.0
-	modernc.org/sqlite v1.51.0
+	golang.org/x/sync v0.21.0
+	golang.org/x/sys v0.46.0
+	modernc.org/sqlite v1.52.0
 )
 
 require (
