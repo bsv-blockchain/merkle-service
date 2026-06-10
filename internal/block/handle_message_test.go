@@ -46,15 +46,16 @@ func (f *failingSyncProducer) Close() error { return nil }
 type fakeSubtreeCounter struct {
 	mu        sync.Mutex
 	values    map[string]int
+	data      map[string]*store.BlockProcessedData
 	initCalls int
 	failNext  bool
 }
 
 func newFakeSubtreeCounter() *fakeSubtreeCounter {
-	return &fakeSubtreeCounter{values: map[string]int{}}
+	return &fakeSubtreeCounter{values: map[string]int{}, data: map[string]*store.BlockProcessedData{}}
 }
 
-func (f *fakeSubtreeCounter) Init(blockHash string, count int) error {
+func (f *fakeSubtreeCounter) Init(blockHash string, count int, data *store.BlockProcessedData) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.initCalls++
@@ -63,14 +64,18 @@ func (f *fakeSubtreeCounter) Init(blockHash string, count int) error {
 		return errors.New("simulated counter init failure")
 	}
 	f.values[blockHash] = count
+	f.data[blockHash] = data
 	return nil
 }
 
-func (f *fakeSubtreeCounter) Decrement(blockHash string) (int, error) {
+func (f *fakeSubtreeCounter) Decrement(blockHash string) (int, *store.BlockProcessedData, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.values[blockHash]--
-	return f.values[blockHash], nil
+	if f.values[blockHash] <= 0 {
+		return f.values[blockHash], f.data[blockHash], nil
+	}
+	return f.values[blockHash], nil, nil
 }
 
 func (f *fakeSubtreeCounter) get(blockHash string) (int, bool) {

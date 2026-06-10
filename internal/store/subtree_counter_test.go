@@ -22,32 +22,52 @@ func TestSubtreeCounterStore_InitAndDecrement(t *testing.T) {
 	s := newSubtreeCounterStore(t)
 	blockHash := fmt.Sprintf("block-init-dec-%d", time.Now().UnixNano())
 
-	if err := s.Init(blockHash, 3); err != nil {
+	// Stash BlockProcessedData at Init: it must round-trip through the store and
+	// surface only on the final (remaining == 0) decrement.
+	want := &store.BlockProcessedData{
+		MerkleRoot:    "aabbcc",
+		SubtreeCount:  3,
+		SubtreeHashes: []string{"deadbeef", "feedface"},
+		CoinbaseBUMP:  "0102030405",
+	}
+	if err := s.Init(blockHash, 3, want); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	remaining, err := s.Decrement(blockHash)
+	remaining, data, err := s.Decrement(blockHash)
 	if err != nil {
 		t.Fatalf("Decrement failed: %v", err)
 	}
 	if remaining != 2 {
 		t.Errorf("expected 2, got %d", remaining)
 	}
+	if data != nil {
+		t.Errorf("expected nil block data on intermediate decrement, got %+v", data)
+	}
 
-	remaining, err = s.Decrement(blockHash)
+	remaining, data, err = s.Decrement(blockHash)
 	if err != nil {
 		t.Fatalf("Decrement failed: %v", err)
 	}
 	if remaining != 1 {
 		t.Errorf("expected 1, got %d", remaining)
 	}
+	if data != nil {
+		t.Errorf("expected nil block data on intermediate decrement, got %+v", data)
+	}
 
-	remaining, err = s.Decrement(blockHash)
+	remaining, data, err = s.Decrement(blockHash)
 	if err != nil {
 		t.Fatalf("Decrement failed: %v", err)
 	}
 	if remaining != 0 {
 		t.Errorf("expected 0, got %d", remaining)
+	}
+	// The nil check short-circuits the field comparisons, so data is never
+	// dereferenced when nil.
+	if data == nil || data.MerkleRoot != want.MerkleRoot || data.SubtreeCount != want.SubtreeCount ||
+		data.CoinbaseBUMP != want.CoinbaseBUMP || len(data.SubtreeHashes) != len(want.SubtreeHashes) {
+		t.Fatalf("block data round-trip mismatch on final decrement: got %+v, want %+v", data, want)
 	}
 }
 
@@ -56,7 +76,7 @@ func TestSubtreeCounterStore_ConcurrentDecrements(t *testing.T) {
 	blockHash := fmt.Sprintf("block-concurrent-%d", time.Now().UnixNano())
 	count := 50
 
-	if err := s.Init(blockHash, count); err != nil {
+	if err := s.Init(blockHash, count, nil); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
@@ -67,7 +87,7 @@ func TestSubtreeCounterStore_ConcurrentDecrements(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			remaining, err := s.Decrement(blockHash)
+			remaining, _, err := s.Decrement(blockHash)
 			if err != nil {
 				t.Errorf("Decrement failed: %v", err)
 				return

@@ -241,6 +241,10 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		//     so downstream consumers stay in step with the chain tip.
 		// A publish failure leaves the dedup cache untouched and returns
 		// an error so the consumer redelivers on the next session.
+		// Coinbase-only block: no subtrees, so the merkle root is the coinbase
+		// txid. Still surface the merkle root (and subtreeCount=0) so consumers
+		// can record it; there is no compound BUMP to build.
+		emptyBlockData := p.buildBlockProcessedData(ctx, blockMsg, meta, resolvedURL)
 		if err := emitBlockProcessedCallbacks(
 			p.Logger,
 			p.urlRegistry,
@@ -248,6 +252,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 			blockMsg.Hash,
 			blockMsg.OverrideCallbackURL,
 			blockMsg.OverrideCallbackToken,
+			emptyBlockData,
 		); err != nil {
 			return fmt.Errorf("emitting BLOCK_PROCESSED for empty block %s: %w", blockMsg.Hash, err)
 		}
@@ -301,9 +306,17 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	// On reprocess we scope the counter key by override URL so a /reprocess
 	// for a hash already being processed live (or being reprocessed by a
 	// different arcade) gets its own counter — see SubtreeCounterKey.
+	// Build the BLOCK_PROCESSED enrichment (merkle root, subtree list, coinbase
+	// BUMP) now, while the block header, coinbase, and metadata are in hand, and
+	// stash it on the counter record so the worker that drains the counter to
+	// zero can surface it on BLOCK_PROCESSED without re-deriving anything. This
+	// is best-effort: buildBlockProcessedData degrades to partial data on any
+	// failure and the consumer falls back to a datahub.
+	blockData := p.buildBlockProcessedData(ctx, blockMsg, meta, resolvedURL)
+
 	counterKey := SubtreeCounterKey(blockMsg.Hash, blockMsg.OverrideCallbackURL)
 	if p.subtreeCounter != nil {
-		if err := p.subtreeCounter.Init(counterKey, len(encoded)); err != nil {
+		if err := p.subtreeCounter.Init(counterKey, len(encoded), blockData); err != nil {
 			p.Logger.Error(
 				"failed to init subtree counter",
 				"blockHash", blockMsg.Hash,

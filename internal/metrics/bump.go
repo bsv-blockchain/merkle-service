@@ -55,6 +55,18 @@ var (
 			Buckets: CountBuckets,
 		},
 	)
+
+	// CoinbaseBumpValidationFailures counts blocks for which the producer built
+	// a coinbase BUMP whose folded root did not match the canonical header
+	// merkle root. A non-zero rate means coinbase BUMPs are being withheld from
+	// BLOCK_PROCESSED (consumers fall back to a datahub) and points at a bug in
+	// the coinbase-path construction or a malformed upstream subtree.
+	CoinbaseBumpValidationFailures = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "merkle_coinbase_bump_validation_failures_total",
+			Help: "Coinbase BUMPs withheld from BLOCK_PROCESSED because their folded root did not match the header merkle root.",
+		},
+	)
 )
 
 func init() {
@@ -65,6 +77,7 @@ func init() {
 		bumpTreeHeight,
 		bumpRegisteredIndices,
 		bumpLeavesCount,
+		CoinbaseBumpValidationFailures,
 	)
 }
 

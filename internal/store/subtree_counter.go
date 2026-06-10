@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,7 +10,14 @@ import (
 	astypes "github.com/aerospike/aerospike-client-go/v7/types"
 )
 
-const subtreeCounterBin = "remaining"
+const (
+	subtreeCounterBin = "remaining"
+	// blockDataBin holds the JSON-encoded BlockProcessedData stamped at Init
+	// and read back when the counter drains to zero so BLOCK_PROCESSED can
+	// carry the merkle root / subtree list / coinbase BUMP. Stored as a single
+	// string bin (an Aerospike CE core feature — no Enterprise dependency).
+	blockDataBin = "blockdata"
+)
 
 // ErrCounterNotFound is returned by Decrement when the per-block subtree
 // counter record is absent. The usual cause is TTL expiry: a large block whose
@@ -49,7 +57,9 @@ func NewSubtreeCounterStore(client *AerospikeClient, setName string, ttlSec, max
 }
 
 // Init creates a counter record for the given blockHash with the initial count.
-func (s *aerospikeSubtreeCounter) Init(blockHash string, count int) error {
+// When data is non-nil it is JSON-encoded and stamped onto the record so the
+// final Decrement can surface it on BLOCK_PROCESSED without a second fetch.
+func (s *aerospikeSubtreeCounter) Init(blockHash string, count int, data *BlockProcessedData) error {
 	key, err := as.NewKey(s.client.Namespace(), s.setName, blockHash)
 	if err != nil {
 		return fmt.Errorf("failed to create key: %w", err)
@@ -59,18 +69,35 @@ func (s *aerospikeSubtreeCounter) Init(blockHash string, count int) error {
 	wp.RecordExistsAction = as.UPDATE
 	wp.Expiration = uint32(s.ttlSec) //nolint:gosec // ttlSec is config-validated and fits uint32
 
-	err = s.client.Client().Put(wp, key, as.BinMap{subtreeCounterBin: count})
+	bins := as.BinMap{subtreeCounterBin: count}
+	if data != nil {
+		encoded, mErr := json.Marshal(data)
+		if mErr != nil {
+			// Non-fatal: a counter without block data still drives
+			// BLOCK_PROCESSED; the consumer just falls back to a datahub.
+			s.logger.Warn("failed to encode block-processed data for counter", "blockHash", blockHash, "error", mErr)
+		} else {
+			bins[blockDataBin] = string(encoded)
+		}
+	}
+
+	err = s.client.Client().Put(wp, key, bins)
 	if err != nil {
 		return fmt.Errorf("failed to init subtree counter: %w", err)
 	}
 	return nil
 }
 
-// Decrement atomically decrements the counter for the given blockHash and returns the new value.
-func (s *aerospikeSubtreeCounter) Decrement(blockHash string) (remaining int, err error) {
+// Decrement atomically decrements the counter for the given blockHash and
+// returns the new value. The Operate call already fetches every bin via GetOp,
+// so when the counter has drained (remaining <= 0) the stashed
+// BlockProcessedData is decoded from the same record and returned — no extra
+// round trip. data is nil while remaining > 0 (the common per-subtree path) to
+// avoid needless JSON work, and nil at zero if no data was stamped at Init.
+func (s *aerospikeSubtreeCounter) Decrement(blockHash string) (remaining int, data *BlockProcessedData, err error) {
 	key, err := as.NewKey(s.client.Namespace(), s.setName, blockHash)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create key: %w", err)
+		return 0, nil, fmt.Errorf("failed to create key: %w", err)
 	}
 
 	wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
@@ -88,15 +115,28 @@ func (s *aerospikeSubtreeCounter) Decrement(blockHash string) (remaining int, er
 	if err != nil {
 		var asErr as.Error
 		if errors.As(err, &asErr) && asErr.Matches(astypes.KEY_NOT_FOUND_ERROR) {
-			return 0, ErrCounterNotFound
+			return 0, nil, ErrCounterNotFound
 		}
-		return 0, fmt.Errorf("failed to decrement subtree counter: %w", err)
+		return 0, nil, fmt.Errorf("failed to decrement subtree counter: %w", err)
 	}
 
 	val, ok := record.Bins[subtreeCounterBin].(int)
 	if !ok {
-		return 0, fmt.Errorf("unexpected type for counter bin: %T", record.Bins[subtreeCounterBin])
+		return 0, nil, fmt.Errorf("unexpected type for counter bin: %T", record.Bins[subtreeCounterBin])
 	}
 
-	return val, nil
+	// Only decode the stashed block data on the final decrement — the per-subtree
+	// hot path (remaining > 0) skips the JSON work entirely.
+	if val <= 0 {
+		if raw, ok := record.Bins[blockDataBin].(string); ok && raw != "" {
+			var d BlockProcessedData
+			if uErr := json.Unmarshal([]byte(raw), &d); uErr != nil {
+				s.logger.Warn("failed to decode block-processed data from counter", "blockHash", blockHash, "error", uErr)
+			} else {
+				data = &d
+			}
+		}
+	}
+
+	return val, data, nil
 }

@@ -83,6 +83,27 @@ type CallbackTopicMessage struct {
 	StumpRef     string    `json:"stumpRef,omitempty"`
 	RetryCount   int       `json:"retryCount,omitempty"`
 	NextRetryAt  time.Time `json:"nextRetryAt,omitempty"`
+
+	// BLOCK_PROCESSED enrichment (merkle-service issues #123/#124/#125 + the
+	// coinbase path). These let a consumer build and validate a compound BUMP
+	// without fetching the block from a teranode datahub. All additive and
+	// omitempty, so older consumers ignore them. Only populated for
+	// BLOCK_PROCESSED messages.
+	//
+	//   - MerkleRoot:   canonical block header merkle root (display-order hex).
+	//   - SubtreeCount: canonical number of subtrees in the block. A pointer so
+	//     a coinbase-only block's legitimate 0 is emitted (omitempty drops a nil
+	//     pointer, not a *0); only set for BLOCK_PROCESSED, nil for other types.
+	//   - SubtreeHashes: canonical (coinbase-placeholder-based) subtree roots,
+	//     display-order hex, in subtree-index order — exactly as teranode
+	//     stores them; the consumer corrects index 0 using CoinbaseBUMP.
+	//   - CoinbaseBUMP: hex-encoded BRC-74 merkle path of the coinbase tx up to
+	//     the block merkle root. Empty when the producer couldn't build it (the
+	//     consumer then falls back to a datahub).
+	MerkleRoot    string   `json:"merkleRoot,omitempty"`
+	SubtreeCount  *int     `json:"subtreeCount,omitempty"`
+	SubtreeHashes []string `json:"subtreeHashes,omitempty"`
+	CoinbaseBUMP  string   `json:"coinbaseBump,omitempty"`
 }
 
 // PartitionKey returns the Kafka partition key for this callback message.
