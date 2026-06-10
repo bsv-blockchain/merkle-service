@@ -620,16 +620,37 @@ func TestSubtreeCounter_InitAndDecrement(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)
 
-	if err := s.Init("blk", 3); err != nil {
+	// Stash BlockProcessedData at Init: it must round-trip through block_data and
+	// surface only on the final (remaining == 0) decrement — never before.
+	wantData := &storepkg.BlockProcessedData{
+		MerkleRoot:    "aabbcc",
+		SubtreeCount:  3,
+		SubtreeHashes: []string{"deadbeef", "feedface"},
+		CoinbaseBUMP:  "0102030405",
+	}
+	if err := s.Init("blk", 3, wantData); err != nil {
 		t.Fatal(err)
 	}
 	for want := 2; want >= 0; want-- {
-		got, err := s.Decrement("blk")
+		got, data, err := s.Decrement("blk")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got != want {
 			t.Fatalf("Decrement = %d, want %d", got, want)
+		}
+		if want > 0 {
+			if data != nil {
+				t.Fatalf("expected nil block data on intermediate decrement (remaining %d), got %+v", got, data)
+			}
+			continue
+		}
+		// Final decrement: the stashed data must surface and match. The nil check
+		// short-circuits the field comparisons, so data is never dereferenced
+		// when nil.
+		if data == nil || data.MerkleRoot != wantData.MerkleRoot || data.SubtreeCount != wantData.SubtreeCount ||
+			data.CoinbaseBUMP != wantData.CoinbaseBUMP || len(data.SubtreeHashes) != len(wantData.SubtreeHashes) {
+			t.Fatalf("block data round-trip mismatch on final decrement: got %+v, want %+v", data, wantData)
 		}
 	}
 }
@@ -648,7 +669,7 @@ func TestSubtreeCounter_DecrementMissingRow(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)
 
-	got, err := s.Decrement("nonexistent-block")
+	got, _, err := s.Decrement("nonexistent-block")
 	if !errors.Is(err, storepkg.ErrCounterNotFound) {
 		t.Fatalf("Decrement on missing row = (%d, %v), want (0, ErrCounterNotFound)", got, err)
 	}
@@ -658,13 +679,13 @@ func TestSubtreeCounter_DecrementMissingRow(t *testing.T) {
 
 	// Sanity check: real ErrNoRows must not leak through even after an
 	// underlying failure has been observed once.
-	if initErr := s.Init("real-blk", 1); initErr != nil {
+	if initErr := s.Init("real-blk", 1, nil); initErr != nil {
 		t.Fatal(initErr)
 	}
-	if _, decErr := s.Decrement("real-blk"); decErr != nil {
+	if _, _, decErr := s.Decrement("real-blk"); decErr != nil {
 		t.Fatalf("Decrement on existing row: %v", decErr)
 	}
-	got, err = s.Decrement("still-nonexistent")
+	got, _, err = s.Decrement("still-nonexistent")
 	if !errors.Is(err, storepkg.ErrCounterNotFound) {
 		t.Fatalf("Decrement on missing row = (%d, %v), want (0, ErrCounterNotFound)", got, err)
 	}
@@ -686,7 +707,7 @@ func TestSubtreeCounter_DecrementRestampsTTL(t *testing.T) {
 	db, d := newTestDB(t)
 	s := newSubtreeCounter(db, d, 600)
 
-	if err := s.Init("blk", 3); err != nil {
+	if err := s.Init("blk", 3, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -700,7 +721,7 @@ func TestSubtreeCounter_DecrementRestampsTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := s.Decrement("blk"); err != nil {
+	if _, _, err := s.Decrement("blk"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -723,7 +744,7 @@ func TestSubtreeCounter_ConcurrentDecrement(t *testing.T) {
 	s := newSubtreeCounter(db, d, 600)
 
 	const initial = 50
-	if err := s.Init("blk", initial); err != nil {
+	if err := s.Init("blk", initial, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -733,7 +754,7 @@ func TestSubtreeCounter_ConcurrentDecrement(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			v, err := s.Decrement("blk")
+			v, _, err := s.Decrement("blk")
 			if err != nil {
 				t.Errorf("Decrement: %v", err)
 				return
@@ -788,7 +809,7 @@ func TestSubtreeCounter_ConcurrentDecrementMultiConn(t *testing.T) {
 
 	s := newSubtreeCounter(db, d, 600)
 	const initial = 64
-	if err := s.Init("blk", initial); err != nil {
+	if err := s.Init("blk", initial, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -800,7 +821,7 @@ func TestSubtreeCounter_ConcurrentDecrementMultiConn(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			v, err := s.Decrement("blk")
+			v, _, err := s.Decrement("blk")
 			if err != nil {
 				t.Errorf("Decrement: %v", err)
 				return

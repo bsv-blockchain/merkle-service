@@ -412,6 +412,61 @@ func TestDeliverCallback_RetryableStatusesNotPermanent(t *testing.T) {
 	}
 }
 
+// TestDeliverCallback_BlockProcessedEnrichmentInPayload verifies the new
+// BLOCK_PROCESSED enrichment fields (merkle root, subtree count, subtree
+// hashes, coinbase BUMP) are serialized into the outbound HTTP JSON body with
+// the exact keys arcade reads.
+func TestDeliverCallback_BlockProcessedEnrichmentInPayload(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := defaultTestConfig()
+	ds, _, _ := newTestDeliveryService(t, cfg, server.Client())
+
+	subtreeCount := 16
+	msg := &kafka.CallbackTopicMessage{
+		CallbackURL:   server.URL + "/callback",
+		Type:          kafka.CallbackBlockProcessed,
+		BlockHash:     testBlockHash,
+		MerkleRoot:    "aabbccdd",
+		SubtreeCount:  &subtreeCount,
+		SubtreeHashes: []string{"deadbeef", "feedface"},
+		CoinbaseBUMP:  "0102030405",
+	}
+
+	if err := ds.deliverCallback(context.Background(), msg); err != nil {
+		t.Fatalf("deliverCallback returned error: %v", err)
+	}
+
+	var payload struct {
+		Type          string   `json:"type"`
+		BlockHash     string   `json:"blockHash"`
+		MerkleRoot    string   `json:"merkleRoot"`
+		SubtreeCount  int      `json:"subtreeCount"`
+		SubtreeHashes []string `json:"subtreeHashes"`
+		CoinbaseBUMP  string   `json:"coinbaseBump"`
+	}
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("decode body: %v\nraw: %s", err, gotBody)
+	}
+	if payload.MerkleRoot != "aabbccdd" {
+		t.Errorf("merkleRoot = %q, want aabbccdd", payload.MerkleRoot)
+	}
+	if payload.SubtreeCount != 16 {
+		t.Errorf("subtreeCount = %d, want 16", payload.SubtreeCount)
+	}
+	if len(payload.SubtreeHashes) != 2 || payload.SubtreeHashes[1] != "feedface" {
+		t.Errorf("subtreeHashes = %v", payload.SubtreeHashes)
+	}
+	if payload.CoinbaseBUMP != "0102030405" {
+		t.Errorf("coinbaseBump = %q", payload.CoinbaseBUMP)
+	}
+}
+
 // TestProcessDelivery_NonRetryable4xxRoutesStraightToDLQ verifies the
 // integration: a 401 response causes processDelivery to bypass the retry
 // budget and publish directly to DLQ, even though MaxRetries=5 is set.

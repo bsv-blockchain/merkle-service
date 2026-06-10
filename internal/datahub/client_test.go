@@ -77,6 +77,7 @@ func TestFetchSubtree_Success(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil subtree")
+		return // unreachable after Fatal; guards the derefs below
 	}
 	if len(result.Nodes) != 2 {
 		t.Errorf("expected 2 nodes, got %d", len(result.Nodes))

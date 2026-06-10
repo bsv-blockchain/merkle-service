@@ -425,7 +425,7 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideU
 		return nil
 	}
 	counterKey := SubtreeCounterKey(blockHash, overrideURL)
-	remaining, err := s.subtreeCounter.Decrement(counterKey)
+	remaining, blockData, err := s.subtreeCounter.Decrement(counterKey)
 	if err != nil {
 		if errors.Is(err, store.ErrCounterNotFound) {
 			// The per-block counter is gone (TTL expired before the block
@@ -458,7 +458,7 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideU
 	// drive the counter negative; we still need to emit so the notification is
 	// not silently lost. Receiver-side dedup handles the duplicate.
 	if remaining <= 0 {
-		if emitErr := s.emitBlockProcessed(blockHash, overrideURL, overrideToken); emitErr != nil {
+		if emitErr := s.emitBlockProcessed(blockHash, overrideURL, overrideToken, blockData); emitErr != nil {
 			s.Logger.Error(
 				"failed to emit BLOCK_PROCESSED; work item will be redelivered",
 				"blockHash", blockHash,
@@ -560,8 +560,8 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 // On retry, the redelivered work item drives the counter past zero and
 // emit fires again; duplicate BLOCK_PROCESSED messages are deduplicated at
 // the callback delivery service (keyed by blockHash + callbackURL + type).
-func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overrideToken string) error {
-	return emitBlockProcessedCallbacks(s.Logger, s.urlRegistry, s.callbackProducer, blockHash, overrideURL, overrideToken)
+func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overrideToken string, blockData *store.BlockProcessedData) error {
+	return emitBlockProcessedCallbacks(s.Logger, s.urlRegistry, s.callbackProducer, blockHash, overrideURL, overrideToken, blockData)
 }
 
 // callbackPublisher is the narrow surface emitBlockProcessedCallbacks needs.
@@ -598,6 +598,7 @@ func emitBlockProcessedCallbacks(
 	urlRegistry store.CallbackURLRegistry,
 	producer callbackPublisher,
 	blockHash, overrideURL, overrideToken string,
+	blockData *store.BlockProcessedData,
 ) error {
 	if producer == nil {
 		return nil
@@ -628,6 +629,16 @@ func emitBlockProcessedCallbacks(
 			CallbackToken: entry.Token,
 			Type:          kafka.CallbackBlockProcessed,
 			BlockHash:     blockHash,
+		}
+		// Attach the block-level enrichment (merkle root, subtree list, coinbase
+		// BUMP) when the producer captured it. Absent for blocks processed
+		// before this shipped, or when the counter record lost the data — the
+		// consumer then falls back to a datahub.
+		if blockData != nil {
+			msg.MerkleRoot = blockData.MerkleRoot
+			msg.SubtreeCount = &blockData.SubtreeCount
+			msg.SubtreeHashes = blockData.SubtreeHashes
+			msg.CoinbaseBUMP = blockData.CoinbaseBUMP
 		}
 		data, encErr := msg.Encode()
 		if encErr != nil {

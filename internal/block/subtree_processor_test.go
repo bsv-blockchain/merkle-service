@@ -211,6 +211,7 @@ func TestMerkleTreeAndSTUMPBuild(t *testing.T) {
 	s := stump.Build(100, leaves, internalNodes, registeredIndices)
 	if s == nil {
 		t.Fatal("STUMP should not be nil")
+		return // unreachable after Fatal; guards the derefs below
 	}
 	if s.BlockHeight != 100 {
 		t.Errorf("expected block height 100, got %d", s.BlockHeight)

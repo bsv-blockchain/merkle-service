@@ -44,6 +44,7 @@ func TestCallbackAccumulatorStore_AppendSingle(t *testing.T) {
 	acc := result["http://example.com/cb"]
 	if acc == nil {
 		t.Fatal("expected entry for callback URL")
+		return // unreachable after Fatal; guards the derefs below
 	}
 	if len(acc.Entries) != 1 {
 		t.Fatalf("expected 1 entry (one subtree append), got %d", len(acc.Entries))
@@ -76,6 +77,7 @@ func TestCallbackAccumulatorStore_AppendMultipleSameURL(t *testing.T) {
 	acc := result["http://example.com/cb"]
 	if acc == nil {
 		t.Fatal("expected entry for callback URL")
+		return // unreachable after Fatal; guards the derefs below
 	}
 	if len(acc.Entries) != 2 {
 		t.Errorf("expected 2 entries (two subtree appends), got %d", len(acc.Entries))
