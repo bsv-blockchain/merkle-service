@@ -5,108 +5,18 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"sync"
 	"testing"
-	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
-
-// fakeClaim is a tiny stand-in for sarama.ConsumerGroupClaim. Only Messages()
-// is exercised by ConsumeClaim; the other interface methods return zero values.
-type fakeClaim struct {
-	messages chan *sarama.ConsumerMessage
-}
-
-func (f *fakeClaim) Topic() string                            { return "test" }
-func (f *fakeClaim) Partition() int32                         { return 0 }
-func (f *fakeClaim) InitialOffset() int64                     { return 0 }
-func (f *fakeClaim) HighWaterMarkOffset() int64               { return 0 }
-func (f *fakeClaim) Messages() <-chan *sarama.ConsumerMessage { return f.messages }
-
-// fakeSession is a tiny stand-in for sarama.ConsumerGroupSession. It records
-// every MarkMessage call so tests can assert which offsets advanced.
-type fakeSession struct {
-	ctx context.Context
-
-	mu     sync.Mutex
-	marked []*sarama.ConsumerMessage
-}
-
-func newFakeSession(ctx context.Context) *fakeSession {
-	return &fakeSession{ctx: ctx}
-}
-
-func (f *fakeSession) Claims() map[string][]int32 { return nil }
-func (f *fakeSession) MemberID() string           { return "" }
-func (f *fakeSession) GenerationID() int32        { return 0 }
-func (f *fakeSession) MarkOffset(topic string, partition int32, offset int64, metadata string) {
-}
-func (f *fakeSession) Commit() {}
-func (f *fakeSession) ResetOffset(topic string, partition int32, offset int64, metadata string) {
-}
-
-func (f *fakeSession) MarkMessage(msg *sarama.ConsumerMessage, metadata string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.marked = append(f.marked, msg)
-}
-func (f *fakeSession) Context() context.Context { return f.ctx }
-
-func (f *fakeSession) markedOffsets() []int64 {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]int64, len(f.marked))
-	for i, m := range f.marked {
-		out[i] = m.Offset
-	}
-	return out
-}
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// runConsumeClaim wires a handler to ConsumeClaim, feeds it the supplied
-// messages, and returns the session (for marked-offset inspection) plus the
-// final return value of ConsumeClaim. The channel is closed after all messages
-// are sent so a successful run terminates naturally.
-func runConsumeClaim(t *testing.T, handler MessageHandler, msgs []*sarama.ConsumerMessage) (*fakeSession, error) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	session := newFakeSession(ctx)
-	claim := &fakeClaim{messages: make(chan *sarama.ConsumerMessage, len(msgs)+1)}
-	for _, m := range msgs {
-		claim.messages <- m
-	}
-	close(claim.messages)
-
-	h := &consumerGroupHandler{
-		handler: handler,
-		logger:  discardLogger(),
-		ready:   make(chan struct{}),
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- h.ConsumeClaim(session, claim)
-	}()
-
-	select {
-	case err := <-errCh:
-		return session, err
-	case <-time.After(2 * time.Second):
-		cancel()
-		t.Fatal("ConsumeClaim did not return in time")
-		return nil, nil
-	}
-}
-
-func msg(offset int64) *sarama.ConsumerMessage {
-	return &sarama.ConsumerMessage{
+// rec builds a single-partition record at the given offset on topic "test".
+func rec(offset int64) *kgo.Record {
+	return &kgo.Record{
 		Topic:     "test",
 		Partition: 0,
 		Offset:    offset,
@@ -114,40 +24,64 @@ func msg(offset int64) *sarama.ConsumerMessage {
 	}
 }
 
-// TestConsumeClaim_AllSuccess verifies that when the handler returns nil for
-// every message, every offset is marked and ConsumeClaim returns nil.
-func TestConsumeClaim_AllSuccess(t *testing.T) {
-	handler := func(_ context.Context, _ *sarama.ConsumerMessage) error {
-		return nil
+// fetchesOf wraps records (assumed same topic/partition) into a kgo.Fetches so
+// processRecords can be exercised without a broker.
+func fetchesOf(recs ...*kgo.Record) kgo.Fetches {
+	if len(recs) == 0 {
+		return kgo.Fetches{}
 	}
+	return kgo.Fetches{{
+		Topics: []kgo.FetchTopic{{
+			Topic: recs[0].Topic,
+			Partitions: []kgo.FetchPartition{{
+				Partition: recs[0].Partition,
+				Records:   recs,
+			}},
+		}},
+	}}
+}
 
-	msgs := []*sarama.ConsumerMessage{msg(10), msg(11), msg(12)}
-	session, err := runConsumeClaim(t, handler, msgs)
-	if err != nil {
-		t.Fatalf("ConsumeClaim returned unexpected error: %v", err)
+// committedOffsets extracts the offsets of the records processRecords returned
+// as committable, in order.
+func committedOffsets(recs []*kgo.Record) []int64 {
+	out := make([]int64, len(recs))
+	for i, r := range recs {
+		out[i] = r.Offset
 	}
+	return out
+}
 
-	got := session.markedOffsets()
+func run(handler MessageHandler, fetches kgo.Fetches) []*kgo.Record {
+	return processRecords(context.Background(), fetches, handler, nil, discardLogger(), "test-group")
+}
+
+// TestProcessRecords_AllSuccess verifies that when the handler returns nil for
+// every record, every record is returned as committable.
+func TestProcessRecords_AllSuccess(t *testing.T) {
+	handler := func(_ context.Context, _ *Message) error { return nil }
+
+	got := committedOffsets(run(handler, fetchesOf(rec(10), rec(11), rec(12))))
 	want := []int64{10, 11, 12}
 	if len(got) != len(want) {
-		t.Fatalf("marked offsets: got %v, want %v", got, want)
+		t.Fatalf("committable offsets: got %v, want %v", got, want)
 	}
 	for i, o := range want {
 		if got[i] != o {
-			t.Errorf("marked[%d] = %d, want %d", i, got[i], o)
+			t.Errorf("committable[%d] = %d, want %d", i, got[i], o)
 		}
 	}
 }
 
-// TestConsumeClaim_StopsOnHandlerError is the regression test for F-030. The
-// previous implementation logged and continued, allowing later successful
-// messages to advance the committed offset past a failed one. The fix returns
-// the handler error and stops processing further messages so sarama redelivers
-// the failed offset in the next session.
-func TestConsumeClaim_StopsOnHandlerError(t *testing.T) {
+// TestProcessRecords_StopsOnHandlerError is the regression test for F-030. On
+// the first handler error in a partition, processing of that partition must
+// stop so a later success cannot advance the committed offset past the failed
+// one. franz commits from the last committed offset, so leaving the failed
+// record (and everything after it in the partition) uncommitted means they are
+// redelivered on the next poll/rebalance — preserving at-least-once.
+func TestProcessRecords_StopsOnHandlerError(t *testing.T) {
 	wantErr := errors.New("boom")
 	var calls int
-	handler := func(_ context.Context, _ *sarama.ConsumerMessage) error {
+	handler := func(_ context.Context, _ *Message) error {
 		calls++
 		if calls == 2 {
 			return wantErr
@@ -155,109 +89,116 @@ func TestConsumeClaim_StopsOnHandlerError(t *testing.T) {
 		return nil
 	}
 
-	msgs := []*sarama.ConsumerMessage{msg(10), msg(11), msg(12), msg(13)}
-	session, err := runConsumeClaim(t, handler, msgs)
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("ConsumeClaim error: got %v, want %v", err, wantErr)
-	}
-
-	got := session.markedOffsets()
+	got := committedOffsets(run(handler, fetchesOf(rec(10), rec(11), rec(12), rec(13))))
 	want := []int64{10}
 	if len(got) != len(want) {
-		t.Fatalf("marked offsets: got %v, want %v (failed offset 11 must NOT be marked, and 12/13 must NOT have been processed)", got, want)
+		t.Fatalf("committable offsets: got %v, want %v (failed offset 11 must NOT be committable, and 12/13 must NOT have been processed)", got, want)
 	}
-	for i, o := range want {
-		if got[i] != o {
-			t.Errorf("marked[%d] = %d, want %d", i, got[i], o)
-		}
+	if got[0] != 10 {
+		t.Errorf("committable[0] = %d, want 10", got[0])
 	}
-
 	// Handler must NOT have been invoked for offsets 12 or 13: bailing out
-	// preserves the original ordering guarantee that sarama redelivers the
-	// failed offset and everything after it on the next session.
+	// preserves the guarantee that the failed offset and everything after it in
+	// the partition are redelivered.
 	if calls != 2 {
 		t.Errorf("handler invoked %d times, want 2 (one success + one failure)", calls)
 	}
 }
 
-// TestConsumeClaim_FirstMessageError covers the corner case where the very
-// first message fails: nothing should be marked, and ConsumeClaim should
-// surface the error immediately.
-func TestConsumeClaim_FirstMessageError(t *testing.T) {
-	wantErr := errors.New("first")
-	handler := func(_ context.Context, _ *sarama.ConsumerMessage) error {
-		return wantErr
-	}
+// TestProcessRecords_FirstMessageError covers the corner case where the very
+// first record fails: nothing is committable.
+func TestProcessRecords_FirstMessageError(t *testing.T) {
+	handler := func(_ context.Context, _ *Message) error { return errors.New("first") }
 
-	msgs := []*sarama.ConsumerMessage{msg(100), msg(101)}
-	session, err := runConsumeClaim(t, handler, msgs)
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("ConsumeClaim error: got %v, want %v", err, wantErr)
-	}
-	if got := session.markedOffsets(); len(got) != 0 {
-		t.Errorf("expected no marked offsets, got %v", got)
+	if got := run(handler, fetchesOf(rec(100), rec(101))); len(got) != 0 {
+		t.Errorf("expected no committable records, got offsets %v", committedOffsets(got))
 	}
 }
 
-// TestNewConsumerConfig_InitialOffsetOldest is the regression test for F-031.
-// Consumer groups with no committed offsets must start at the OLDEST available
-// offset so renaming a group, recovering lost offsets, or deploying into a
-// fresh environment with a non-empty topic still processes the durable
-// backlog instead of silently skipping it.
-func TestNewConsumerConfig_InitialOffsetOldest(t *testing.T) {
-	cfg := newConsumerConfig()
-	if cfg == nil {
-		t.Fatal("newConsumerConfig returned nil")
-		return // unreachable after Fatal; guards the derefs below
-	}
-	if got, want := cfg.Consumer.Offsets.Initial, sarama.OffsetOldest; got != want {
-		t.Errorf("Consumer.Offsets.Initial = %d, want %d (sarama.OffsetOldest); a new consumer group must replay the backlog, not jump to the topic head", got, want)
-	}
-	if got := cfg.Consumer.Offsets.Initial; got == sarama.OffsetNewest {
-		t.Errorf("Consumer.Offsets.Initial must not be sarama.OffsetNewest (F-031): new groups would silently skip queued work")
-	}
-}
+// TestProcessRecords_PartitionsAreIndependent verifies F-030 is enforced
+// per-partition: a handler error on one partition must not stop committing
+// successful records on a different partition.
+func TestProcessRecords_PartitionsAreIndependent(t *testing.T) {
+	// partition 0: offsets 1 (ok), 2 (fail), 3 (must be skipped)
+	// partition 1: offsets 5 (ok), 6 (ok)
+	fetches := kgo.Fetches{{
+		Topics: []kgo.FetchTopic{{
+			Topic: "test",
+			Partitions: []kgo.FetchPartition{
+				{Partition: 0, Records: []*kgo.Record{
+					{Topic: "test", Partition: 0, Offset: 1, Value: []byte("v")},
+					{Topic: "test", Partition: 0, Offset: 2, Value: []byte("FAIL")},
+					{Topic: "test", Partition: 0, Offset: 3, Value: []byte("v")},
+				}},
+				{Partition: 1, Records: []*kgo.Record{
+					{Topic: "test", Partition: 1, Offset: 5, Value: []byte("v")},
+					{Topic: "test", Partition: 1, Offset: 6, Value: []byte("v")},
+				}},
+			},
+		}},
+	}}
 
-// TestNewConsumerConfig_ReturnErrors is the regression test for F-053. With
-// Consumer.Return.Errors=false (sarama default) every error during consumption
-// is silently dropped, producing zombie consumers where the pod stays Running
-// but the broker reports the group as Empty. Start() must drain group.Errors()
-// and surface them, which requires this flag.
-func TestNewConsumerConfig_ReturnErrors(t *testing.T) {
-	cfg := newConsumerConfig()
-	if !cfg.Consumer.Return.Errors {
-		t.Error("Consumer.Return.Errors = false (sarama default), want true; without it sarama silently drops all session errors and we cannot detect zombie consumers (F-053)")
-	}
-}
-
-// TestConsumeClaim_ContextCancelled verifies the loop exits cleanly when the
-// session context is canceled mid-flight (Stop / rebalance path).
-func TestConsumeClaim_ContextCancelled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	session := newFakeSession(ctx)
-	// Use an unbuffered channel that we never close so the only exit path is
-	// context cancellation.
-	claim := &fakeClaim{messages: make(chan *sarama.ConsumerMessage)}
-
-	h := &consumerGroupHandler{
-		handler: func(_ context.Context, _ *sarama.ConsumerMessage) error { return nil },
-		logger:  discardLogger(),
-		ready:   make(chan struct{}),
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- h.ConsumeClaim(session, claim)
-	}()
-
-	cancel()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Errorf("expected nil on context cancel, got %v", err)
+	handler := func(_ context.Context, m *Message) error {
+		if string(m.Value) == "FAIL" {
+			return errors.New("boom")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("ConsumeClaim did not return after context cancel")
+		return nil
+	}
+
+	got := processRecords(context.Background(), fetches, handler, nil, discardLogger(), "test-group")
+
+	// partition 0 stops at offset 2 (only offset 1 committable); partition 1 both commit.
+	var p0, p1 []int64
+	for _, r := range got {
+		switch r.Partition {
+		case 0:
+			p0 = append(p0, r.Offset)
+		case 1:
+			p1 = append(p1, r.Offset)
+		}
+	}
+	if len(p0) != 1 || p0[0] != 1 {
+		t.Errorf("partition 0 committable = %v, want [1] (offset 2 failed, 3 must be skipped)", p0)
+	}
+	if len(p1) != 2 || p1[0] != 5 || p1[1] != 6 {
+		t.Errorf("partition 1 committable = %v, want [5 6] (independent of partition 0 failure)", p1)
+	}
+}
+
+// TestConsumerOpts_AcceptedByClient is a smoke test that the option set built by
+// consumerOpts is mutually valid (e.g. SessionTimeout >= 3x HeartbeatInterval,
+// a valid balancer, offset-reset and auto-commit settings) — franz validates
+// these when the client is constructed. The behavioral invariants F-031
+// (offset reset to oldest) and F-053 (recovery/error surfacing) are verified
+// against a real broker in kafka_integration_test.go, because franz options are
+// opaque and cannot be introspected the way sarama's *Config struct could.
+func TestConsumerOpts_AcceptedByClient(t *testing.T) {
+	client, err := kgo.NewClient(consumerOpts([]string{"localhost:9092"}, "test-group", []string{"test"})...)
+	if err != nil {
+		t.Fatalf("consumerOpts produced an invalid franz option set: %v", err)
+	}
+	client.Close()
+}
+
+// TestClampBatchMaxBytes guards teranode #660: values at or below the 1 MiB
+// broker default are floored to the default (never used as a hard cap that
+// would reject normal records), while an explicit larger value is honored.
+func TestClampBatchMaxBytes(t *testing.T) {
+	cases := []struct {
+		name      string
+		requested int
+		want      int32
+	}{
+		{"zero floors to default", 0, defaultBatchMaxBytes},
+		{"small flush-style value floors to default", 1024, defaultBatchMaxBytes},
+		{"exactly default", int(defaultBatchMaxBytes), defaultBatchMaxBytes},
+		{"10MiB honored (merkle cap-raise)", 10 * 1024 * 1024, 10 * 1024 * 1024},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clampBatchMaxBytes(tc.requested); got != tc.want {
+				t.Errorf("clampBatchMaxBytes(%d) = %d, want %d", tc.requested, got, tc.want)
+			}
+		})
 	}
 }

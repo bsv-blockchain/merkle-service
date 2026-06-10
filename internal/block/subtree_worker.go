@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/IBM/sarama"
-
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
@@ -250,7 +248,7 @@ func (s *SubtreeWorkerService) maxAttempts() int {
 // re-publish BLOCK_PROCESSED. Receiver-side dedup at the delivery service
 // (keyed by blockHash + callbackURL + type) ensures the registered endpoint
 // sees BLOCK_PROCESSED at most once per (block, URL) pair.
-func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
+func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Message) error {
 	workMsg, err := kafka.DecodeSubtreeWorkMessage(msg.Value)
 	if err != nil {
 		s.Logger.Error(

@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
@@ -33,15 +32,15 @@ func callbackCount(outcome string) int64 {
 // consumer-group loop skips MarkMessage and the offset stays uncommitted —
 // the message will be re-delivered on the next session.
 
-// encodeConsumerMessage builds a sarama.ConsumerMessage carrying the
+// encodeConsumerMessage builds a kafka.Message carrying the
 // JSON-encoded CallbackTopicMessage, mimicking what the broker delivers.
-func encodeConsumerMessage(t *testing.T, msg *kafka.CallbackTopicMessage) *sarama.ConsumerMessage {
+func encodeConsumerMessage(t *testing.T, msg *kafka.CallbackTopicMessage) *kafka.Message {
 	t.Helper()
 	data, err := msg.Encode()
 	if err != nil {
 		t.Fatalf("failed to encode CallbackTopicMessage: %v", err)
 	}
-	return &sarama.ConsumerMessage{Value: data}
+	return &kafka.Message{Value: data}
 }
 
 // TestHandleMessage_HappyPathReturnsNilAfterDelivery covers the standard
@@ -324,7 +323,7 @@ func TestHandleMessage_PoisonPillReturnsNil(t *testing.T) {
 	cfg := defaultTestConfig()
 	ds, _, _ := newTestDeliveryService(t, cfg, &http.Client{Timeout: time.Second})
 
-	if err := ds.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: []byte("not-json")}); err != nil {
+	if err := ds.handleMessage(context.Background(), &kafka.Message{Value: []byte("not-json")}); err != nil {
 		t.Errorf("expected nil for poison-pill message, got: %v", err)
 	}
 }

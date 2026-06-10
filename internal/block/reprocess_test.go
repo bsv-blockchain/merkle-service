@@ -12,9 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
-	"github.com/IBM/sarama/mocks"
-
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
@@ -183,8 +180,7 @@ func (explodingURLRegistry) GetAll() ([]store.CallbackEntry, error) {
 // BLOCK_PROCESSED message is published, addressed to the override URL with
 // the override token.
 func TestEmitBlockProcessed_OverrideSkipsRegistry(t *testing.T) {
-	mock := mocks.NewSyncProducer(t, sarama.NewConfig())
-	mock.ExpectSendMessageAndSucceed()
+	mock := &blockingProducer{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	s := &SubtreeWorkerService{
 		urlRegistry: explodingURLRegistry{},
@@ -198,8 +194,8 @@ func TestEmitBlockProcessed_OverrideSkipsRegistry(t *testing.T) {
 	if err := s.emitBlockProcessed("blk-override", overrideURL, overrideToken, nil); err != nil {
 		t.Fatalf("emitBlockProcessed: %v", err)
 	}
-	if err := mock.Close(); err != nil {
-		t.Fatalf("producer close: %v", err)
+	if got := len(mock.captured); got != 1 {
+		t.Fatalf("expected exactly one publish, got %d", got)
 	}
 }
 
@@ -207,32 +203,17 @@ func TestEmitBlockProcessed_OverrideSkipsRegistry(t *testing.T) {
 // payload before letting the test pass.
 type blockingProducer struct {
 	mu       sync.Mutex
-	captured []*sarama.ProducerMessage
+	captured []capturedMessage
 }
 
-func (b *blockingProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
+func (b *blockingProducer) Produce(key string, value []byte) (int32, int64, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.captured = append(b.captured, msg)
+	b.captured = append(b.captured, capturedMessage{Key: key, Value: value})
 	return 0, int64(len(b.captured) - 1), nil
 }
 
-func (b *blockingProducer) SendMessages([]*sarama.ProducerMessage) error { return nil }
-func (b *blockingProducer) Close() error                                 { return nil }
-func (b *blockingProducer) AbortTxn() error                              { return nil }
-func (b *blockingProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
-	return nil
-}
-
-func (b *blockingProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
-	return nil
-}
-func (b *blockingProducer) BeginTxn() error       { return nil }
-func (b *blockingProducer) CommitTxn() error      { return nil }
-func (b *blockingProducer) IsTransactional() bool { return false }
-func (b *blockingProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
-	return 0
-}
+func (b *blockingProducer) Close() error { return nil }
 
 // TestEmitBlockProcessed_OverridePayload verifies the BLOCK_PROCESSED
 // message published in override mode carries the requester's URL and
@@ -255,10 +236,7 @@ func TestEmitBlockProcessed_OverridePayload(t *testing.T) {
 	if got := len(mock.captured); got != 1 {
 		t.Fatalf("expected exactly one publish, got %d", got)
 	}
-	bytesVal, err := mock.captured[0].Value.Encode()
-	if err != nil {
-		t.Fatalf("encode value: %v", err)
-	}
+	bytesVal := mock.captured[0].Value
 	decoded, err := kafka.DecodeCallbackTopicMessage(bytesVal)
 	if err != nil {
 		t.Fatalf("decode: %v", err)

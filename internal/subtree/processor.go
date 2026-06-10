@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/IBM/sarama"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
@@ -274,7 +273,7 @@ func (p *Processor) Health() service.HealthStatus {
 // from either acking or requeueing — those still stall the partition so we
 // don't lose data, but they indicate Kafka-side trouble rather than a poison
 // pill.
-func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
+func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error {
 	start := time.Now()
 
 	subtreeMsg, err := kafka.DecodeSubtreeMessage(msg.Value)

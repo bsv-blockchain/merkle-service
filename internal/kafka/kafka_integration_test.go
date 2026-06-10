@@ -4,13 +4,16 @@ package kafka_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 )
@@ -22,24 +25,31 @@ func uniqueTopic(t *testing.T, prefix string) string {
 	return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
 }
 
-// ensureTopicExists creates a topic via the Kafka admin API so that
-// producers and consumers can use it immediately.
+// ensureTopicExists creates a topic via the franz-go admin API (kadm) so that
+// producers and consumers can use it immediately. Per teranode #633,
+// "already exists" is detected with the typed kerr.TopicAlreadyExists on both
+// the call error and the per-topic response error, not a string match.
 func ensureTopicExists(t *testing.T, topic string) {
 	t.Helper()
-	cfg := sarama.NewConfig()
-	admin, err := sarama.NewClusterAdmin(brokers, cfg)
+	client, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
 	if err != nil {
 		t.Skipf("Kafka not available: %v", err)
 	}
-	defer admin.Close()
+	defer client.Close()
 
-	err = admin.CreateTopic(topic, &sarama.TopicDetail{
-		NumPartitions:     1,
-		ReplicationFactor: 1,
-	}, false)
+	admin := kadm.NewClient(client)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := admin.CreateTopic(ctx, 1, 1, nil, topic)
 	if err != nil {
-		// Ignore "already exists" errors.
-		t.Logf("create topic %s: %v (may already exist)", topic, err)
+		if errors.Is(err, kerr.TopicAlreadyExists) {
+			return
+		}
+		t.Skipf("Kafka not available: %v", err)
+	}
+	if resp.Err != nil && !errors.Is(resp.Err, kerr.TopicAlreadyExists) {
+		t.Logf("create topic %s: %v (may already exist)", topic, resp.Err)
 	}
 }
 
@@ -61,7 +71,7 @@ func TestKafka_ProduceConsumeRoundTrip(t *testing.T) {
 	var mu sync.Mutex
 	done := make(chan struct{})
 
-	handler := func(ctx context.Context, msg *sarama.ConsumerMessage) error {
+	handler := func(ctx context.Context, msg *kafka.Message) error {
 		mu.Lock()
 		defer mu.Unlock()
 		received = msg.Value
@@ -119,7 +129,7 @@ func TestKafka_ProduceMultipleConsumeInOrder(t *testing.T) {
 	var received []string
 	allDone := make(chan struct{})
 
-	handler := func(ctx context.Context, msg *sarama.ConsumerMessage) error {
+	handler := func(ctx context.Context, msg *kafka.Message) error {
 		mu.Lock()
 		defer mu.Unlock()
 		received = append(received, string(msg.Value))
@@ -190,7 +200,7 @@ func TestKafka_ConsumerGroupOffsetManagement(t *testing.T) {
 	firstBatchDone := make(chan struct{})
 	firstBatchCount := 3
 
-	handler1 := func(ctx context.Context, msg *sarama.ConsumerMessage) error {
+	handler1 := func(ctx context.Context, msg *kafka.Message) error {
 		mu1.Lock()
 		defer mu1.Unlock()
 		received1 = append(received1, string(msg.Value))
@@ -244,7 +254,7 @@ func TestKafka_ConsumerGroupOffsetManagement(t *testing.T) {
 	var received2 []string
 	secondBatchDone := make(chan struct{})
 
-	handler2 := func(ctx context.Context, msg *sarama.ConsumerMessage) error {
+	handler2 := func(ctx context.Context, msg *kafka.Message) error {
 		mu2.Lock()
 		defer mu2.Unlock()
 		received2 = append(received2, string(msg.Value))

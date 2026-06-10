@@ -17,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/IBM/sarama"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
@@ -279,7 +278,7 @@ func (d *DeliveryService) Health() service.HealthStatus {
 // Same-partition serialization (callback URL is the partition key) means
 // STUMP messages for a given (block, callbackURL) are processed before
 // BLOCK_PROCESSED for the same key, without any in-process gating.
-func (d *DeliveryService) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
+func (d *DeliveryService) handleMessage(ctx context.Context, msg *kafka.Message) error {
 	cbMsg, err := kafka.DecodeCallbackTopicMessage(msg.Value)
 	if err != nil {
 		// A poison-pill message that cannot be decoded should not block the
