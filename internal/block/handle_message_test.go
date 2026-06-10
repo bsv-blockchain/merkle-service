@@ -9,26 +9,24 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/IBM/sarama"
-
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
-// failingSyncProducer is a sarama.SyncProducer that fails on the Nth (0-indexed)
-// SendMessage call. All earlier and later calls succeed (later calls aren't
+// failingSyncProducer is a kafka.Publisher that fails on the Nth (0-indexed)
+// Produce call. All earlier and later calls succeed (later calls aren't
 // expected — the processor must stop on first failure).
 type failingSyncProducer struct {
 	mu       sync.Mutex
-	messages []*sarama.ProducerMessage
+	messages []capturedMessage
 	failAt   int // 0-indexed call to fail on; -1 means never fail
 	failErr  error
 	calls    int
 }
 
-func (f *failingSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
+func (f *failingSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	idx := f.calls
@@ -36,34 +34,11 @@ func (f *failingSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, i
 	if f.failAt >= 0 && idx == f.failAt {
 		return 0, 0, f.failErr
 	}
-	f.messages = append(f.messages, msg)
+	f.messages = append(f.messages, capturedMessage{Key: key, Value: value})
 	return 0, int64(len(f.messages)), nil
 }
 
-func (f *failingSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
-	for _, m := range msgs {
-		if _, _, err := f.SendMessage(m); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (f *failingSyncProducer) Close() error          { return nil }
-func (f *failingSyncProducer) IsTransactional() bool { return false }
-func (f *failingSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
-	return sarama.ProducerTxnFlagReady
-}
-func (f *failingSyncProducer) BeginTxn() error  { return nil }
-func (f *failingSyncProducer) CommitTxn() error { return nil }
-func (f *failingSyncProducer) AbortTxn() error  { return nil }
-func (f *failingSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
-	return nil
-}
-
-func (f *failingSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
-	return nil
-}
+func (f *failingSyncProducer) Close() error { return nil }
 
 // fakeSubtreeCounter is an in-memory SubtreeCounterStore for tests. It records
 // every call so tests can assert the order/count of Init invocations relative
@@ -111,7 +86,7 @@ func (f *fakeSubtreeCounter) inits() int {
 	return f.initCalls
 }
 
-// newBlockMessageBytes encodes a BlockMessage for use as a sarama message value.
+// newBlockMessageBytes encodes a BlockMessage for use as a Kafka message value.
 func newBlockMessageBytes(t *testing.T, hash, dataHubURL string) []byte {
 	t.Helper()
 	bm := &kafka.BlockMessage{
@@ -143,7 +118,7 @@ func newDataHubServerWithSubtrees(t *testing.T, subtreeCount int) *httptest.Serv
 
 // buildProcessorWithProducer constructs a Processor wired up with the supplied
 // sync producer and an in-memory dedup cache + counter for assertions.
-func buildProcessorWithProducer(t *testing.T, sp sarama.SyncProducer) (*Processor, *fakeSubtreeCounter, *cache.DedupCache) {
+func buildProcessorWithProducer(t *testing.T, sp kafka.Publisher) (*Processor, *fakeSubtreeCounter, *cache.DedupCache) {
 	t.Helper()
 	logger := testLogger()
 	dedup := cache.NewDedupCache(64)
@@ -174,7 +149,7 @@ func TestHandleMessage_HappyPath_AllPublished(t *testing.T) {
 	defer server.Close()
 
 	const blockHash = "block-happy"
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
 
@@ -211,7 +186,7 @@ func TestHandleMessage_PublishFailureMidLoop_StopsAndReturnsError(t *testing.T) 
 	defer server.Close()
 
 	const blockHash = "block-publish-fail"
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
 
@@ -253,7 +228,7 @@ func TestHandleMessage_PublishFailureFirstMessage_NoMessagesLeak(t *testing.T) {
 	defer server.Close()
 
 	const blockHash = "block-publish-fail-first"
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
 
@@ -283,7 +258,7 @@ func TestHandleMessage_RetryAfterPublishFailure_Republishes(t *testing.T) {
 	defer server.Close()
 
 	const blockHash = "block-retry"
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
 
@@ -326,7 +301,7 @@ func TestHandleMessage_CounterInitFailure_NoPublishNoDedup(t *testing.T) {
 	defer server.Close()
 
 	const blockHash = "block-counter-fail"
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
 
@@ -352,7 +327,7 @@ func TestHandleMessage_NoSubtrees_DedupAdded(t *testing.T) {
 	defer server.Close()
 
 	const blockHash = "block-empty"
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newBlockMessageBytes(t, blockHash, server.URL),
 	}
 
@@ -407,7 +382,7 @@ func TestHandleMessage_EmptyBlock_ReprocessEmitsBlockProcessed(t *testing.T) {
 		overrideURL   = "https://arcade.example/api/v1/cb"
 		overrideToken = "tok-arcade-1"
 	)
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newEmptyBlockMessage(t, blockHash, server.URL, overrideURL, overrideToken, true),
 	}
 
@@ -424,10 +399,7 @@ func TestHandleMessage_EmptyBlock_ReprocessEmitsBlockProcessed(t *testing.T) {
 
 	// Decode and assert the callback message points at the override URL,
 	// carries the override token, and is typed BLOCK_PROCESSED.
-	payload, err := callbackProducer.messages[0].Value.Encode()
-	if err != nil {
-		t.Fatalf("encode produced message value: %v", err)
-	}
+	payload := callbackProducer.messages[0].Value
 	decoded, err := kafka.DecodeCallbackTopicMessage(payload)
 	if err != nil {
 		t.Fatalf("decode callback message: %v", err)
@@ -477,7 +449,7 @@ func TestHandleMessage_EmptyBlock_LiveEmitsBlockProcessedToAllRegistered(t *test
 	defer server.Close()
 
 	const blockHash = "block-empty-live"
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newEmptyBlockMessage(t, blockHash, server.URL, "", "", false),
 	}
 
@@ -495,10 +467,7 @@ func TestHandleMessage_EmptyBlock_LiveEmitsBlockProcessedToAllRegistered(t *test
 	// registered URLs are represented.
 	seen := map[string]string{}
 	for _, m := range callbackProducer.messages {
-		payload, err := m.Value.Encode()
-		if err != nil {
-			t.Fatalf("encode value: %v", err)
-		}
+		payload := m.Value
 		decoded, err := kafka.DecodeCallbackTopicMessage(payload)
 		if err != nil {
 			t.Fatalf("decode callback message: %v", err)

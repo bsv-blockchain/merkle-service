@@ -6,49 +6,31 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/IBM/sarama"
-
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 )
 
-// mockSyncProducer implements sarama.SyncProducer for capturing published messages.
-type mockSyncProducer struct {
-	messages []*sarama.ProducerMessage
+// capturedMessage holds the raw key/value of a published message.
+type capturedMessage struct {
+	Key   string
+	Value []byte
 }
 
-func (m *mockSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
-	m.messages = append(m.messages, msg)
+// mockSyncProducer implements kafka.Publisher for capturing published messages.
+type mockSyncProducer struct {
+	messages []capturedMessage
+}
+
+func (m *mockSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
+	m.messages = append(m.messages, capturedMessage{Key: key, Value: value})
 	return 0, int64(len(m.messages)), nil
 }
 
-func (m *mockSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
-	m.messages = append(m.messages, msgs...)
-	return nil
-}
-func (m *mockSyncProducer) Close() error          { return nil }
-func (m *mockSyncProducer) IsTransactional() bool { return false }
-func (m *mockSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
-	return sarama.ProducerTxnFlagReady
-}
-func (m *mockSyncProducer) BeginTxn() error  { return nil }
-func (m *mockSyncProducer) CommitTxn() error { return nil }
-func (m *mockSyncProducer) AbortTxn() error  { return nil }
-func (m *mockSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
-	return nil
-}
+func (m *mockSyncProducer) Close() error { return nil }
 
-func (m *mockSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
-	return nil
-}
-
-func decodeSubtreeWork(t *testing.T, pm *sarama.ProducerMessage) *kafka.SubtreeWorkMessage {
+func decodeSubtreeWork(t *testing.T, pm capturedMessage) *kafka.SubtreeWorkMessage {
 	t.Helper()
-	val, err := pm.Value.Encode()
-	if err != nil {
-		t.Fatalf("failed to encode producer message value: %v", err)
-	}
 	var msg kafka.SubtreeWorkMessage
-	if err := json.Unmarshal(val, &msg); err != nil {
+	if err := json.Unmarshal(pm.Value, &msg); err != nil {
 		t.Fatalf("failed to decode subtree work message: %v", err)
 	}
 	return &msg

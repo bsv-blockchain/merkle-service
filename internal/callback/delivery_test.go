@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
-
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
@@ -24,17 +22,24 @@ import (
 
 const testBlockHash = "blockhash"
 
-// mockSyncProducer implements sarama.SyncProducer for testing.
+// capturedMessage records a single (key, value) pair published through the
+// mock producer, replacing the old sarama.ProducerMessage capture.
+type capturedMessage struct {
+	Key   string
+	Value []byte
+}
+
+// mockSyncProducer implements kafka.Publisher for testing.
 type mockSyncProducer struct {
 	mu       sync.Mutex
-	messages []*sarama.ProducerMessage
-	// failNext, when > 0, makes the next N SendMessage calls fail with sendErr.
+	messages []capturedMessage
+	// failNext, when > 0, makes the next N Produce calls fail with sendErr.
 	// Test-only knob for asserting the durability contract on publish failure.
 	failNext int
 	sendErr  error
 }
 
-func (m *mockSyncProducer) SendMessage(msg *sarama.ProducerMessage) (partition int32, offset int64, err error) {
+func (m *mockSyncProducer) Produce(key string, value []byte) (partition int32, offset int64, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failNext > 0 {
@@ -45,40 +50,16 @@ func (m *mockSyncProducer) SendMessage(msg *sarama.ProducerMessage) (partition i
 		}
 		return 0, 0, err
 	}
-	m.messages = append(m.messages, msg)
+	m.messages = append(m.messages, capturedMessage{Key: key, Value: value})
 	return 0, int64(len(m.messages)), nil
-}
-
-func (m *mockSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.messages = append(m.messages, msgs...)
-	return nil
 }
 
 func (m *mockSyncProducer) Close() error { return nil }
 
-func (m *mockSyncProducer) IsTransactional() bool { return false }
-
-func (m *mockSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
-	return sarama.ProducerTxnFlagReady
-}
-
-func (m *mockSyncProducer) BeginTxn() error  { return nil }
-func (m *mockSyncProducer) CommitTxn() error { return nil }
-func (m *mockSyncProducer) AbortTxn() error  { return nil }
-func (m *mockSyncProducer) AddOffsetsToTxn(offsets map[string][]*sarama.PartitionOffsetMetadata, groupId string) error {
-	return nil
-}
-
-func (m *mockSyncProducer) AddMessageToTxn(msg *sarama.ConsumerMessage, groupId string, metadata *string) error {
-	return nil
-}
-
-func (m *mockSyncProducer) getMessages() []*sarama.ProducerMessage {
+func (m *mockSyncProducer) getMessages() []capturedMessage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]*sarama.ProducerMessage, len(m.messages))
+	result := make([]capturedMessage, len(m.messages))
 	copy(result, m.messages)
 	return result
 }
@@ -92,14 +73,10 @@ type mockSendError string
 
 func (e mockSendError) Error() string { return string(e) }
 
-// decodePublishedCallbackMessage extracts the CallbackTopicMessage from a captured ProducerMessage.
-func decodePublishedCallbackMessage(t *testing.T, pm *sarama.ProducerMessage) *kafka.CallbackTopicMessage {
+// decodePublishedCallbackMessage extracts the CallbackTopicMessage from a captured message.
+func decodePublishedCallbackMessage(t *testing.T, pm capturedMessage) *kafka.CallbackTopicMessage {
 	t.Helper()
-	valueBytes, err := pm.Value.Encode()
-	if err != nil {
-		t.Fatalf("failed to encode producer message value: %v", err)
-	}
-	msg, err := kafka.DecodeCallbackTopicMessage(valueBytes)
+	msg, err := kafka.DecodeCallbackTopicMessage(pm.Value)
 	if err != nil {
 		t.Fatalf("failed to decode callback message from producer: %v", err)
 	}

@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
-
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
@@ -25,7 +23,7 @@ import (
 // because that PR is still open and we don't want either side to break the other
 // when the two land on main.
 
-// callbackFailingProducer is a sarama.SyncProducer that records every call and
+// callbackFailingProducer is a kafka.Publisher that records every call and
 // can be configured to fail every send. Used to drive the publishSubtreeCallbacks
 // → handleTransientFailure path.
 //
@@ -35,53 +33,28 @@ import (
 // without affecting unrelated callback messages on the same producer.
 type callbackFailingProducer struct {
 	mu         sync.Mutex
-	messages   []*sarama.ProducerMessage
+	messages   []capturedMessage
 	failAll    bool
 	failOnType kafka.CallbackType
 	failErr    error
 }
 
-func (f *callbackFailingProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
+func (f *callbackFailingProducer) Produce(key string, value []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failAll {
 		return 0, 0, f.failErr
 	}
 	if f.failOnType != "" {
-		if b, ok := msg.Value.(sarama.ByteEncoder); ok {
-			if decoded, err := kafka.DecodeCallbackTopicMessage([]byte(b)); err == nil && decoded.Type == f.failOnType {
-				return 0, 0, f.failErr
-			}
+		if decoded, err := kafka.DecodeCallbackTopicMessage(value); err == nil && decoded.Type == f.failOnType {
+			return 0, 0, f.failErr
 		}
 	}
-	f.messages = append(f.messages, msg)
+	f.messages = append(f.messages, capturedMessage{Key: key, Value: value})
 	return 0, int64(len(f.messages)), nil
 }
 
-func (f *callbackFailingProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
-	for _, m := range msgs {
-		if _, _, err := f.SendMessage(m); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (f *callbackFailingProducer) Close() error          { return nil }
-func (f *callbackFailingProducer) IsTransactional() bool { return false }
-func (f *callbackFailingProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
-	return sarama.ProducerTxnFlagReady
-}
-func (f *callbackFailingProducer) BeginTxn() error  { return nil }
-func (f *callbackFailingProducer) CommitTxn() error { return nil }
-func (f *callbackFailingProducer) AbortTxn() error  { return nil }
-func (f *callbackFailingProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
-	return nil
-}
-
-func (f *callbackFailingProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
-	return nil
-}
+func (f *callbackFailingProducer) Close() error { return nil }
 
 func (f *callbackFailingProducer) sentCount() int {
 	f.mu.Lock()
@@ -96,11 +69,7 @@ func (f *callbackFailingProducer) sentCountOfType(t kafka.CallbackType) int {
 	defer f.mu.Unlock()
 	n := 0
 	for _, msg := range f.messages {
-		b, ok := msg.Value.(sarama.ByteEncoder)
-		if !ok {
-			continue
-		}
-		decoded, err := kafka.DecodeCallbackTopicMessage([]byte(b))
+		decoded, err := kafka.DecodeCallbackTopicMessage(msg.Value)
 		if err != nil {
 			continue
 		}
@@ -235,9 +204,9 @@ func rawSubtreeServer(payload []byte) *httptest.Server {
 // counter, and the supplied (callback, retry, dlq) sync producers.
 func newWorkerForHandleMessage(
 	t *testing.T,
-	cb sarama.SyncProducer,
-	retry sarama.SyncProducer,
-	dlq sarama.SyncProducer,
+	cb kafka.Publisher,
+	retry kafka.Publisher,
+	dlq kafka.Publisher,
 	stumpStore store.StumpStore,
 	counter *countingSubtreeCounter,
 	maxAttempts int,
@@ -399,7 +368,7 @@ func TestHandleMessage_CallbackPublishFailure_RetriesAndDoesNotDecrement(t *test
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
 	value := makeWorkMessageBytes(t, blockHash, subtreeHash, server.URL, 0)
-	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
+	err := svc.handleMessage(context.Background(), &kafka.Message{Value: value})
 	if err != nil {
 		t.Fatalf("handleMessage: expected nil error (retry path returns nil after re-publishing), got: %v", err)
 	}
@@ -447,7 +416,7 @@ func TestHandleMessage_CallbackPublishFailure_AtMaxAttempts_DLQAndDecrement(t *t
 
 	// AttemptCount = maxAttempts - 1 → next attempt is terminal → DLQ.
 	value := makeWorkMessageBytes(t, "block-dlq", "subtree-dlq", server.URL, maxAttempts-1)
-	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
+	err := svc.handleMessage(context.Background(), &kafka.Message{Value: value})
 	if err != nil {
 		t.Fatalf("handleMessage at max attempts: expected nil error after DLQ publish, got: %v", err)
 	}
@@ -486,7 +455,7 @@ func TestHandleMessage_HappyPath_DecrementsExactlyOnce(t *testing.T) {
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
 	value := makeWorkMessageBytes(t, "block-happy", "subtree-happy", server.URL, 0)
-	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage happy path: expected nil error, got: %v", err)
 	}
 
@@ -528,7 +497,7 @@ func TestHandleMessage_CounterNotFound_AcksWithoutRetry(t *testing.T) {
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
 	value := makeWorkMessageBytes(t, "block-gone", "subtree-gone", server.URL, 0)
-	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage with missing counter: expected nil error (ack), got: %v", err)
 	}
 
@@ -558,7 +527,7 @@ func TestHandleMessage_StumpStoreFailure_RetriesAndDoesNotDecrement(t *testing.T
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
 	value := makeWorkMessageBytes(t, "block-blob-fail", "subtree-blob-fail", server.URL, 0)
-	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage stump-store failure: expected nil error (retry path), got: %v", err)
 	}
 
@@ -601,7 +570,7 @@ func TestHandleMessage_DecrementFailureOnSuccessPath_RetriesAndPreservesCount(t 
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
 	value := makeWorkMessageBytes(t, blockHash, "subtree-dec-fail", server.URL, 0)
-	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
+	err := svc.handleMessage(context.Background(), &kafka.Message{Value: value})
 	if err != nil {
 		// Below max attempts, handleTransientFailure re-publishes for retry
 		// and returns nil — but the work item was redirected through the
@@ -660,7 +629,7 @@ func TestHandleMessage_DecrementFailureOnDLQPath_ReturnsError(t *testing.T) {
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, maxAttempts)
 
 	value := makeWorkMessageBytes(t, blockHash, "subtree-dlq-dec-fail", server.URL, maxAttempts-1)
-	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
+	err := svc.handleMessage(context.Background(), &kafka.Message{Value: value})
 	if err == nil {
 		t.Fatalf("expected non-nil error when Decrement fails on DLQ path so consumer redelivers, got nil")
 	}
@@ -711,7 +680,7 @@ func TestHandleMessage_HappyPath_DecrementToZeroEmitsBlockProcessed(t *testing.T
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
 	value := makeWorkMessageBytes(t, blockHash, "subtree-zero-emit", server.URL, 0)
-	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage happy path: expected nil error, got: %v", err)
 	}
 
@@ -882,7 +851,7 @@ func TestHandleMessage_BlockProcessedEmitFailure_RetriesAndDoesNotAck(t *testing
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
 	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-fail", server.URL, 0)
-	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		// Below max attempts, handleTransientFailure re-publishes for retry
 		// and returns nil — the work item was redirected through the retry
 		// path rather than silently acked at the success branch.
@@ -940,7 +909,7 @@ func TestHandleMessage_BlockProcessedEmitRetry_ReEmitsOnRedelivery(t *testing.T)
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
 	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-retry", server.URL, 1)
-	if err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage on redelivery: expected nil, got: %v", err)
 	}
 
@@ -997,7 +966,7 @@ func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsErr
 
 	// AttemptCount = maxAttempts - 1 → next attempt is terminal → DLQ.
 	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-dlq", server.URL, maxAttempts-1)
-	err := svc.handleMessage(context.Background(), &sarama.ConsumerMessage{Value: value})
+	err := svc.handleMessage(context.Background(), &kafka.Message{Value: value})
 	if err == nil {
 		t.Fatalf("expected non-nil error so consumer redelivers when emit fails on DLQ path, got nil")
 	}

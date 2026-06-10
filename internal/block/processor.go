@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/IBM/sarama"
-
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
@@ -177,7 +175,7 @@ func (p *Processor) Health() service.HealthStatus {
 // encode or publish failure returns a non-nil error so the consumer does not
 // mark the offset, which surfaces the failure for retry on the next session
 // and prevents silent data loss (F-011).
-func (p *Processor) handleMessage(ctx context.Context, msg *sarama.ConsumerMessage) error {
+func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error {
 	blockMsg, err := kafka.DecodeBlockMessage(msg.Value)
 	if err != nil {
 		p.Logger.Error("failed to decode block message", "error", err)

@@ -9,57 +9,41 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
 	teranode "github.com/bsv-blockchain/teranode/services/p2p"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 )
 
-// mockSyncProducer implements sarama.SyncProducer for testing.
-type mockSyncProducer struct {
-	mu       sync.Mutex
-	messages []*sarama.ProducerMessage
-	failErr  error // if set, SendMessage returns this error
+// capturedMessage records a published key/value for assertion in tests.
+type capturedMessage struct {
+	Key   string
+	Value []byte
 }
 
-func (m *mockSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
+// mockSyncProducer implements kafka.Publisher for testing.
+type mockSyncProducer struct {
+	mu       sync.Mutex
+	messages []capturedMessage
+	failErr  error // if set, Produce returns this error
+}
+
+func (m *mockSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failErr != nil {
 		return 0, 0, m.failErr
 	}
-	m.messages = append(m.messages, msg)
+	m.messages = append(m.messages, capturedMessage{Key: key, Value: value})
 	return 0, int64(len(m.messages)), nil
 }
 
-func (m *mockSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
+func (m *mockSyncProducer) Close() error { return nil }
+
+func (m *mockSyncProducer) getMessages() []capturedMessage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.messages = append(m.messages, msgs...)
-	return nil
-}
-
-func (m *mockSyncProducer) Close() error          { return nil }
-func (m *mockSyncProducer) IsTransactional() bool { return false }
-func (m *mockSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
-	return sarama.ProducerTxnFlagReady
-}
-func (m *mockSyncProducer) BeginTxn() error  { return nil }
-func (m *mockSyncProducer) CommitTxn() error { return nil }
-func (m *mockSyncProducer) AbortTxn() error  { return nil }
-func (m *mockSyncProducer) AddOffsetsToTxn(_ map[string][]*sarama.PartitionOffsetMetadata, _ string) error {
-	return nil
-}
-
-func (m *mockSyncProducer) AddMessageToTxn(_ *sarama.ConsumerMessage, _ string, _ *string) error {
-	return nil
-}
-
-func (m *mockSyncProducer) getMessages() []*sarama.ProducerMessage {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	result := make([]*sarama.ProducerMessage, len(m.messages))
+	result := make([]capturedMessage, len(m.messages))
 	copy(result, m.messages)
 	return result
 }
@@ -112,19 +96,13 @@ func TestHandleSubtreeMessage_ValidMessage(t *testing.T) {
 	}
 
 	// Verify the key is the subtree hash.
-	keyBytes, err := published[0].Key.Encode()
-	if err != nil {
-		t.Fatalf("failed to encode key: %v", err)
-	}
+	keyBytes := []byte(published[0].Key)
 	if string(keyBytes) != "subtree-abc" {
 		t.Errorf("expected key 'subtree-abc', got %q", string(keyBytes))
 	}
 
 	// Verify the value deserializes back correctly.
-	valueBytes, err := published[0].Value.Encode()
-	if err != nil {
-		t.Fatalf("failed to encode value: %v", err)
-	}
+	valueBytes := published[0].Value
 	decoded, err := kafka.DecodeSubtreeMessage(valueBytes)
 	if err != nil {
 		t.Fatalf("failed to decode published subtree message: %v", err)
@@ -184,19 +162,13 @@ func TestHandleBlockMessage_ValidMessage(t *testing.T) {
 	}
 
 	// Verify the key is the block hash.
-	keyBytes, err := published[0].Key.Encode()
-	if err != nil {
-		t.Fatalf("failed to encode key: %v", err)
-	}
+	keyBytes := []byte(published[0].Key)
 	if string(keyBytes) != "00000000abc123" {
 		t.Errorf("expected key '00000000abc123', got %q", string(keyBytes))
 	}
 
 	// Verify the value deserializes back correctly.
-	valueBytes, err := published[0].Value.Encode()
-	if err != nil {
-		t.Fatalf("failed to encode value: %v", err)
-	}
+	valueBytes := published[0].Value
 	decoded, err := kafka.DecodeBlockMessage(valueBytes)
 	if err != nil {
 		t.Fatalf("failed to decode published block message: %v", err)
@@ -399,10 +371,7 @@ func TestHandleSubtreeMessage_MultipleMessages(t *testing.T) {
 
 	// Verify keys match expected hashes.
 	for i, pm := range published {
-		keyBytes, err := pm.Key.Encode()
-		if err != nil {
-			t.Fatalf("failed to encode key %d: %v", i, err)
-		}
+		keyBytes := []byte(pm.Key)
 		if string(keyBytes) != hashes[i] {
 			t.Errorf("message %d: expected key %q, got %q", i, hashes[i], string(keyBytes))
 		}
@@ -580,14 +549,14 @@ func TestPublishWithRetry_ContextCancelledDuringBackoffIsNotFatal(t *testing.T) 
 	}
 }
 
-// flakyProducer fails the first failuresRemaining SendMessage calls, then succeeds.
+// flakyProducer fails the first failuresRemaining Produce calls, then succeeds.
 type flakyProducer struct {
 	mu                sync.Mutex
 	failuresRemaining int
 	attempts          int
 }
 
-func (f *flakyProducer) SendMessage(_ *sarama.ProducerMessage) (int32, int64, error) {
+func (f *flakyProducer) Produce(_ string, _ []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempts++
@@ -598,19 +567,4 @@ func (f *flakyProducer) SendMessage(_ *sarama.ProducerMessage) (int32, int64, er
 	return 0, int64(f.attempts), nil
 }
 
-func (f *flakyProducer) SendMessages(_ []*sarama.ProducerMessage) error { return nil }
-func (f *flakyProducer) Close() error                                   { return nil }
-func (f *flakyProducer) IsTransactional() bool                          { return false }
-func (f *flakyProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
-	return sarama.ProducerTxnFlagReady
-}
-func (f *flakyProducer) BeginTxn() error  { return nil }
-func (f *flakyProducer) CommitTxn() error { return nil }
-func (f *flakyProducer) AbortTxn() error  { return nil }
-func (f *flakyProducer) AddOffsetsToTxn(_ map[string][]*sarama.PartitionOffsetMetadata, _ string) error {
-	return nil
-}
-
-func (f *flakyProducer) AddMessageToTxn(_ *sarama.ConsumerMessage, _ string, _ *string) error {
-	return nil
-}
+func (f *flakyProducer) Close() error { return nil }

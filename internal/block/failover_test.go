@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
-
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
@@ -37,7 +35,7 @@ func (s *stubDataHubRegistry) GetAll() ([]string, error) {
 
 // buildProcessorWithRegistry mirrors buildProcessorWithProducer but
 // also wires up a DataHubRegistry so the failover path has candidates.
-func buildProcessorWithRegistry(t *testing.T, sp sarama.SyncProducer, reg store.DataHubRegistry) *Processor {
+func buildProcessorWithRegistry(t *testing.T, sp kafka.Publisher, reg store.DataHubRegistry) *Processor {
 	t.Helper()
 	logger := testLogger()
 	dedup := cache.NewDedupCache(64)
@@ -78,7 +76,7 @@ func TestHandleMessage_FailoverToRegistryPeer(t *testing.T) {
 	p := buildProcessorWithRegistry(t, mockProducer, reg)
 
 	const blockHash = "block-failover"
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newBlockMessageBytes(t, blockHash, bad.URL),
 	}
 
@@ -94,11 +92,7 @@ func TestHandleMessage_FailoverToRegistryPeer(t *testing.T) {
 	// not the announced bad one — otherwise subtree workers would
 	// inherit the dead peer.
 	for i, m := range mockProducer.messages {
-		body, ok := m.Value.(sarama.ByteEncoder)
-		if !ok {
-			t.Fatalf("message %d: unexpected sarama.Encoder type %T", i, m.Value)
-		}
-		decoded, err := kafka.DecodeSubtreeWorkMessage([]byte(body))
+		decoded, err := kafka.DecodeSubtreeWorkMessage(m.Value)
 		if err != nil {
 			t.Fatalf("decode subtree-work message %d: %v", i, err)
 		}
@@ -152,7 +146,7 @@ func TestHandleMessage_FailoverSkipsUnhealthyCandidates(t *testing.T) {
 	ph.RecordFailure(unhealthyButCapable.URL)
 
 	const blockHash = "block-skip-unhealthy"
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newBlockMessageBytes(t, blockHash, bad.URL),
 	}
 
@@ -182,7 +176,7 @@ func TestHandleMessage_FailoverAllPeersFailReturnsError(t *testing.T) {
 	p := buildProcessorWithRegistry(t, mockProducer, reg)
 
 	const blockHash = "block-all-fail"
-	msg := &sarama.ConsumerMessage{
+	msg := &kafka.Message{
 		Value: newBlockMessageBytes(t, blockHash, notFound.URL),
 	}
 

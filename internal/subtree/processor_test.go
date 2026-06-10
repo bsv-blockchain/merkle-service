@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -949,53 +948,37 @@ func TestDedupCache_IntegrationWithProcessor(t *testing.T) {
 
 // --- Batched Callback Emission Tests ---
 
-type mockSyncProducer struct {
-	mu       sync.Mutex
-	messages []*sarama.ProducerMessage
+// capturedMessage records a single Produce call's key and value.
+type capturedMessage struct {
+	Key   string
+	Value []byte
 }
 
-func (m *mockSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
+type mockSyncProducer struct {
+	mu       sync.Mutex
+	messages []capturedMessage
+}
+
+func (m *mockSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.messages = append(m.messages, msg)
+	m.messages = append(m.messages, capturedMessage{Key: key, Value: value})
 	return 0, int64(len(m.messages)), nil
 }
 
-func (m *mockSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
+func (m *mockSyncProducer) Close() error { return nil }
+
+func (m *mockSyncProducer) getMessages() []capturedMessage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.messages = append(m.messages, msgs...)
-	return nil
-}
-func (m *mockSyncProducer) Close() error                            { return nil }
-func (m *mockSyncProducer) IsTransactional() bool                   { return false }
-func (m *mockSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag { return 0 }
-func (m *mockSyncProducer) BeginTxn() error                         { return nil }
-func (m *mockSyncProducer) CommitTxn() error                        { return nil }
-func (m *mockSyncProducer) AbortTxn() error                         { return nil }
-func (m *mockSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
-	return nil
-}
-
-func (m *mockSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
-	return nil
-}
-
-func (m *mockSyncProducer) getMessages() []*sarama.ProducerMessage {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	result := make([]*sarama.ProducerMessage, len(m.messages))
+	result := make([]capturedMessage, len(m.messages))
 	copy(result, m.messages)
 	return result
 }
 
-func decodeCallbackMsg(t *testing.T, pm *sarama.ProducerMessage) *kafka.CallbackTopicMessage {
+func decodeCallbackMsg(t *testing.T, pm capturedMessage) *kafka.CallbackTopicMessage {
 	t.Helper()
-	b, err := pm.Value.Encode()
-	if err != nil {
-		t.Fatalf("encode value: %v", err)
-	}
-	msg, err := kafka.DecodeCallbackTopicMessage(b)
+	msg, err := kafka.DecodeCallbackTopicMessage(pm.Value)
 	if err != nil {
 		t.Fatalf("decode callback msg: %v", err)
 	}
@@ -1298,10 +1281,7 @@ func TestHandleTransientFailure_RoutesToDLQAtMaxAttempts(t *testing.T) {
 		t.Fatalf("expected %d retry publishes, got %d", maxAttempts-1, len(retryMsgs))
 	}
 	for i, pm := range retryMsgs {
-		b, err := pm.Value.Encode()
-		if err != nil {
-			t.Fatalf("retry msg %d: encode: %v", i, err)
-		}
+		b := pm.Value
 		decoded, err := kafka.DecodeSubtreeMessage(b)
 		if err != nil {
 			t.Fatalf("retry msg %d: decode: %v", i, err)
@@ -1315,10 +1295,7 @@ func TestHandleTransientFailure_RoutesToDLQAtMaxAttempts(t *testing.T) {
 	if len(dlqMsgs) != 1 {
 		t.Fatalf("expected exactly 1 DLQ publish, got %d", len(dlqMsgs))
 	}
-	b, err := dlqMsgs[0].Value.Encode()
-	if err != nil {
-		t.Fatalf("dlq msg: encode: %v", err)
-	}
+	b := dlqMsgs[0].Value
 	dlqDecoded, err := kafka.DecodeSubtreeMessage(b)
 	if err != nil {
 		t.Fatalf("dlq msg: decode: %v", err)
@@ -1374,50 +1351,27 @@ func TestHandleTransientFailure_DefaultsMaxAttemptsWhenUnset(t *testing.T) {
 // tests. They mirror the "callbackFailingProducer" pattern from PR #77's
 // subtree_worker tests but live in this package.
 
-// callbackFailingSyncProducer is a sarama.SyncProducer that records every call
+// callbackFailingSyncProducer is a kafka.Publisher that records every call
 // and can be configured to fail every send. Used to drive the
 // emitBatchedSeenCallbacks → handleTransientFailure path for F-057.
 type callbackFailingSyncProducer struct {
 	mu       sync.Mutex
-	messages []*sarama.ProducerMessage
+	messages []capturedMessage
 	failAll  bool
 	failErr  error
 }
 
-func (f *callbackFailingSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
+func (f *callbackFailingSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failAll {
 		return 0, 0, f.failErr
 	}
-	f.messages = append(f.messages, msg)
+	f.messages = append(f.messages, capturedMessage{Key: key, Value: value})
 	return 0, int64(len(f.messages)), nil
 }
 
-func (f *callbackFailingSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
-	for _, m := range msgs {
-		if _, _, err := f.SendMessage(m); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (f *callbackFailingSyncProducer) Close() error          { return nil }
-func (f *callbackFailingSyncProducer) IsTransactional() bool { return false }
-func (f *callbackFailingSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
-	return sarama.ProducerTxnFlagReady
-}
-func (f *callbackFailingSyncProducer) BeginTxn() error  { return nil }
-func (f *callbackFailingSyncProducer) CommitTxn() error { return nil }
-func (f *callbackFailingSyncProducer) AbortTxn() error  { return nil }
-func (f *callbackFailingSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
-	return nil
-}
-
-func (f *callbackFailingSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
-	return nil
-}
+func (f *callbackFailingSyncProducer) Close() error { return nil }
 
 func (f *callbackFailingSyncProducer) sentCount() int {
 	f.mu.Lock()
@@ -1432,59 +1386,33 @@ func (f *callbackFailingSyncProducer) sentCount() int {
 // the SHA256 hashing that PublishWithHashKey applies.
 type urlFailingSyncProducer struct {
 	mu        sync.Mutex
-	messages  []*sarama.ProducerMessage
+	messages  []capturedMessage
 	failURL   string
 	failErr   error
 	failCount int
 }
 
-func (f *urlFailingSyncProducer) SendMessage(msg *sarama.ProducerMessage) (int32, int64, error) {
+func (f *urlFailingSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if msg.Value != nil {
-		raw, err := msg.Value.Encode()
-		if err == nil {
-			if decoded, decErr := kafka.DecodeCallbackTopicMessage(raw); decErr == nil {
-				if decoded.CallbackURL == f.failURL {
-					f.failCount++
-					return 0, 0, f.failErr
-				}
+	if value != nil {
+		if decoded, decErr := kafka.DecodeCallbackTopicMessage(value); decErr == nil {
+			if decoded.CallbackURL == f.failURL {
+				f.failCount++
+				return 0, 0, f.failErr
 			}
 		}
 	}
-	f.messages = append(f.messages, msg)
+	f.messages = append(f.messages, capturedMessage{Key: key, Value: value})
 	return 0, int64(len(f.messages)), nil
 }
 
-func (f *urlFailingSyncProducer) SendMessages(msgs []*sarama.ProducerMessage) error {
-	for _, m := range msgs {
-		if _, _, err := f.SendMessage(m); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+func (f *urlFailingSyncProducer) Close() error { return nil }
 
-func (f *urlFailingSyncProducer) Close() error          { return nil }
-func (f *urlFailingSyncProducer) IsTransactional() bool { return false }
-func (f *urlFailingSyncProducer) TxnStatus() sarama.ProducerTxnStatusFlag {
-	return sarama.ProducerTxnFlagReady
-}
-func (f *urlFailingSyncProducer) BeginTxn() error  { return nil }
-func (f *urlFailingSyncProducer) CommitTxn() error { return nil }
-func (f *urlFailingSyncProducer) AbortTxn() error  { return nil }
-func (f *urlFailingSyncProducer) AddOffsetsToTxn(map[string][]*sarama.PartitionOffsetMetadata, string) error {
-	return nil
-}
-
-func (f *urlFailingSyncProducer) AddMessageToTxn(*sarama.ConsumerMessage, string, *string) error {
-	return nil
-}
-
-func (f *urlFailingSyncProducer) getMessages() []*sarama.ProducerMessage {
+func (f *urlFailingSyncProducer) getMessages() []capturedMessage {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	result := make([]*sarama.ProducerMessage, len(f.messages))
+	result := make([]capturedMessage, len(f.messages))
 	copy(result, f.messages)
 	return result
 }
@@ -1635,7 +1563,7 @@ func TestHandleMessage_CallbackPublishFailure_RoutesToRetry(t *testing.T) {
 
 	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
 	beforeRetried := subtreeCount(metrics.OutcomeRetried)
-	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := p.handleMessage(t.Context(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil error (retry path returns nil after re-publishing), got: %v", err)
 	}
 
@@ -1768,7 +1696,7 @@ func TestHandleMessage_CachedLookupFailure_RoutesToRetryAndSkipsDedup(t *testing
 
 	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
 	beforeRetried := subtreeCount(metrics.OutcomeRetried)
-	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := p.handleMessage(t.Context(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil error (retry path returns nil after re-publishing), got: %v", err)
 	}
 
@@ -1927,7 +1855,7 @@ func TestHandleMessage_SeenCounterIncrementFailure_RoutesToRetryAndSkipsDedup(t 
 
 	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
 	beforeRetried := subtreeCount(metrics.OutcomeRetried)
-	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := p.handleMessage(t.Context(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil error (retry path returns nil after re-publishing), got: %v", err)
 	}
 
@@ -2012,7 +1940,7 @@ func TestHandleMessage_SeenCounterSuccess_UpdatesDedup(t *testing.T) {
 
 	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
 	beforeRetried := subtreeCount(metrics.OutcomeRetried)
-	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := p.handleMessage(t.Context(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil error on success path, got: %v", err)
 	}
 
@@ -2090,7 +2018,7 @@ func TestHandleMessage_SkipsUnhealthyPeer(t *testing.T) {
 
 	beforeSkipped := subtreeCount(metrics.OutcomeSkippedUnhealthy)
 	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
-	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := p.handleMessage(t.Context(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil (ack-and-drop on unhealthy), got: %v", err)
 	}
 
@@ -2155,7 +2083,7 @@ func TestHandleMessage_NotFoundGoesStraightToDLQ(t *testing.T) {
 
 	beforePermanent := subtreeCount(metrics.OutcomePermanentFailure)
 	beforeRetried := subtreeCount(metrics.OutcomeRetried)
-	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := p.handleMessage(t.Context(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil (permanent → DLQ returns nil), got: %v", err)
 	}
 
@@ -2166,10 +2094,7 @@ func TestHandleMessage_NotFoundGoesStraightToDLQ(t *testing.T) {
 	if got := len(dlqMsgs); got != 1 {
 		t.Fatalf("expected exactly 1 DLQ publish, got %d", got)
 	}
-	dlqValue, err := dlqMsgs[0].Value.Encode()
-	if err != nil {
-		t.Fatalf("encode DLQ message value: %v", err)
-	}
+	dlqValue := dlqMsgs[0].Value
 	decoded, err := kafka.DecodeSubtreeMessage(dlqValue)
 	if err != nil {
 		t.Fatalf("decode DLQ subtree message: %v", err)
@@ -2229,7 +2154,7 @@ func TestHandleMessage_TransientErrorStillRetries(t *testing.T) {
 
 	beforeRetried := subtreeCount(metrics.OutcomeRetried)
 	beforeDLQ := subtreeCount(metrics.OutcomeDLQ)
-	if err := p.handleMessage(t.Context(), &sarama.ConsumerMessage{Value: value}); err != nil {
+	if err := p.handleMessage(t.Context(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage: expected nil (transient → retry returns nil), got: %v", err)
 	}
 
@@ -2240,10 +2165,7 @@ func TestHandleMessage_TransientErrorStillRetries(t *testing.T) {
 	if got := len(dlqMock.getMessages()); got != 0 {
 		t.Errorf("expected 0 DLQ publishes on first transient failure, got %d", got)
 	}
-	retryValue, err := retryMsgs[0].Value.Encode()
-	if err != nil {
-		t.Fatalf("encode retry message value: %v", err)
-	}
+	retryValue := retryMsgs[0].Value
 	decoded, err := kafka.DecodeSubtreeMessage(retryValue)
 	if err != nil {
 		t.Fatalf("decode retry subtree message: %v", err)

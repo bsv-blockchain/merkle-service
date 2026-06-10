@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 )
@@ -20,62 +20,79 @@ import (
 var exitFunc = func(code int) { os.Exit(code) }
 
 // MessageHandler is called for each consumed message.
-type MessageHandler func(ctx context.Context, msg *sarama.ConsumerMessage) error
+type MessageHandler func(ctx context.Context, msg *Message) error
 
-// newConsumerConfig returns the sarama configuration used by every consumer
-// group created by this package. It is extracted so unit tests can verify the
-// invariants we care about (notably the F-031 initial-offset policy) without
-// having to stand up a real Kafka broker.
-func newConsumerConfig() *sarama.Config {
-	config := sarama.NewConfig()
-	config.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategyRoundRobin()}
-	// F-031: start new consumer groups at the OLDEST available offset so a
-	// group with no committed offsets (renamed group, lost offsets, fresh
-	// environment) still processes the durable backlog instead of silently
-	// jumping to the topic head and dropping queued work.
-	config.Consumer.Offsets.Initial = sarama.OffsetOldest
-	// F-053: surface sarama-level errors (broker disconnects, heartbeat
-	// failures, generation expiration) on group.Errors(). The default of
-	// false silently drops these and is the root cause of zombie consumers
-	// where the pod stays Running but the broker reports the group as
-	// Empty. Start() drains the channel and logs every error.
-	config.Consumer.Return.Errors = true
-	return config
+// consumerOpts returns the franz-go client options used by every consumer group
+// created by this package. Extracted so unit tests can verify the invariants we
+// care about (notably the F-031 initial-offset policy and the explicit
+// consumer timeouts) without standing up a real Kafka broker.
+//
+// Unlike sarama.NewConfig(), franz applies no implicit consumer timeouts on
+// direct construction (teranode #633), so SessionTimeout / HeartbeatInterval /
+// RebalanceTimeout / FetchMaxWait are all set explicitly here. Constraint:
+// SessionTimeout must be >= 3x HeartbeatInterval.
+func consumerOpts(brokers []string, groupID string, topics []string) []kgo.Opt {
+	return []kgo.Opt{
+		kgo.SeedBrokers(brokers...),
+		kgo.ConsumerGroup(groupID),
+		kgo.ConsumeTopics(topics...),
+		// Preserve the prior round-robin assignment strategy. (A running group
+		// cannot mix balancers, so this matches existing deployments.)
+		kgo.Balancers(kgo.RoundRobinBalancer()),
+		// F-031: start new consumer groups at the OLDEST available offset so a
+		// group with no committed offsets (renamed group, lost offsets, fresh
+		// environment) still processes the durable backlog instead of silently
+		// jumping to the topic head and dropping queued work.
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		// F-030: commit only on handler success. Disable franz auto-commit and
+		// commit each successfully-handled record explicitly (see commit).
+		kgo.DisableAutoCommit(),
+		// Explicit timeout defaults sarama provided for free (teranode #633).
+		kgo.SessionTimeout(10 * time.Second),
+		kgo.HeartbeatInterval(3 * time.Second),
+		kgo.RebalanceTimeout(60 * time.Second),
+		kgo.FetchMaxWait(100 * time.Millisecond),
+	}
 }
 
-// Consumer wraps a Sarama consumer group.
+// Consumer wraps a franz-go consumer-group client.
 type Consumer struct {
-	group   sarama.ConsumerGroup
+	client  *kgo.Client
 	groupID string
 	topics  []string
 	handler MessageHandler
 	logger  *slog.Logger
-	ready   chan struct{}
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+
+	readyOnce sync.Once
+	ready     chan struct{}
+
+	cancelMu sync.Mutex // teranode #638: guard the cancel func against races
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+
+	closeMu sync.Mutex // teranode #720: guard against double Close
+	closed  bool
 }
 
 // NewConsumer creates a new Kafka consumer group wrapper.
 //
 // Initial offset policy (F-031): a consumer group with no committed offsets
-// starts at sarama.OffsetOldest so it processes every message already queued
-// on the topic. The previous default of sarama.OffsetNewest silently skipped
-// work whenever a group was renamed, its committed offsets were lost, or the
-// service was deployed into a fresh environment with topics that already had
-// durable backlogs (subtree, subtree-worker, block, callback). For the work
-// topics this service consumes, replaying from the earliest available offset
-// is always correct: the handlers are idempotent and the backlog must be
-// processed, never dropped.
+// starts at the OLDEST offset so it processes every message already queued on
+// the topic. Starting at the newest offset silently skipped work whenever a
+// group was renamed, its committed offsets were lost, or the service was
+// deployed into a fresh environment with topics that already had durable
+// backlogs (subtree, subtree-worker, block, callback). For the work topics
+// this service consumes, replaying from the earliest available offset is always
+// correct: the handlers are idempotent and the backlog must be processed, never
+// dropped.
 func NewConsumer(brokers []string, groupID string, topics []string, handler MessageHandler, logger *slog.Logger) (*Consumer, error) {
-	config := newConsumerConfig()
-
-	group, err := sarama.NewConsumerGroup(brokers, groupID, config)
+	client, err := kgo.NewClient(consumerOpts(brokers, groupID, topics)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create consumer group %s: %w", groupID, err)
 	}
 
 	return &Consumer{
-		group:   group,
+		client:  client,
 		groupID: groupID,
 		topics:  topics,
 		handler: handler,
@@ -84,65 +101,39 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 	}, nil
 }
 
-// Start begins consuming messages. Blocks until context is canceled.
-func (c *Consumer) Start(ctx context.Context) error {
-	ctx, c.cancel = context.WithCancel(ctx)
-
-	// Drain group.Errors(). With Consumer.Return.Errors=true (set in
-	// newConsumerConfig), every sarama-level error is surfaced here. Without
-	// a reader, the channel buffer fills and sarama back-pressures or drops;
-	// either way the operator gets no signal that the session is unhealthy.
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case err, ok := <-c.group.Errors():
-				if !ok {
-					return
-				}
-				var consumerErr *sarama.ConsumerError
-				topic := ""
-				if errors.As(err, &consumerErr) {
-					topic = consumerErr.Topic
-				}
-				metrics.IncKafkaConsumerError(topic, metrics.KafkaErrorBroker)
-				c.logger.Error("sarama consumer group error", "error", err)
-			}
-		}
-	}()
+// Start begins consuming messages. It returns once the consumer is ready; the
+// poll loop runs in a background goroutine until the context is canceled or
+// Stop is called.
+func (c *Consumer) Start(parent context.Context) error {
+	// teranode #638: create the cancel context here (not inside the goroutine)
+	// and store the cancel func under a mutex to avoid a race with Stop.
+	ctx, cancel := context.WithCancel(parent)
+	c.cancelMu.Lock()
+	c.cancel = cancel
+	c.cancelMu.Unlock()
 
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		// F-053: if this goroutine exits without our context being canceled,
-		// the consumer is no longer running but the process is. That's a
-		// zombie state — the broker drops us from the group, no messages
-		// are consumed, and k8s sees a Running pod with no restarts. Crash
-		// the process so the orchestrator restarts a healthy replica.
+		// F-053: if this goroutine exits without our context being canceled, the
+		// consumer is no longer running but the process is. That's a zombie
+		// state — the broker drops us from the group, no messages are consumed,
+		// and k8s sees a Running pod with no restarts. Crash the process so the
+		// orchestrator restarts a healthy replica.
+		//
+		// Crucially (teranode #636/#638), franz self-heals by closing and
+		// reconnecting its client internally; PollFetches reporting
+		// ErrClientClosed / context.Canceled is therefore RECOVERY or shutdown,
+		// never a fatal exit. The loop below only returns when ctx is canceled,
+		// so this guard never fires on franz's normal recovery.
 		defer func() {
 			if ctx.Err() == nil {
 				c.logger.Error("consumer goroutine exited without context cancel; crashing process so k8s restarts the pod")
 				exitFunc(1)
 			}
 		}()
-		for {
-			handler := &consumerGroupHandler{
-				handler: c.handler,
-				groupID: c.groupID,
-				logger:  c.logger,
-				ready:   c.ready,
-			}
-			if err := c.group.Consume(ctx, c.topics, handler); err != nil {
-				c.logger.Error("consumer group error", "error", err)
-			}
-			if ctx.Err() != nil {
-				return
-			}
-			c.ready = make(chan struct{})
-		}
+
+		c.pollLoop(ctx)
 	}()
 
 	<-c.ready
@@ -150,81 +141,154 @@ func (c *Consumer) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts down the consumer.
-func (c *Consumer) Stop() error {
-	if c.cancel != nil {
-		c.cancel()
-	}
-	c.wg.Wait()
-	return c.group.Close()
-}
-
-// consumerGroupHandler implements sarama.ConsumerGroupHandler.
-type consumerGroupHandler struct {
-	handler MessageHandler
-	groupID string
-	logger  *slog.Logger
-	ready   chan struct{}
-}
-
-func (h *consumerGroupHandler) Setup(sarama.ConsumerGroupSession) error {
-	close(h.ready)
-	return nil
-}
-
-func (h *consumerGroupHandler) Cleanup(sarama.ConsumerGroupSession) error {
-	return nil
-}
-
-// ConsumeClaim drives the per-partition message loop. On handler error we
-// return the error WITHOUT calling MarkMessage, which:
-//
-//  1. Leaves the failed offset uncommitted so sarama re-delivers it in the
-//     next session. Per-handler retry/DLQ logic (subtree-fetcher,
-//     subtree-worker, block-processor, callback-delivery) classifies the
-//     failure and either re-publishes for retry, routes to a DLQ, or returns
-//     an error to deliberately stall the partition until the underlying
-//     Kafka/storage problem is resolved.
-//  2. Stops processing later messages in the same claim. The previous
-//     implementation logged the error and continued; a later successful
-//     message's MarkMessage call would then advance the committed offset
-//     past the failed one, permanently dropping the failed work (F-030).
-//
-// Sarama treats a non-nil ConsumeClaim return as a session-level error and
-// triggers a rebalance; the next session will resume from the last committed
-// offset, which is the failed message's offset.
-func (h *consumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+// pollLoop is the franz PollFetches consume loop. It commits offsets only for
+// records whose handler returned nil (F-030).
+func (c *Consumer) pollLoop(ctx context.Context) {
 	for {
-		select {
-		case msg, ok := <-claim.Messages():
-			if !ok {
-				return nil
+		if ctx.Err() != nil {
+			return
+		}
+
+		fetches := c.client.PollFetches(ctx)
+
+		// teranode #636/#638: client-closed is franz's self-healing reconnect or
+		// our own shutdown — recover, do not treat as a fatal goroutine exit.
+		if fetches.IsClientClosed() {
+			return
+		}
+
+		if errs := fetches.Errors(); len(errs) > 0 {
+			for _, e := range errs {
+				if errors.Is(e.Err, context.Canceled) || errors.Is(e.Err, kgo.ErrClientClosed) {
+					return
+				}
+				metrics.IncKafkaConsumerError(e.Topic, metrics.KafkaErrorBroker)
+				c.logger.Error("franz fetch error", "topic", e.Topic, "partition", e.Partition, "error", e.Err)
 			}
-			metrics.ObserveKafkaConsumed(msg.Topic, h.groupID, len(msg.Value))
-			gauge := metrics.KafkaInFlight(msg.Topic, h.groupID)
-			gauge.Inc()
+			// Transient fetch errors: let the client self-heal and poll again.
+			continue
+		}
+
+		// First healthy poll signals readiness.
+		c.signalReady()
+
+		committable := processRecords(ctx, fetches, c.handler, c.handleMetrics, c.logger, c.groupID)
+		if len(committable) > 0 {
+			if err := c.client.CommitRecords(ctx, committable...); err != nil {
+				// Commit failure leaves offsets uncommitted; the records will be
+				// redelivered on the next poll/rebalance (at-least-once).
+				if !errors.Is(err, context.Canceled) {
+					c.logger.Error("offset commit failed", "group", c.groupID, "error", err)
+				}
+			}
+		}
+	}
+}
+
+// handleMetrics records the per-message metrics around a handler invocation.
+// Split out so processRecords stays a pure, broker-free function for testing.
+func (c *Consumer) handleMetrics(topic string, valueLen int) func(outcome string, dur time.Duration, handlerErr error) {
+	metrics.ObserveKafkaConsumed(topic, c.groupID, valueLen)
+	gauge := metrics.KafkaInFlight(topic, c.groupID)
+	gauge.Inc()
+	return func(outcome string, dur time.Duration, handlerErr error) {
+		gauge.Dec()
+		metrics.ObserveKafkaHandle(topic, outcome, dur)
+		if handlerErr != nil {
+			metrics.IncKafkaConsumerError(topic, metrics.KafkaErrorHandler)
+		}
+	}
+}
+
+// processRecords runs the handler over every fetched record in poll order and
+// returns the records that should be committed.
+//
+// F-030 fidelity: a record is committable ONLY if its handler returned nil AND
+// every earlier record in the SAME partition also succeeded. On the first
+// handler error in a partition, that partition stops (no later record from it
+// is committed), so a later success can never advance the committed offset past
+// a failed one. Per-handler retry/DLQ logic (subtree-fetcher, subtree-worker,
+// block-processor, callback-delivery) classifies the failure and either
+// re-publishes for retry, routes to a DLQ, or returns an error to deliberately
+// stall the partition until the underlying problem resolves — exactly as under
+// sarama's "return error from ConsumeClaim, leave offset uncommitted" model.
+//
+// metricsHook may be nil (used by unit tests); when non-nil it is called once
+// per record and returns a completion callback invoked after the handler.
+func processRecords(
+	ctx context.Context,
+	fetches kgo.Fetches,
+	handler MessageHandler,
+	metricsHook func(topic string, valueLen int) func(outcome string, dur time.Duration, handlerErr error),
+	logger *slog.Logger,
+	groupID string,
+) []*kgo.Record {
+	var committable []*kgo.Record
+
+	fetches.EachPartition(func(p kgo.FetchTopicPartition) {
+		for _, rec := range p.Records {
+			var done func(string, time.Duration, error)
+			if metricsHook != nil {
+				done = metricsHook(rec.Topic, len(rec.Value))
+			}
+
 			start := time.Now()
-			err := h.handler(session.Context(), msg)
-			gauge.Dec()
+			err := handler(ctx, recordToMessage(rec))
 			outcome := metrics.OutcomeSuccess
 			if err != nil {
 				outcome = metrics.OutcomeHandlerError
 			}
-			metrics.ObserveKafkaHandle(msg.Topic, outcome, time.Since(start))
-			if err != nil {
-				metrics.IncKafkaConsumerError(msg.Topic, metrics.KafkaErrorHandler)
-				h.logger.Error(
-					"failed to handle message, stopping claim to preserve offset",
-					"topic", msg.Topic,
-					"partition", msg.Partition,
-					"offset", msg.Offset,
-					"error", err,
-				)
-				return err
+			if done != nil {
+				done(outcome, time.Since(start), err)
 			}
-			session.MarkMessage(msg, "")
-		case <-session.Context().Done():
-			return nil
+
+			if err != nil {
+				if logger != nil {
+					logger.Error(
+						"failed to handle message, leaving offset uncommitted",
+						"group", groupID,
+						"topic", rec.Topic,
+						"partition", rec.Partition,
+						"offset", rec.Offset,
+						"error", err,
+					)
+				}
+				// Stop this partition: do not commit this record or any later
+				// record from the same partition (F-030).
+				return
+			}
+			committable = append(committable, rec)
 		}
+	})
+
+	return committable
+}
+
+func (c *Consumer) signalReady() {
+	c.readyOnce.Do(func() { close(c.ready) })
+}
+
+// Stop gracefully shuts down the consumer.
+func (c *Consumer) Stop() error {
+	c.cancelMu.Lock()
+	cancel := c.cancel
+	c.cancel = nil
+	c.cancelMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
+	c.wg.Wait()
+	return c.closeClient()
+}
+
+// closeClient closes the underlying franz client at most once (teranode #720).
+func (c *Consumer) closeClient() error {
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	c.client.Close()
+	return nil
 }
