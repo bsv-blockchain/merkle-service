@@ -27,7 +27,7 @@ const defaultBatchMaxBytes int32 = 1_048_576
 //
 // The rule: any requested value <= 1 MiB is treated as "use the safe broker
 // default", NOT as a hard cap. Only an explicit value strictly above 1 MiB is
-// honoured as a real batch-size override (capped at MaxInt32).
+// honored as a real batch-size override (capped at MaxInt32).
 func clampBatchMaxBytes(requested int) int32 {
 	if requested <= int(defaultBatchMaxBytes) {
 		return defaultBatchMaxBytes
@@ -35,7 +35,7 @@ func clampBatchMaxBytes(requested int) int32 {
 	if requested > math.MaxInt32 {
 		return math.MaxInt32
 	}
-	return int32(requested) //nolint:gosec // bounded above by the MaxInt32 check
+	return int32(requested)
 }
 
 // Publisher is the produce seam. The real implementation wraps a *kgo.Client;
@@ -66,7 +66,7 @@ func (k *kgoPublisher) Produce(key string, value []byte) (int32, int64, error) {
 	// defeat the partitioner's keyless round-robin and pin traffic to one
 	// partition. Leaving Key nil lets franz's default partitioner spread
 	// keyless records; a non-empty key is hashed (matches sarama's
-	// NewHashPartitioner behaviour).
+	// NewHashPartitioner behavior).
 	if key != "" {
 		rec.Key = []byte(key)
 	}

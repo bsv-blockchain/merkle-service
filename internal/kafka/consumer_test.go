@@ -168,7 +168,7 @@ func TestProcessRecords_PartitionsAreIndependent(t *testing.T) {
 // TestConsumerOpts_AcceptedByClient is a smoke test that the option set built by
 // consumerOpts is mutually valid (e.g. SessionTimeout >= 3x HeartbeatInterval,
 // a valid balancer, offset-reset and auto-commit settings) — franz validates
-// these when the client is constructed. The behavioural invariants F-031
+// these when the client is constructed. The behavioral invariants F-031
 // (offset reset to oldest) and F-053 (recovery/error surfacing) are verified
 // against a real broker in kafka_integration_test.go, because franz options are
 // opaque and cannot be introspected the way sarama's *Config struct could.
@@ -182,7 +182,7 @@ func TestConsumerOpts_AcceptedByClient(t *testing.T) {
 
 // TestClampBatchMaxBytes guards teranode #660: values at or below the 1 MiB
 // broker default are floored to the default (never used as a hard cap that
-// would reject normal records), while an explicit larger value is honoured.
+// would reject normal records), while an explicit larger value is honored.
 func TestClampBatchMaxBytes(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -192,7 +192,7 @@ func TestClampBatchMaxBytes(t *testing.T) {
 		{"zero floors to default", 0, defaultBatchMaxBytes},
 		{"small flush-style value floors to default", 1024, defaultBatchMaxBytes},
 		{"exactly default", int(defaultBatchMaxBytes), defaultBatchMaxBytes},
-		{"10MiB honoured (merkle cap-raise)", 10 * 1024 * 1024, 10 * 1024 * 1024},
+		{"10MiB honored (merkle cap-raise)", 10 * 1024 * 1024, 10 * 1024 * 1024},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
