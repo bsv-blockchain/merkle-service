@@ -24,24 +24,7 @@ func rec(offset int64) *kgo.Record {
 	}
 }
 
-// fetchesOf wraps records (assumed same topic/partition) into a kgo.Fetches so
-// processRecords can be exercised without a broker.
-func fetchesOf(recs ...*kgo.Record) kgo.Fetches {
-	if len(recs) == 0 {
-		return kgo.Fetches{}
-	}
-	return kgo.Fetches{{
-		Topics: []kgo.FetchTopic{{
-			Topic: recs[0].Topic,
-			Partitions: []kgo.FetchPartition{{
-				Partition: recs[0].Partition,
-				Records:   recs,
-			}},
-		}},
-	}}
-}
-
-// committedOffsets extracts the offsets of the records processRecords returned
+// committedOffsets extracts the offsets of the records processBatch returned
 // as committable, in order.
 func committedOffsets(recs []*kgo.Record) []int64 {
 	out := make([]int64, len(recs))
@@ -51,22 +34,18 @@ func committedOffsets(recs []*kgo.Record) []int64 {
 	return out
 }
 
-func run(handler MessageHandler, fetches kgo.Fetches) []*kgo.Record {
-	committable, _ := processRecords(context.Background(), fetches, handler, nil, discardLogger(), "test-group")
-	return committable
+func runBatch(handler MessageHandler, recs ...*kgo.Record) (committable []*kgo.Record, failed *kgo.Record) {
+	return processBatch(context.Background(), recs, handler, nil, discardLogger(), "test-group")
 }
 
-// runWithFailed is run but also returns the per-partition rewind points.
-func runWithFailed(handler MessageHandler, fetches kgo.Fetches) (committable, failed []*kgo.Record) {
-	return processRecords(context.Background(), fetches, handler, nil, discardLogger(), "test-group")
-}
-
-// TestProcessRecords_AllSuccess verifies that when the handler returns nil for
-// every record, every record is returned as committable.
-func TestProcessRecords_AllSuccess(t *testing.T) {
+// TestProcessBatch_AllSuccess verifies that when the handler returns nil for
+// every record, every record is returned as committable and there is no
+// rewind point.
+func TestProcessBatch_AllSuccess(t *testing.T) {
 	handler := func(_ context.Context, _ *Message) error { return nil }
 
-	got := committedOffsets(run(handler, fetchesOf(rec(10), rec(11), rec(12))))
+	committable, failed := runBatch(handler, rec(10), rec(11), rec(12))
+	got := committedOffsets(committable)
 	want := []int64{10, 11, 12}
 	if len(got) != len(want) {
 		t.Fatalf("committable offsets: got %v, want %v", got, want)
@@ -76,15 +55,18 @@ func TestProcessRecords_AllSuccess(t *testing.T) {
 			t.Errorf("committable[%d] = %d, want %d", i, got[i], o)
 		}
 	}
+	if failed != nil {
+		t.Errorf("failed = offset %d, want nil", failed.Offset)
+	}
 }
 
-// TestProcessRecords_StopsOnHandlerError is the regression test for F-030. On
-// the first handler error in a partition, processing of that partition must
-// stop so a later success cannot advance the committed offset past the failed
-// one. franz commits from the last committed offset, so leaving the failed
-// record (and everything after it in the partition) uncommitted means they are
-// redelivered on the next poll/rebalance — preserving at-least-once.
-func TestProcessRecords_StopsOnHandlerError(t *testing.T) {
+// TestProcessBatch_StopsOnHandlerError is the regression test for F-030. On
+// the first handler error, processing stops so a later success cannot advance
+// the committed offset past the failed one, and the failed record is reported
+// as the partition's rewind point. The rewind is what makes the stall real:
+// kgo's fetch position advances independently of commits, so without it the
+// failed record would never be re-polled in this session.
+func TestProcessBatch_StopsOnHandlerError(t *testing.T) {
 	wantErr := errors.New("boom")
 	var calls int
 	handler := func(_ context.Context, _ *Message) error {
@@ -95,7 +77,7 @@ func TestProcessRecords_StopsOnHandlerError(t *testing.T) {
 		return nil
 	}
 
-	committable, failed := runWithFailed(handler, fetchesOf(rec(10), rec(11), rec(12), rec(13)))
+	committable, failed := runBatch(handler, rec(10), rec(11), rec(12), rec(13))
 	got := committedOffsets(committable)
 	want := []int64{10}
 	if len(got) != len(want) {
@@ -104,11 +86,8 @@ func TestProcessRecords_StopsOnHandlerError(t *testing.T) {
 	if got[0] != 10 {
 		t.Errorf("committable[0] = %d, want 10", got[0])
 	}
-	// The failed record must be reported as the partition's rewind point so the
-	// poll loop SetOffsets back to it — without the rewind, kgo's fetch
-	// position would advance past the batch and the record would be lost.
-	if len(failed) != 1 || failed[0].Offset != 11 {
-		t.Fatalf("failed rewind points = %v, want exactly offset 11", committedOffsets(failed))
+	if failed == nil || failed.Offset != 11 {
+		t.Fatalf("failed rewind point = %v, want offset 11", failed)
 	}
 	// Handler must NOT have been invoked for offsets 12 or 13: bailing out
 	// preserves the guarantee that the failed offset and everything after it in
@@ -118,71 +97,18 @@ func TestProcessRecords_StopsOnHandlerError(t *testing.T) {
 	}
 }
 
-// TestProcessRecords_FirstMessageError covers the corner case where the very
-// first record fails: nothing is committable.
-func TestProcessRecords_FirstMessageError(t *testing.T) {
+// TestProcessBatch_FirstMessageError covers the corner case where the very
+// first record fails: nothing is committable and the rewind point is the
+// first record.
+func TestProcessBatch_FirstMessageError(t *testing.T) {
 	handler := func(_ context.Context, _ *Message) error { return errors.New("first") }
 
-	committable, failed := runWithFailed(handler, fetchesOf(rec(100), rec(101)))
+	committable, failed := runBatch(handler, rec(100), rec(101))
 	if len(committable) != 0 {
 		t.Errorf("expected no committable records, got offsets %v", committedOffsets(committable))
 	}
-	if len(failed) != 1 || failed[0].Offset != 100 {
-		t.Errorf("failed rewind points = %v, want exactly offset 100", committedOffsets(failed))
-	}
-}
-
-// TestProcessRecords_PartitionsAreIndependent verifies F-030 is enforced
-// per-partition: a handler error on one partition must not stop committing
-// successful records on a different partition.
-func TestProcessRecords_PartitionsAreIndependent(t *testing.T) {
-	// partition 0: offsets 1 (ok), 2 (fail), 3 (must be skipped)
-	// partition 1: offsets 5 (ok), 6 (ok)
-	fetches := kgo.Fetches{{
-		Topics: []kgo.FetchTopic{{
-			Topic: "test",
-			Partitions: []kgo.FetchPartition{
-				{Partition: 0, Records: []*kgo.Record{
-					{Topic: "test", Partition: 0, Offset: 1, Value: []byte("v")},
-					{Topic: "test", Partition: 0, Offset: 2, Value: []byte("FAIL")},
-					{Topic: "test", Partition: 0, Offset: 3, Value: []byte("v")},
-				}},
-				{Partition: 1, Records: []*kgo.Record{
-					{Topic: "test", Partition: 1, Offset: 5, Value: []byte("v")},
-					{Topic: "test", Partition: 1, Offset: 6, Value: []byte("v")},
-				}},
-			},
-		}},
-	}}
-
-	handler := func(_ context.Context, m *Message) error {
-		if string(m.Value) == "FAIL" {
-			return errors.New("boom")
-		}
-		return nil
-	}
-
-	got, failed := processRecords(context.Background(), fetches, handler, nil, discardLogger(), "test-group")
-
-	// partition 0 stops at offset 2 (only offset 1 committable); partition 1 both commit.
-	var p0, p1 []int64
-	for _, r := range got {
-		switch r.Partition {
-		case 0:
-			p0 = append(p0, r.Offset)
-		case 1:
-			p1 = append(p1, r.Offset)
-		}
-	}
-	if len(p0) != 1 || p0[0] != 1 {
-		t.Errorf("partition 0 committable = %v, want [1] (offset 2 failed, 3 must be skipped)", p0)
-	}
-	if len(p1) != 2 || p1[0] != 5 || p1[1] != 6 {
-		t.Errorf("partition 1 committable = %v, want [5 6] (independent of partition 0 failure)", p1)
-	}
-	// Only partition 0 has a rewind point, at the failed offset.
-	if len(failed) != 1 || failed[0].Partition != 0 || failed[0].Offset != 2 {
-		t.Errorf("failed rewind points = %+v, want exactly partition 0 offset 2", failed)
+	if failed == nil || failed.Offset != 100 {
+		t.Errorf("failed rewind point = %v, want offset 100", failed)
 	}
 }
 
@@ -191,8 +117,9 @@ func TestProcessRecords_PartitionsAreIndependent(t *testing.T) {
 // a valid balancer, offset-reset and auto-commit settings) — franz validates
 // these when the client is constructed. The behavioral invariants F-031
 // (offset reset to oldest) and F-053 (recovery/error surfacing) are verified
-// against a real broker in kafka_integration_test.go, because franz options are
-// opaque and cannot be introspected the way sarama's *Config struct could.
+// against in-memory kfake clusters in redelivery_test.go and
+// partition_concurrency_test.go, because franz options are opaque and cannot
+// be introspected the way sarama's *Config struct could.
 func TestConsumerOpts_AcceptedByClient(t *testing.T) {
 	client, err := kgo.NewClient(consumerOpts([]string{"localhost:9092"}, "test-group", []string{"test"})...)
 	if err != nil {
