@@ -173,14 +173,16 @@ func TestHandleMessage_HappyPath_AllPublished(t *testing.T) {
 	}
 }
 
-// TestHandleMessage_PublishFailureMidLoop_StopsAndReturnsError verifies that
-// when a publish fails partway through the fan-out:
+// TestHandleMessage_PublishFailureMidBatch_ReturnsErrorAndAttemptsAll verifies
+// that when a publish fails partway through the batched fan-out:
 //   - handleMessage returns a non-nil error,
 //   - the block is NOT added to the dedup cache (so it can be retried),
-//   - publishing stops at the failing message (later messages are NOT sent).
-func TestHandleMessage_PublishFailureMidLoop_StopsAndReturnsError(t *testing.T) {
-	// Fail on the 2nd publish (index 1), so we expect exactly 1 successful
-	// send before the failure aborts the loop.
+//   - every record is still ATTEMPTED (batch semantics: kgo's ProduceSync
+//     tries all records and reports the first failure; partially-landed work
+//     is safe because the subtree-work pipeline is idempotent and the whole
+//     batch re-publishes on redelivery).
+func TestHandleMessage_PublishFailureMidBatch_ReturnsErrorAndAttemptsAll(t *testing.T) {
+	// Fail on the 2nd publish (index 1): the other 3 of 4 records still send.
 	mockProducer := &failingSyncProducer{
 		failAt:  1,
 		failErr: errors.New("kafka unavailable"),
@@ -197,17 +199,17 @@ func TestHandleMessage_PublishFailureMidLoop_StopsAndReturnsError(t *testing.T) 
 
 	err := p.handleMessage(context.Background(), msg)
 	if err == nil {
-		t.Fatalf("expected non-nil error when publish fails mid-loop")
+		t.Fatalf("expected non-nil error when publish fails mid-batch")
 	}
 	if !strings.Contains(err.Error(), "publishing subtree work") {
 		t.Errorf("expected wrapped publish error, got: %v", err)
 	}
 
-	if got := len(mockProducer.messages); got != 1 {
-		t.Errorf("expected exactly 1 successful send before failure, got %d", got)
+	if got := len(mockProducer.messages); got != 3 {
+		t.Errorf("expected 3 successful sends (all 4 attempted, 1 injected failure), got %d", got)
 	}
-	if mockProducer.calls != 2 {
-		t.Errorf("expected loop to stop after first failure (2 calls total), got %d", mockProducer.calls)
+	if mockProducer.calls != 4 {
+		t.Errorf("expected every record attempted (4 calls), got %d", mockProducer.calls)
 	}
 	if dedup.Contains(blockHash) {
 		t.Errorf("block must NOT be in dedup cache when publish fails")
@@ -219,10 +221,12 @@ func TestHandleMessage_PublishFailureMidLoop_StopsAndReturnsError(t *testing.T) 
 	}
 }
 
-// TestHandleMessage_PublishFailureFirstMessage_NoMessagesLeak verifies that a
-// failure on the very first publish leaves no messages dispatched and the
-// block uncommitted to dedup.
-func TestHandleMessage_PublishFailureFirstMessage_NoMessagesLeak(t *testing.T) {
+// TestHandleMessage_PublishFailureFirstMessage_NoDedup verifies that a
+// failure on the very first record of the batch still surfaces an error and
+// leaves the block uncommitted to dedup. The remaining records are still
+// attempted (batch semantics) — partially-landed work is not a leak because
+// the idempotent fan-out re-publishes the whole batch on redelivery.
+func TestHandleMessage_PublishFailureFirstMessage_NoDedup(t *testing.T) {
 	mockProducer := &failingSyncProducer{
 		failAt:  0,
 		failErr: errors.New("kafka unavailable"),
@@ -240,8 +244,8 @@ func TestHandleMessage_PublishFailureFirstMessage_NoMessagesLeak(t *testing.T) {
 	if err := p.handleMessage(context.Background(), msg); err == nil {
 		t.Fatalf("expected non-nil error when first publish fails")
 	}
-	if got := len(mockProducer.messages); got != 0 {
-		t.Errorf("expected zero successful sends, got %d", got)
+	if got := len(mockProducer.messages); got != 2 {
+		t.Errorf("expected 2 successful sends (all 3 attempted, first injected to fail), got %d", got)
 	}
 	if dedup.Contains(blockHash) {
 		t.Errorf("block must NOT be in dedup cache when fan-out fails")
@@ -287,9 +291,12 @@ func TestHandleMessage_RetryAfterPublishFailure_Republishes(t *testing.T) {
 	if counter.inits() <= firstInits {
 		t.Errorf("expected counter to be re-initialized on retry")
 	}
-	// Total successful sends across both attempts: 1 (before failure) + 3 (retry).
-	if mockProducer.calls < 5 || len(mockProducer.messages) != 4 {
-		t.Errorf("unexpected producer state: calls=%d successful=%d",
+	// Total successful sends across both attempts: 2 on the failed attempt
+	// (all 3 attempted, index 1 injected to fail) + 3 on the healthy retry.
+	// The duplicates are exactly the documented idempotent-redelivery
+	// property of the subtree-work pipeline.
+	if mockProducer.calls != 6 || len(mockProducer.messages) != 5 {
+		t.Errorf("unexpected producer state: calls=%d successful=%d, want calls=6 successful=5",
 			mockProducer.calls, len(mockProducer.messages))
 	}
 }

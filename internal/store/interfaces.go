@@ -86,8 +86,16 @@ type CallbackAccumulatorStore interface {
 // SeenCounterStore tracks how many distinct subtrees have reported a txid.
 // Increment fires ThresholdReached exactly once — when the unique count first
 // reaches the configured threshold.
+//
+// BatchIncrement applies Increment semantics to many txids of ONE subtree in
+// bulk (the subtree-fetcher hot path). It returns a result per txid that
+// succeeded plus the first error encountered; callers emit callbacks for the
+// returned results and surface the error for redelivery (F-058) — increments
+// are idempotent, so re-running the whole batch is safe. The exactly-once
+// ThresholdReached guarantee (F-045) is identical to Increment's.
 type SeenCounterStore interface {
 	Increment(txid, subtreeID string) (*IncrementResult, error)
+	BatchIncrement(txids []string, subtreeID string) (map[string]*IncrementResult, error)
 	Threshold() int
 }
 

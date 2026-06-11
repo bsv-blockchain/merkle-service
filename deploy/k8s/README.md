@@ -145,5 +145,5 @@ See `config.yaml` in the project root for the full list of configuration options
 ## Resource Tuning
 
 - **Subtree workers**: Each holds one STUMP (~271 KB) in memory during processing. The LRU cache adds up to `LRU_SIZE * 271 KB` memory usage. Default 1024 entries = ~270 MB.
-- **Callback delivery**: Similar LRU memory usage. Increase `deliveryWorkers` and `maxConnsPerHost` for higher callback throughput.
+- **Callback delivery**: Similar LRU memory usage. Increase the `callback` topic partition count (and replicas) for higher callback throughput; `maxConnsPerHost` tunes per-endpoint HTTP concurrency.
 - **Block processor**: Lightweight — mostly publishes Kafka messages. Low resource requirements.

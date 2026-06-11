@@ -70,7 +70,6 @@ data:
       timeoutSec: 10
       seenThreshold: 3
       dedupTTLSec: 86400
-      deliveryWorkers: 64
       maxConnsPerHost: 32
       maxIdleConnsPerHost: 16
 

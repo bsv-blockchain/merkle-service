@@ -275,7 +275,6 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 			MaxRetries:          5,
 			BackoffBaseSec:      1,
 			TimeoutSec:          10,
-			DeliveryWorkers:     256,
 			MaxConnsPerHost:     64,
 			MaxIdleConnsPerHost: 32,
 		},

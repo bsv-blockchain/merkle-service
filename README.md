@@ -300,7 +300,6 @@ Configuration is loaded from (highest priority first):
 | `aerospike.host`            | Aerospike connection target                                              | Required when `store.backend=aerospike`                |
 | `blobStore.url`             | Subtree blob backing store                                               | File or remote URL                                     |
 | `block.workerPoolSize`      | Worker concurrency for subtree fan-out                                   | Tune for block-processor throughput                    |
-| `callback.deliveryWorkers`  | HTTP delivery worker concurrency                                         | Tune per delivery instance                             |
 
 See [docs/deployment.md](docs/deployment.md) for the full env-var reference and [docs/sql-backend.md](docs/sql-backend.md) for running against PostgreSQL or SQLite instead of Aerospike.
 

@@ -23,6 +23,27 @@ func newSeenCounter(db *sql.DB, d *dialect, threshold int) *seenCounter {
 
 func (s *seenCounter) Threshold() int { return s.threshold }
 
+// BatchIncrement applies Increment to each txid in turn. The SQL backend
+// serves tests and small single-node deployments, so per-txid transactions
+// are acceptable here; the Aerospike backend is the one with the true batched
+// implementation (throughput review F-4). Same partial-success contract:
+// results for every txid that succeeded, plus the first error (F-058).
+func (s *seenCounter) BatchIncrement(txids []string, subtreeID string) (map[string]*storepkg.IncrementResult, error) {
+	results := make(map[string]*storepkg.IncrementResult, len(txids))
+	var firstErr error
+	for _, txid := range txids {
+		res, err := s.Increment(txid, subtreeID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("batch increment %s: %w", txid, err)
+			}
+			continue
+		}
+		results[txid] = res
+	}
+	return results, firstErr
+}
+
 // Increment inserts (txid, subtreeID) into seen_counter_subtrees (idempotent
 // via the compound PK), counts distinct subtrees for the txid, and atomically
 // transitions threshold_fired from 0 to 1 on the first call that reaches the

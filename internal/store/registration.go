@@ -334,15 +334,46 @@ func (s *aerospikeRegistration) UpdateTTL(txid string, ttl time.Duration) error 
 	return nil
 }
 
-// BatchUpdateTTL updates TTL for multiple txids in batch.
+// BatchUpdateTTL updates TTL for multiple txids using chunked batch Touch
+// operations — one round-trip per node per aerospikeBatchChunkSize keys
+// instead of one Operate RTT per txid (throughput review F-8: the serial loop
+// blocked the subtree-worker hot path ~5-10s per 10k-txid subtree). Failures
+// remain warn-only, preserving the prior best-effort contract.
 func (s *aerospikeRegistration) BatchUpdateTTL(txids []string, ttl time.Duration) error {
 	if len(txids) == 0 {
 		return nil
 	}
 
-	for _, txid := range txids {
-		if err := s.UpdateTTL(txid, ttl); err != nil {
-			s.logger.Warn("failed to update TTL (check Aerospike nsup-period config)", "txid", txid, "error", err)
+	wpol := as.NewBatchWritePolicy()
+	wpol.Expiration = uint32(ttl.Seconds())
+
+	for _, chunk := range chunkSlice(txids, aerospikeBatchChunkSize) {
+		batchRecs := make([]as.BatchRecordIfc, 0, len(chunk))
+		batchTxids := make([]string, 0, len(chunk)) // index-aligned with batchRecs
+		for _, txid := range chunk {
+			key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
+			if err != nil {
+				s.logger.Warn("failed to create key for TTL update", "txid", txid, "error", err)
+				continue
+			}
+			batchRecs = append(batchRecs, as.NewBatchWrite(wpol, key, as.TouchOp()))
+			batchTxids = append(batchTxids, txid)
+		}
+		if len(batchRecs) == 0 {
+			continue
+		}
+
+		bp := s.client.BatchPolicy(s.maxRetries, s.retryBaseMs)
+		if err := s.client.Client().BatchOperate(bp, batchRecs); err != nil {
+			s.logger.Warn("batch TTL update failed (check Aerospike nsup-period config)",
+				"keys", len(batchRecs), "error", err)
+			continue
+		}
+		for i, br := range batchRecs {
+			if err := br.BatchRec().Err; err != nil {
+				s.logger.Warn("failed to update TTL (check Aerospike nsup-period config)",
+					"txid", batchTxids[i], "error", err)
+			}
 		}
 	}
 	return nil

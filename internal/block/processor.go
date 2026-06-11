@@ -335,20 +335,24 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	// subtree work may be re-published, but the SubtreeWorkMessage retry
 	// pipeline (AttemptCount + subtree-work-dlq) is already idempotent, so
 	// duplicate fan-out is safe.
+	// Batched fan-out (throughput review F-6): one synchronous batch publish
+	// instead of one broker-acked round-trip per subtree (~600-900 serial RTTs
+	// for a teranode-default block). A batch error may leave SOME records
+	// published — that is the same partial-publish state the serial loop could
+	// leave, and the redelivery path above already handles it.
+	entries := make([]kafka.BatchEntry, len(encoded))
 	for i, ew := range encoded {
-		if err := p.subtreeWorkProducer.PublishWithHashKey(ew.subtreeHash, ew.payload); err != nil {
-			p.Logger.Error(
-				"failed to publish subtree work message",
-				"subtreeHash", ew.subtreeHash,
-				"blockHash", blockMsg.Hash,
-				"subtreeIndex", i,
-				"published", i,
-				"total", len(encoded),
-				"error", err,
-			)
-			return fmt.Errorf("publishing subtree work for block %s subtree %s (%d/%d): %w",
-				blockMsg.Hash, ew.subtreeHash, i, len(encoded), err)
-		}
+		entries[i] = kafka.HashBatchEntry(ew.subtreeHash, ew.payload)
+	}
+	if err := p.subtreeWorkProducer.PublishBatch(entries); err != nil {
+		p.Logger.Error(
+			"failed to publish subtree work batch",
+			"blockHash", blockMsg.Hash,
+			"total", len(encoded),
+			"error", err,
+		)
+		return fmt.Errorf("publishing subtree work batch for block %s (%d subtrees): %w",
+			blockMsg.Hash, len(encoded), err)
 	}
 
 	p.Logger.Info(
