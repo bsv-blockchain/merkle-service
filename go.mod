@@ -18,6 +18,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	github.com/twmb/franz-go v1.21.2
 	github.com/twmb/franz-go/pkg/kadm v1.18.0
+	github.com/twmb/franz-go/pkg/kfake v0.0.0-20260606182254-a0f8f332c495
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
 	modernc.org/sqlite v1.51.0

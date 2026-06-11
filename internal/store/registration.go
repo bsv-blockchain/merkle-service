@@ -234,18 +234,54 @@ func (s *aerospikeRegistration) Get(txid string) ([]CallbackEntry, error) {
 	return parseCallbackEntries(list), nil
 }
 
-// BatchGet returns (url, token) registrations for multiple txids in a single
-// batch call. Same dual-shape parsing as Get.
-func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackEntry, error) {
-	if len(txids) == 0 {
-		return make(map[string][]CallbackEntry), nil
-	}
+// aerospikeBatchChunkSize caps the number of keys sent in a single Aerospike
+// batch call. Aerospike rejects any batch that lands more than
+// batch-max-requests keys (server default: 5000) on a single node with
+// BATCH_MAX_REQUESTS_EXCEEDED — deterministically, on every retry. A
+// teranode-default subtree carries ~1M txids, so an unchunked whole-subtree
+// BatchGet can never succeed on clusters smaller than ~200 nodes. Chunking to
+// the per-node default is safe for any cluster size (a chunk's keys can at
+// worst all hash to one node).
+const aerospikeBatchChunkSize = 5000
 
+// chunkSlice splits items into consecutive sub-slices of at most size
+// elements. The sub-slices share the backing array (no copying).
+func chunkSlice(items []string, size int) [][]string {
+	if len(items) == 0 {
+		return nil
+	}
+	chunks := make([][]string, 0, (len(items)+size-1)/size)
+	for start := 0; start < len(items); start += size {
+		end := start + size
+		if end > len(items) {
+			end = len(items)
+		}
+		chunks = append(chunks, items[start:end])
+	}
+	return chunks
+}
+
+// BatchGet returns (url, token) registrations for multiple txids, issuing one
+// Aerospike batch call per aerospikeBatchChunkSize keys. Same dual-shape
+// parsing as Get.
+func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackEntry, error) {
+	result := make(map[string][]CallbackEntry)
+	for _, chunk := range chunkSlice(txids, aerospikeBatchChunkSize) {
+		if err := s.batchGetChunk(chunk, result); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+// batchGetChunk issues one Aerospike BatchGet for a chunk of at most
+// aerospikeBatchChunkSize txids and merges positive results into result.
+func (s *aerospikeRegistration) batchGetChunk(txids []string, result map[string][]CallbackEntry) error {
 	keys := make([]*as.Key, len(txids))
 	for i, txid := range txids {
 		key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create key for %s: %w", txid, err)
+			return fmt.Errorf("failed to create key for %s: %w", txid, err)
 		}
 		keys[i] = key
 	}
@@ -253,10 +289,9 @@ func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackE
 	bp := s.client.BatchPolicy(s.maxRetries, s.retryBaseMs)
 	records, err := s.client.Client().BatchGet(bp, keys, callbacksBin)
 	if err != nil {
-		return nil, fmt.Errorf("batch get failed: %w", err)
+		return fmt.Errorf("batch get failed: %w", err)
 	}
 
-	result := make(map[string][]CallbackEntry)
 	for i, record := range records {
 		if record == nil {
 			continue
@@ -275,7 +310,7 @@ func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackE
 		}
 	}
 
-	return result, nil
+	return nil
 }
 
 // UpdateTTL updates the TTL of a registration record.

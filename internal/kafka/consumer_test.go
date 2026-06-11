@@ -52,6 +52,12 @@ func committedOffsets(recs []*kgo.Record) []int64 {
 }
 
 func run(handler MessageHandler, fetches kgo.Fetches) []*kgo.Record {
+	committable, _ := processRecords(context.Background(), fetches, handler, nil, discardLogger(), "test-group")
+	return committable
+}
+
+// runWithFailed is run but also returns the per-partition rewind points.
+func runWithFailed(handler MessageHandler, fetches kgo.Fetches) (committable, failed []*kgo.Record) {
 	return processRecords(context.Background(), fetches, handler, nil, discardLogger(), "test-group")
 }
 
@@ -89,13 +95,20 @@ func TestProcessRecords_StopsOnHandlerError(t *testing.T) {
 		return nil
 	}
 
-	got := committedOffsets(run(handler, fetchesOf(rec(10), rec(11), rec(12), rec(13))))
+	committable, failed := runWithFailed(handler, fetchesOf(rec(10), rec(11), rec(12), rec(13)))
+	got := committedOffsets(committable)
 	want := []int64{10}
 	if len(got) != len(want) {
 		t.Fatalf("committable offsets: got %v, want %v (failed offset 11 must NOT be committable, and 12/13 must NOT have been processed)", got, want)
 	}
 	if got[0] != 10 {
 		t.Errorf("committable[0] = %d, want 10", got[0])
+	}
+	// The failed record must be reported as the partition's rewind point so the
+	// poll loop SetOffsets back to it — without the rewind, kgo's fetch
+	// position would advance past the batch and the record would be lost.
+	if len(failed) != 1 || failed[0].Offset != 11 {
+		t.Fatalf("failed rewind points = %v, want exactly offset 11", committedOffsets(failed))
 	}
 	// Handler must NOT have been invoked for offsets 12 or 13: bailing out
 	// preserves the guarantee that the failed offset and everything after it in
@@ -110,8 +123,12 @@ func TestProcessRecords_StopsOnHandlerError(t *testing.T) {
 func TestProcessRecords_FirstMessageError(t *testing.T) {
 	handler := func(_ context.Context, _ *Message) error { return errors.New("first") }
 
-	if got := run(handler, fetchesOf(rec(100), rec(101))); len(got) != 0 {
-		t.Errorf("expected no committable records, got offsets %v", committedOffsets(got))
+	committable, failed := runWithFailed(handler, fetchesOf(rec(100), rec(101)))
+	if len(committable) != 0 {
+		t.Errorf("expected no committable records, got offsets %v", committedOffsets(committable))
+	}
+	if len(failed) != 1 || failed[0].Offset != 100 {
+		t.Errorf("failed rewind points = %v, want exactly offset 100", committedOffsets(failed))
 	}
 }
 
@@ -145,7 +162,7 @@ func TestProcessRecords_PartitionsAreIndependent(t *testing.T) {
 		return nil
 	}
 
-	got := processRecords(context.Background(), fetches, handler, nil, discardLogger(), "test-group")
+	got, failed := processRecords(context.Background(), fetches, handler, nil, discardLogger(), "test-group")
 
 	// partition 0 stops at offset 2 (only offset 1 committable); partition 1 both commit.
 	var p0, p1 []int64
@@ -162,6 +179,10 @@ func TestProcessRecords_PartitionsAreIndependent(t *testing.T) {
 	}
 	if len(p1) != 2 || p1[0] != 5 || p1[1] != 6 {
 		t.Errorf("partition 1 committable = %v, want [5 6] (independent of partition 0 failure)", p1)
+	}
+	// Only partition 0 has a rewind point, at the failed offset.
+	if len(failed) != 1 || failed[0].Partition != 0 || failed[0].Offset != 2 {
+		t.Errorf("failed rewind points = %+v, want exactly partition 0 offset 2", failed)
 	}
 }
 

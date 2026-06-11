@@ -141,8 +141,28 @@ func (c *Consumer) Start(parent context.Context) error {
 	return nil
 }
 
+// handlerErrorBackoff is how long the poll loop waits before re-fetching a
+// partition whose handler failed. It throttles the redeliver-and-fail cycle
+// when the underlying problem (Aerospike blip, DLQ producer hiccup) persists.
+// Under sarama the equivalent throttle was the session-teardown/rebalance
+// cycle triggered by returning an error from ConsumeClaim.
+const handlerErrorBackoff = 500 * time.Millisecond
+
 // pollLoop is the franz PollFetches consume loop. It commits offsets only for
-// records whose handler returned nil (F-030).
+// records whose handler returned nil (F-030), and explicitly REWINDS the fetch
+// position of any partition whose handler failed so the failed record is
+// redelivered.
+//
+// The rewind is load-bearing for at-least-once delivery. Unlike sarama —
+// where an uncommitted offset was automatically re-fetched after the session
+// ended — kgo advances its in-memory fetch position as records are returned
+// from PollFetches, independent of commits. Merely withholding the commit
+// does NOT cause redelivery within a running session: the next poll continues
+// past the failed batch, and a later successful commit would advance the
+// committed offset past the failed record, losing it permanently. To preserve
+// F-030/F-021 we pause the failed partition, SetOffsets back to the failed
+// record (which also drops any already-buffered records for that partition),
+// back off briefly, and resume.
 func (c *Consumer) pollLoop(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
@@ -172,17 +192,66 @@ func (c *Consumer) pollLoop(ctx context.Context) {
 		// First healthy poll signals readiness.
 		c.signalReady()
 
-		committable := processRecords(ctx, fetches, c.handler, c.handleMetrics, c.logger, c.groupID)
+		committable, failed := processRecords(ctx, fetches, c.handler, c.handleMetrics, c.logger, c.groupID)
 		if len(committable) > 0 {
 			if err := c.client.CommitRecords(ctx, committable...); err != nil {
-				// Commit failure leaves offsets uncommitted; the records will be
-				// redelivered on the next poll/rebalance (at-least-once).
+				// Commit failure leaves offsets uncommitted; on the next
+				// rebalance/restart the group resumes from the last committed
+				// offset, so already-handled records are simply redelivered
+				// (at-least-once; handlers are idempotent).
 				if !errors.Is(err, context.Canceled) {
 					c.logger.Error("offset commit failed", "group", c.groupID, "error", err)
 				}
 			}
 		}
+		if len(failed) > 0 {
+			c.rewindFailed(ctx, failed)
+		}
 	}
+}
+
+// rewindFailed resets the fetch position of every partition in failed back to
+// its first failed record so the record (and everything after it in that
+// partition) is redelivered, then backs off briefly before resuming fetches.
+//
+// Sequence per franz-go guidance: pause the partitions first so no new fetch
+// is issued mid-reset, SetOffsets to the failed record's offset (this purges
+// records already buffered for those partitions), wait out the backoff, then
+// resume. The backoff stalls this consumer's whole poll loop, which matches
+// sarama's behavior of tearing down the entire session on a handler error.
+func (c *Consumer) rewindFailed(ctx context.Context, failed []*kgo.Record) {
+	paused := make(map[string][]int32, len(failed))
+	rewind := make(map[string]map[int32]kgo.EpochOffset, len(failed))
+	for _, rec := range failed {
+		paused[rec.Topic] = append(paused[rec.Topic], rec.Partition)
+		if rewind[rec.Topic] == nil {
+			rewind[rec.Topic] = make(map[int32]kgo.EpochOffset)
+		}
+		rewind[rec.Topic][rec.Partition] = kgo.EpochOffset{
+			Epoch:  rec.LeaderEpoch,
+			Offset: rec.Offset,
+		}
+		c.logger.Warn(
+			"rewinding partition to redeliver failed record",
+			"group", c.groupID,
+			"topic", rec.Topic,
+			"partition", rec.Partition,
+			"offset", rec.Offset,
+		)
+	}
+
+	c.client.PauseFetchPartitions(paused)
+	c.client.SetOffsets(rewind)
+
+	select {
+	case <-time.After(handlerErrorBackoff):
+	case <-ctx.Done():
+	}
+
+	// Resume even when ctx is done: Stop()/shutdown closes the client, and
+	// leaving partitions paused on a live client after a transient cancel
+	// would silently stop consumption.
+	c.client.ResumeFetchPartitions(paused)
 }
 
 // handleMetrics records the per-message metrics around a handler invocation.
@@ -201,17 +270,23 @@ func (c *Consumer) handleMetrics(topic string, valueLen int) func(outcome string
 }
 
 // processRecords runs the handler over every fetched record in poll order and
-// returns the records that should be committed.
+// returns (a) the records that should be committed and (b) the FIRST failed
+// record of each partition that had a handler error — the rewind point the
+// caller must reset that partition's fetch position to (see rewindFailed).
 //
 // F-030 fidelity: a record is committable ONLY if its handler returned nil AND
 // every earlier record in the SAME partition also succeeded. On the first
 // handler error in a partition, that partition stops (no later record from it
-// is committed), so a later success can never advance the committed offset past
-// a failed one. Per-handler retry/DLQ logic (subtree-fetcher, subtree-worker,
-// block-processor, callback-delivery) classifies the failure and either
-// re-publishes for retry, routes to a DLQ, or returns an error to deliberately
-// stall the partition until the underlying problem resolves — exactly as under
-// sarama's "return error from ConsumeClaim, leave offset uncommitted" model.
+// is committed, and the failed record is reported for rewind), so a later
+// success can never advance the committed offset past a failed one. Per-handler
+// retry/DLQ logic (subtree-fetcher, subtree-worker, block-processor,
+// callback-delivery) classifies the failure and either re-publishes for retry,
+// routes to a DLQ, or returns an error to deliberately stall the partition
+// until the underlying problem resolves — exactly as under sarama's "return
+// error from ConsumeClaim, leave offset uncommitted" model. The stall is only
+// real because the caller rewinds: kgo's fetch position advances independently
+// of commits, so without the rewind the failed record would never be re-polled
+// in this session.
 //
 // metricsHook may be nil (used by unit tests); when non-nil it is called once
 // per record and returns a completion callback invoked after the handler.
@@ -222,9 +297,7 @@ func processRecords(
 	metricsHook func(topic string, valueLen int) func(outcome string, dur time.Duration, handlerErr error),
 	logger *slog.Logger,
 	groupID string,
-) []*kgo.Record {
-	var committable []*kgo.Record
-
+) (committable, failed []*kgo.Record) {
 	fetches.EachPartition(func(p kgo.FetchTopicPartition) {
 		for _, rec := range p.Records {
 			var done func(string, time.Duration, error)
@@ -245,7 +318,7 @@ func processRecords(
 			if err != nil {
 				if logger != nil {
 					logger.Error(
-						"failed to handle message, leaving offset uncommitted",
+						"failed to handle message, rewinding partition to redeliver",
 						"group", groupID,
 						"topic", rec.Topic,
 						"partition", rec.Partition,
@@ -254,14 +327,16 @@ func processRecords(
 					)
 				}
 				// Stop this partition: do not commit this record or any later
-				// record from the same partition (F-030).
+				// record from the same partition (F-030), and report it as the
+				// partition's rewind point.
+				failed = append(failed, rec)
 				return
 			}
 			committable = append(committable, rec)
 		}
 	})
 
-	return committable
+	return committable, failed
 }
 
 func (c *Consumer) signalReady() {
