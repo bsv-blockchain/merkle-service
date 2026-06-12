@@ -115,21 +115,25 @@ type DeliveryService struct {
 	dedupStore    CallbackDeduper
 	stumpStore    store.StumpStore
 
-	// hexCache memoizes the hex encoding of stump blobs by StumpRef. One
-	// subtree's STUMP is delivered to EVERY subscriber registered for its
-	// txids, so without the cache the same ~quarter-MB blob is re-encoded
-	// (and a ~half-MB string re-allocated) once per subscriber — at 100
-	// subscribers that is 100x redundant encode work per subtree on the
-	// delivery hot path. Entries are evicted FIFO at hexCacheMaxEntries.
-	hexMu    sync.Mutex
-	hexCache map[string]string
-	hexOrder []string
+	// bodyCache memoizes the fully-marshaled HTTP body of STUMP callbacks,
+	// keyed by (StumpRef, BlockHash, SubtreeIndex). The auth token travels in
+	// the Authorization HEADER, so the body of one subtree's STUMP callback
+	// is byte-identical for every subscriber registered for its txids —
+	// without the cache the same ~quarter-MB blob was re-fetched,
+	// re-hex-encoded (~half MB), and re-JSON-marshaled (~half MB) once per
+	// subscriber: at 100 subscribers, 100x redundant work and two ~half-MB
+	// allocations per delivery on the hot path. Entries are evicted FIFO at
+	// bodyCacheMaxEntries.
+	bodyMu    sync.Mutex
+	bodyCache map[string][]byte
+	bodyOrder []string
 }
 
-// hexCacheMaxEntries bounds the stump hex cache. Stumps are ~271 KB (hex
-// ~542 KB), so 64 entries caps the cache at ~35 MB while comfortably covering
-// the distinct subtrees in flight during one block's delivery fan-out.
-const hexCacheMaxEntries = 64
+// bodyCacheMaxEntries bounds the STUMP body cache. Bodies are ~545 KB
+// (~271 KB stump, hex-doubled, plus small JSON fields), so 64 entries caps
+// the cache at ~35 MB while comfortably covering the distinct subtrees in
+// flight during one block's delivery fan-out.
+const bodyCacheMaxEntries = 64
 
 // NewDeliveryService creates a new callback DeliveryService. stumpStore is
 // required whenever STUMP-type messages are delivered — it is the claim-check
@@ -139,40 +143,37 @@ func NewDeliveryService(cfg *config.Config, dedupStore CallbackDeduper, stumpSto
 		cfg:        cfg,
 		dedupStore: dedupStore,
 		stumpStore: stumpStore,
-		hexCache:   make(map[string]string, hexCacheMaxEntries),
+		bodyCache:  make(map[string][]byte, bodyCacheMaxEntries),
 	}
 }
 
-// stumpHex returns the hex encoding of stumpBytes, memoized by ref so the
-// per-subscriber delivery fan-out encodes each distinct stump only once.
-func (d *DeliveryService) stumpHex(ref string, stumpBytes []byte) string {
-	d.hexMu.Lock()
-	if s, ok := d.hexCache[ref]; ok {
-		d.hexMu.Unlock()
-		return s
-	}
-	d.hexMu.Unlock()
+// cachedBody returns the memoized body for key, or nil.
+func (d *DeliveryService) cachedBody(key string) []byte {
+	d.bodyMu.Lock()
+	defer d.bodyMu.Unlock()
+	return d.bodyCache[key]
+}
 
-	// Encode outside the lock: ~quarter-MB encodes shouldn't serialize the
-	// per-partition delivery workers behind a mutex.
-	s := hex.EncodeToString(stumpBytes)
-
-	d.hexMu.Lock()
-	defer d.hexMu.Unlock()
-	if d.hexCache == nil {
+// storeBody memoizes body under key with FIFO eviction. The build happens
+// outside the lock (half-MB hex+marshal work must not serialize the
+// per-partition delivery workers); a concurrent duplicate build is harmless —
+// first writer wins.
+func (d *DeliveryService) storeBody(key string, body []byte) {
+	d.bodyMu.Lock()
+	defer d.bodyMu.Unlock()
+	if d.bodyCache == nil {
 		// Lazy init: tests construct DeliveryService via struct literal.
-		d.hexCache = make(map[string]string, hexCacheMaxEntries)
+		d.bodyCache = make(map[string][]byte, bodyCacheMaxEntries)
 	}
-	if _, ok := d.hexCache[ref]; !ok {
-		if len(d.hexOrder) >= hexCacheMaxEntries {
-			oldest := d.hexOrder[0]
-			d.hexOrder = d.hexOrder[1:]
-			delete(d.hexCache, oldest)
+	if _, ok := d.bodyCache[key]; !ok {
+		if len(d.bodyOrder) >= bodyCacheMaxEntries {
+			oldest := d.bodyOrder[0]
+			d.bodyOrder = d.bodyOrder[1:]
+			delete(d.bodyCache, oldest)
 		}
-		d.hexCache[ref] = s
-		d.hexOrder = append(d.hexOrder, ref)
+		d.bodyCache[key] = body
+		d.bodyOrder = append(d.bodyOrder, key)
 	}
-	return s
 }
 
 // Init initializes the delivery service, setting up the Kafka consumer, producers, and HTTP client.
@@ -644,37 +645,51 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 	}
 
 	// STUMP bytes are claim-checked: CallbackTopicMessage carries only a ref,
-	// fetch the blob and hex-encode for the HTTP payload.
+	// fetch the blob and hex-encode for the HTTP payload. The auth token is a
+	// header, so the finished body is identical for every subscriber of this
+	// (block, subtree) — memoize the marshaled bytes and pay the blob fetch,
+	// hex encode, and JSON marshal once per subtree instead of once per
+	// subscriber.
+	var body []byte
 	if msg.Type == kafka.CallbackStump && msg.StumpRef != "" {
 		if d.stumpStore == nil {
 			return errPermanentDelivery(fmt.Errorf("stump store not configured for STUMP delivery"))
 		}
-		stumpStart := time.Now()
-		stumpBytes, err := d.stumpStore.Get(msg.StumpRef)
-		stumpOutcome := metrics.OutcomeSuccess
-		if err != nil {
-			if errors.Is(err, store.ErrStumpNotFound) {
-				stumpOutcome = metrics.OutcomeNotFound
-			} else {
-				stumpOutcome = metrics.OutcomeError
+		bodyKey := msg.StumpRef + "|" + msg.BlockHash + "|" + strconv.Itoa(msg.SubtreeIndex)
+		if body = d.cachedBody(bodyKey); body == nil {
+			stumpStart := time.Now()
+			stumpBytes, err := d.stumpStore.Get(msg.StumpRef)
+			stumpOutcome := metrics.OutcomeSuccess
+			if err != nil {
+				if errors.Is(err, store.ErrStumpNotFound) {
+					stumpOutcome = metrics.OutcomeNotFound
+				} else {
+					stumpOutcome = metrics.OutcomeError
+				}
 			}
-		}
-		metrics.ObserveCallbackStumpFetch(stumpOutcome, time.Since(stumpStart))
-		if err != nil {
-			if errors.Is(err, store.ErrStumpNotFound) {
-				// Blob expired (DAH) or never written — no amount of retry will
-				// produce it. Fail permanently so processDelivery routes to DLQ.
-				metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeStumpNotFound).Inc()
-				return errPermanentDelivery(fmt.Errorf("stump blob missing for ref %s: %w", msg.StumpRef, err))
+			metrics.ObserveCallbackStumpFetch(stumpOutcome, time.Since(stumpStart))
+			if err != nil {
+				if errors.Is(err, store.ErrStumpNotFound) {
+					// Blob expired (DAH) or never written — no amount of retry will
+					// produce it. Fail permanently so processDelivery routes to DLQ.
+					metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeStumpNotFound).Inc()
+					return errPermanentDelivery(fmt.Errorf("stump blob missing for ref %s: %w", msg.StumpRef, err))
+				}
+				return fmt.Errorf("fetching stump ref %s: %w", msg.StumpRef, err)
 			}
-			return fmt.Errorf("fetching stump ref %s: %w", msg.StumpRef, err)
+			payload.Stump = hex.EncodeToString(stumpBytes)
+			body, err = json.Marshal(payload)
+			if err != nil {
+				return fmt.Errorf("failed to marshal callback payload: %w", err)
+			}
+			d.storeBody(bodyKey, body)
 		}
-		payload.Stump = d.stumpHex(msg.StumpRef, stumpBytes)
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal callback payload: %w", err)
+	} else {
+		var err error
+		body, err = json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal callback payload: %w", err)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, msg.CallbackURL, bytes.NewReader(body))
