@@ -243,8 +243,9 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 		DedupCacheSize: 100,
 	}
 	datahubCfg := config.DataHubConfig{
-		TimeoutSec: 30,
-		MaxRetries: 2,
+		TimeoutSec:      30,
+		MaxRetries:      2,
+		AllowPrivateIPs: true, // mock DataHub runs on 127.0.0.1
 	}
 
 	processor := block.NewProcessor(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, urlRegistry, dataHubRegistry, subtreeCounter, logger)
@@ -272,6 +273,7 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 	deliveryCfg := &config.Config{
 		Kafka: kafkaCfg,
 		Callback: config.CallbackConfig{
+			AllowPrivateIPs:     true, // scale callback fleet runs on 127.0.0.1
 			MaxRetries:          5,
 			BackoffBaseSec:      1,
 			TimeoutSec:          10,
@@ -313,6 +315,7 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 
 	// Collect metrics.
 	report := collectMetrics(fleet, t0)
+	report.ManifestTxids = manifest.TotalTxids
 	printReport(t, report)
 
 	// Run verifications.

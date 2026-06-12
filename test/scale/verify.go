@@ -10,15 +10,21 @@ import (
 )
 
 // waitForAllCallbacks blocks until all expected callbacks are received or timeout.
+//
+// The modern pipeline emits ONE batched STUMP (MINED) callback per (subtree,
+// callbackURL) — the payload identifies the subtree and carries the proof; it
+// does not enumerate txids. So the wait target is the expected PAYLOAD count
+// derived from the manifest (one per subtree containing >=1 of the arcade's
+// txids), plus exactly one BLOCK_PROCESSED per arcade. Txid-level
+// completeness is asserted afterwards by verifyMinedCompleteness.
 func waitForAllCallbacks(t *testing.T, fleet *CallbackFleet, manifest *Manifest, timeout time.Duration) {
 	t.Helper()
 
-	// Expected: each arcade instance gets some number of MINED callbacks (one per subtree
-	// that contains its txids) and exactly 1 BLOCK_PROCESSED callback.
-	// Total MINED txids across all servers should equal manifest.TotalTxids.
-	// Total BLOCK_PROCESSED callbacks should equal len(manifest.ArcadeInstances).
 	expectedBP := int64(len(manifest.ArcadeInstances))
-	expectedMinedTxids := int64(manifest.TotalTxids)
+	var expectedMined int64
+	for _, set := range expectedMinedPayloadsPerArcade(manifest) {
+		expectedMined += int64(len(set))
+	}
 
 	deadline := time.After(timeout)
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -28,82 +34,102 @@ func waitForAllCallbacks(t *testing.T, fleet *CallbackFleet, manifest *Manifest,
 		select {
 		case <-deadline:
 			// Report what we have.
-			var gotMinedTxids int64
+			var gotMined int64
 			var gotBP int64
 			for i := 0; i < fleet.Count(); i++ {
 				stats := fleet.GetServer(i).Stats()
-				gotMinedTxids += int64(stats.TotalTxids)
+				gotMined += int64(stats.MinedCallbacks)
 				gotBP += int64(stats.BlockProcessed)
 			}
-			t.Fatalf("timeout after %v waiting for callbacks: got %d/%d MINED txids, %d/%d BLOCK_PROCESSED",
-				timeout, gotMinedTxids, expectedMinedTxids, gotBP, expectedBP)
+			t.Fatalf("timeout after %v waiting for callbacks: got %d/%d MINED payloads, %d/%d BLOCK_PROCESSED",
+				timeout, gotMined, expectedMined, gotBP, expectedBP)
 			return
 
 		case <-ticker.C:
-			var totalMinedTxids int64
+			var totalMined int64
 			var totalBP int64
 			for i := 0; i < fleet.Count(); i++ {
 				stats := fleet.GetServer(i).Stats()
-				totalMinedTxids += int64(stats.TotalTxids)
+				totalMined += int64(stats.MinedCallbacks)
 				totalBP += int64(stats.BlockProcessed)
 			}
-			if totalMinedTxids >= expectedMinedTxids && totalBP >= expectedBP {
-				t.Logf("all callbacks received: %d MINED txids, %d BLOCK_PROCESSED", totalMinedTxids, totalBP)
+			if totalMined >= expectedMined && totalBP >= expectedBP {
+				t.Logf("all callbacks received: %d MINED payloads, %d BLOCK_PROCESSED", totalMined, totalBP)
 				return
 			}
 		}
 	}
 }
 
+// expectedMinedPayloadsPerArcade returns, for each arcade index, the set of
+// subtree indices that contain at least one of the arcade's registered txids
+// ([TxidStart, TxidEnd) global-index range). One batched STUMP callback is
+// expected per entry.
+func expectedMinedPayloadsPerArcade(manifest *Manifest) map[int]map[int]bool {
+	out := make(map[int]map[int]bool, len(manifest.ArcadeInstances))
+	for _, a := range manifest.ArcadeInstances {
+		set := make(map[int]bool)
+		for _, st := range manifest.Subtrees {
+			for _, idx := range st.TxidIndices {
+				if idx >= a.TxidStart && idx < a.TxidEnd {
+					set[st.Index] = true
+					break
+				}
+			}
+		}
+		out[a.Index] = set
+	}
+	return out
+}
+
 // verifyMinedCompleteness checks that each arcade instance received exactly its registered txids.
 func verifyMinedCompleteness(t *testing.T, fleet *CallbackFleet, manifest *Manifest, txids [][]byte) {
 	t.Helper()
+
+	expectedPerArcade := expectedMinedPayloadsPerArcade(manifest)
 
 	for _, arcade := range manifest.ArcadeInstances {
 		server := fleet.GetServer(arcade.Index)
 		payloads := server.MinedPayloads()
 
-		// Collect all txids received by this server (one per STUMP callback).
-		received := make(map[string]bool)
+		// One batched STUMP callback per subtree containing the arcade's
+		// txids: completeness is per-subtree coverage, not per-txid (the
+		// payload carries the proof, not a txid list).
+		received := make(map[int]bool)
 		for _, p := range payloads {
-			if p.TxID != "" {
-				received[p.TxID] = true
-			}
+			received[p.SubtreeIndex] = true
 		}
 
-		// Build expected set from manifest.
-		expected := txidSetForArcade(arcade, txids)
+		expected := expectedPerArcade[arcade.Index]
 
-		// Check for missing txids.
 		missing := 0
-		for txid := range expected {
-			if !received[txid] {
+		for idx := range expected {
+			if !received[idx] {
 				missing++
 				if missing <= 5 {
-					t.Errorf("arcade %d: missing txid %s", arcade.Index, txid)
+					t.Errorf("arcade %d: missing STUMP callback for subtree %d", arcade.Index, idx)
 				}
 			}
 		}
 		if missing > 5 {
-			t.Errorf("arcade %d: %d more missing txids (showing first 5)", arcade.Index, missing-5)
+			t.Errorf("arcade %d: %d more missing subtrees (showing first 5)", arcade.Index, missing-5)
 		}
 
-		// Check for unexpected txids.
 		unexpected := 0
-		for txid := range received {
-			if !expected[txid] {
+		for idx := range received {
+			if !expected[idx] {
 				unexpected++
 				if unexpected <= 5 {
-					t.Errorf("arcade %d: unexpected txid %s", arcade.Index, txid)
+					t.Errorf("arcade %d: unexpected STUMP callback for subtree %d", arcade.Index, idx)
 				}
 			}
 		}
 		if unexpected > 5 {
-			t.Errorf("arcade %d: %d more unexpected txids (showing first 5)", arcade.Index, unexpected-5)
+			t.Errorf("arcade %d: %d more unexpected subtrees (showing first 5)", arcade.Index, unexpected-5)
 		}
 
 		if len(received) != len(expected) {
-			t.Errorf("arcade %d: expected %d txids, got %d", arcade.Index, len(expected), len(received))
+			t.Errorf("arcade %d: expected STUMP callbacks for %d subtrees, got %d", arcade.Index, len(expected), len(received))
 		}
 	}
 }
@@ -116,24 +142,23 @@ func verifyMinedNoDuplicates(t *testing.T, fleet *CallbackFleet, manifest *Manif
 		server := fleet.GetServer(arcade.Index)
 		payloads := server.MinedPayloads()
 
-		seen := make(map[string]int)
+		// One batched STUMP callback per subtree: duplicates key on subtree.
+		seen := make(map[int]int)
 		for _, p := range payloads {
-			if p.TxID != "" {
-				seen[p.TxID]++
-			}
+			seen[p.SubtreeIndex]++
 		}
 
 		dupes := 0
-		for txid, count := range seen {
+		for idx, count := range seen {
 			if count > 1 {
 				dupes++
 				if dupes <= 5 {
-					t.Errorf("arcade %d: duplicate txid %s (count=%d)", arcade.Index, txid, count)
+					t.Errorf("arcade %d: duplicate STUMP callback for subtree %d (count=%d)", arcade.Index, idx, count)
 				}
 			}
 		}
 		if dupes > 5 {
-			t.Errorf("arcade %d: %d more duplicate txids", arcade.Index, dupes-5)
+			t.Errorf("arcade %d: %d more duplicate subtrees", arcade.Index, dupes-5)
 		}
 	}
 }

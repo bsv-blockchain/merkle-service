@@ -16,11 +16,12 @@ import (
 
 // callbackPayload mirrors the JSON body delivered by the callback service (Arcade's CallbackMessage).
 type callbackPayload struct {
-	Type         string `json:"type"`
-	TxID         string `json:"txid,omitempty"`
-	BlockHash    string `json:"blockHash,omitempty"`
-	SubtreeIndex int    `json:"subtreeIndex,omitempty"`
-	Stump        string `json:"stump,omitempty"`
+	Type         string   `json:"type"`
+	TxID         string   `json:"txid,omitempty"`
+	TxIDs        []string `json:"txids,omitempty"`
+	BlockHash    string   `json:"blockHash,omitempty"`
+	SubtreeIndex int      `json:"subtreeIndex,omitempty"`
+	Stump        string   `json:"stump,omitempty"`
 }
 
 // CallbackServer is an HTTP server that collects callback payloads for one Arcade instance.
@@ -119,7 +120,14 @@ func (cs *CallbackServer) BlockProcessedPayloads() []callbackPayload {
 func (cs *CallbackServer) Stats() ServerStats {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	totalTxids := len(cs.minedPayloads) // one txid per STUMP callback
+	totalTxids := 0 // batched callbacks carry a txid list; legacy payloads carry a single txid
+	for _, p := range cs.minedPayloads {
+		if n := len(p.TxIDs); n > 0 {
+			totalTxids += n
+		} else if p.TxID != "" {
+			totalTxids++
+		}
+	}
 	return ServerStats{
 		Port:           cs.port,
 		MinedCallbacks: len(cs.minedPayloads),
