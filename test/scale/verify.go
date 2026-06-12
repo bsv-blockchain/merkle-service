@@ -172,13 +172,18 @@ func verifyStumpValidity(t *testing.T, fleet *CallbackFleet, manifest *Manifest)
 		payloads := server.MinedPayloads()
 
 		for i, p := range payloads {
-			if p.Stump == "" {
+			stumpHex, err := p.StumpHex()
+			if err != nil {
+				t.Errorf("arcade %d, STUMP callback %d: invalid stump JSON: %v", arcade.Index, i, err)
+				continue
+			}
+			if stumpHex == "" {
 				t.Errorf("arcade %d, STUMP callback %d: empty stump", arcade.Index, i)
 				continue
 			}
 
 			// Decode hex (Arcade's HexBytes format).
-			stumpBytes, err := hex.DecodeString(p.Stump)
+			stumpBytes, err := hex.DecodeString(stumpHex)
 			if err != nil {
 				t.Errorf("arcade %d, STUMP callback %d: invalid hex stump: %v", arcade.Index, i, err)
 				continue
@@ -266,10 +271,15 @@ func verifyNoSpuriousCallbacks(t *testing.T, fleet *CallbackFleet, manifest *Man
 
 	var totalMined, totalBP, totalOther int64
 	for i := 0; i < fleet.Count(); i++ {
-		stats := fleet.GetServer(i).Stats()
+		server := fleet.GetServer(i)
+		stats := server.Stats()
+		// SEEN-type callbacks are a legitimate pipeline product when the
+		// subtree-fetcher stage runs (production-shape test); only payloads
+		// outside the three known families are spurious.
+		seenPayloads, _ := server.SeenCounts()
 		totalMined += int64(stats.MinedCallbacks)
 		totalBP += int64(stats.BlockProcessed)
-		totalOther = stats.TotalCallbacks - int64(stats.MinedCallbacks) - int64(stats.BlockProcessed)
+		totalOther = stats.TotalCallbacks - int64(stats.MinedCallbacks) - int64(stats.BlockProcessed) - int64(seenPayloads)
 		if totalOther > 0 {
 			t.Errorf("server %d: received %d unexpected callbacks", i, totalOther)
 		}

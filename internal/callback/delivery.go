@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -113,7 +114,22 @@ type DeliveryService struct {
 	httpClient    *http.Client
 	dedupStore    CallbackDeduper
 	stumpStore    store.StumpStore
+
+	// hexCache memoizes the hex encoding of stump blobs by StumpRef. One
+	// subtree's STUMP is delivered to EVERY subscriber registered for its
+	// txids, so without the cache the same ~quarter-MB blob is re-encoded
+	// (and a ~half-MB string re-allocated) once per subscriber — at 100
+	// subscribers that is 100x redundant encode work per subtree on the
+	// delivery hot path. Entries are evicted FIFO at hexCacheMaxEntries.
+	hexMu    sync.Mutex
+	hexCache map[string]string
+	hexOrder []string
 }
+
+// hexCacheMaxEntries bounds the stump hex cache. Stumps are ~271 KB (hex
+// ~542 KB), so 64 entries caps the cache at ~35 MB while comfortably covering
+// the distinct subtrees in flight during one block's delivery fan-out.
+const hexCacheMaxEntries = 64
 
 // NewDeliveryService creates a new callback DeliveryService. stumpStore is
 // required whenever STUMP-type messages are delivered — it is the claim-check
@@ -123,7 +139,40 @@ func NewDeliveryService(cfg *config.Config, dedupStore CallbackDeduper, stumpSto
 		cfg:        cfg,
 		dedupStore: dedupStore,
 		stumpStore: stumpStore,
+		hexCache:   make(map[string]string, hexCacheMaxEntries),
 	}
+}
+
+// stumpHex returns the hex encoding of stumpBytes, memoized by ref so the
+// per-subscriber delivery fan-out encodes each distinct stump only once.
+func (d *DeliveryService) stumpHex(ref string, stumpBytes []byte) string {
+	d.hexMu.Lock()
+	if s, ok := d.hexCache[ref]; ok {
+		d.hexMu.Unlock()
+		return s
+	}
+	d.hexMu.Unlock()
+
+	// Encode outside the lock: ~quarter-MB encodes shouldn't serialize the
+	// per-partition delivery workers behind a mutex.
+	s := hex.EncodeToString(stumpBytes)
+
+	d.hexMu.Lock()
+	defer d.hexMu.Unlock()
+	if d.hexCache == nil {
+		// Lazy init: tests construct DeliveryService via struct literal.
+		d.hexCache = make(map[string]string, hexCacheMaxEntries)
+	}
+	if _, ok := d.hexCache[ref]; !ok {
+		if len(d.hexOrder) >= hexCacheMaxEntries {
+			oldest := d.hexOrder[0]
+			d.hexOrder = d.hexOrder[1:]
+			delete(d.hexCache, oldest)
+		}
+		d.hexCache[ref] = s
+		d.hexOrder = append(d.hexOrder, ref)
+	}
+	return s
 }
 
 // Init initializes the delivery service, setting up the Kafka consumer, producers, and HTTP client.
@@ -620,7 +669,7 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 			}
 			return fmt.Errorf("fetching stump ref %s: %w", msg.StumpRef, err)
 		}
-		payload.Stump = hex.EncodeToString(stumpBytes)
+		payload.Stump = d.stumpHex(msg.StumpRef, stumpBytes)
 	}
 
 	body, err := json.Marshal(payload)
