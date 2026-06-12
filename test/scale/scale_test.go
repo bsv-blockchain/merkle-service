@@ -239,7 +239,7 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 	}
 	blockCfg := config.BlockConfig{
 		WorkerPoolSize: 10,
-		PostMineTTLSec: 0,
+		PostMineTTLSec: 1800, // production default (config.yaml postMineTTLSec)
 		DedupCacheSize: 100,
 	}
 	datahubCfg := config.DataHubConfig{
