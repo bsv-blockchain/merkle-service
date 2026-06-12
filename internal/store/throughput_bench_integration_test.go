@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -182,5 +183,84 @@ func TestBatchGet_BeyondServerBatchLimit(t *testing.T) {
 	want := (total + 999) / 1000
 	if len(got) != want {
 		t.Fatalf("BatchGet returned %d registered txids, want %d", len(got), want)
+	}
+}
+
+// TestBatchIncrement_ConcurrentThresholdFiresOnce is the F-045 guarantee
+// under the new batched path: several workers BatchIncrement the SAME txids
+// for DIFFERENT subtrees concurrently, and for every txid exactly ONE caller
+// across all workers and batches must observe ThresholdReached=true. This is
+// the question a reviewer should ask of the two-phase design: phase 1's bulk
+// append is not atomic with the threshold check, so the exactly-once property
+// rests entirely on phase 2's generation-CAS — prove it.
+func TestBatchIncrement_ConcurrentThresholdFiresOnce(t *testing.T) {
+	host := os.Getenv("AEROSPIKE_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	port := 3000
+	if p := os.Getenv("AEROSPIKE_PORT"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil {
+			port = v
+		}
+	}
+	ns := os.Getenv("AEROSPIKE_NAMESPACE")
+	if ns == "" {
+		ns = "merkle"
+	}
+	client, err := store.NewAerospikeClient(host, port, ns, 3, 100, slog.Default())
+	if err != nil {
+		t.Skipf("Aerospike not available: %v", err)
+	}
+	defer client.Close()
+
+	const (
+		workers   = 8 // concurrent subtree observations
+		txidCount = 200
+		threshold = 3
+	)
+	setName := fmt.Sprintf("bench_f045_%d", time.Now().UnixNano())
+	sc := store.NewSeenCounterStore(client, setName, threshold, 3, 100, slog.Default())
+	txids := benchTxids("f045", txidCount)
+
+	type fireCount struct {
+		mu    sync.Mutex
+		fires map[string]int
+	}
+	fc := &fireCount{fires: make(map[string]int)}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			// Every worker reports the same txids from a distinct subtree, all
+			// racing through phase 1 appends and phase 2 CAS at once.
+			results, err := sc.BatchIncrement(txids, fmt.Sprintf("subtree-%d", worker))
+			if err != nil {
+				errCh <- err
+				return
+			}
+			fc.mu.Lock()
+			defer fc.mu.Unlock()
+			for txid, res := range results {
+				if res.ThresholdReached {
+					fc.fires[txid]++
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("BatchIncrement: %v", err)
+	}
+
+	// workers(8) >= threshold(3): every txid must have crossed, and exactly once.
+	for _, txid := range txids {
+		if got := fc.fires[txid]; got != 1 {
+			t.Errorf("txid %s: ThresholdReached observed %d times across concurrent batches, want exactly 1 (F-045)", txid, got)
+		}
 	}
 }
