@@ -66,6 +66,13 @@ func consumerOpts(brokers []string, groupID string, topics []string) []kgo.Opt {
 		kgo.HeartbeatInterval(3 * time.Second),
 		kgo.RebalanceTimeout(60 * time.Second),
 		kgo.FetchMaxWait(100 * time.Millisecond),
+		// Sarama parity: sarama's default config sets
+		// Metadata.AllowAutoTopicCreation=true, so consumers of a
+		// not-yet-existing topic triggered broker-side auto-creation and
+		// received partitions once created. kgo defaults this OFF; without it
+		// a consumer group over a missing topic joins with an empty
+		// assignment and Start blocks on readiness forever.
+		kgo.AllowAutoTopicCreation(),
 	}
 }
 

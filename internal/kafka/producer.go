@@ -172,6 +172,10 @@ func NewProducer(brokers []string, topic string, logger *slog.Logger) (*Producer
 		// clamp (teranode #660) so the cap can never accidentally fall to a value
 		// that rejects normal records. Brokers must set message.max.bytes >= this.
 		kgo.ProducerBatchMaxBytes(clampBatchMaxBytes(10 * 1024 * 1024)),
+		// Sarama parity: sarama's default Metadata.AllowAutoTopicCreation=true
+		// auto-created topics on first produce; kgo defaults this off and
+		// fails with UNKNOWN_TOPIC_OR_PARTITION instead.
+		kgo.AllowAutoTopicCreation(),
 		// Default partitioner hashes a non-nil key and round-robins a nil key —
 		// equivalent to sarama.NewHashPartitioner for our always-keyed produces.
 	}
