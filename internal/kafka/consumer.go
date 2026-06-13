@@ -92,6 +92,19 @@ type Consumer struct {
 // correct: the handlers are idempotent and the backlog must be processed, never
 // dropped.
 func NewConsumer(brokers []string, groupID string, topics []string, handler MessageHandler, logger *slog.Logger) (*Consumer, error) {
+	// Ensure the subscribed topics exist before joining the group, so partition
+	// assignment is immediate rather than waiting for a metadata refresh to
+	// discover a lazily-auto-created topic (see EnsureTopics — this is what left
+	// /reprocess block messages unconsumed under franz). Best-effort: a transient
+	// failure is logged, not fatal — the consumer still works via metadata
+	// refresh + producer-side auto-creation, just less promptly.
+	ensureCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if eErr := EnsureTopics(ensureCtx, brokers, topics, logger); eErr != nil && logger != nil {
+		logger.Warn("could not pre-create consumer topics; relying on auto-create",
+			"groupID", groupID, "topics", topics, "error", eErr)
+	}
+	cancel()
+
 	client, err := kgo.NewClient(consumerOpts(brokers, groupID, topics)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create consumer group %s: %w", groupID, err)
