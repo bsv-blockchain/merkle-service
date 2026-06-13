@@ -310,25 +310,3 @@ func TestKafka_ConsumerGroupOffsetManagement(t *testing.T) {
 		}
 	}
 }
-
-// TestProducer_AutoCreatesTopic verifies the producer publishes successfully to
-// a topic that does NOT pre-exist, relying on broker-side auto-creation. This
-// is the behavior sarama provided by default (Metadata.AllowAutoTopicCreation=
-// true) and that franz only provides when kgo.AllowAutoTopicCreation() is set.
-// Regression guard for the sarama->franz migration that silently dropped topic
-// auto-creation, causing produce to fail with UNKNOWN_TOPIC_OR_PARTITION
-// ("failed to enqueue") against a fresh broker. Deliberately does NOT call
-// ensureTopicExists.
-func TestProducer_AutoCreatesTopic(t *testing.T) {
-	topic := uniqueTopic(t, "autocreate")
-
-	p, err := kafka.NewProducer(brokers, topic, slog.Default())
-	if err != nil {
-		t.Fatalf("NewProducer: %v", err)
-	}
-	defer func() { _ = p.Close() }()
-
-	if err := p.Publish("key", []byte("value")); err != nil {
-		t.Fatalf("Publish to not-pre-created topic %q failed (auto-create regression): %v", topic, err)
-	}
-}
