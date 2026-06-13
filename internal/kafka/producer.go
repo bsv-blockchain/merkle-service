@@ -136,6 +136,17 @@ func NewProducer(brokers []string, topic string, logger *slog.Logger) (*Producer
 		kgo.ProducerBatchMaxBytes(clampBatchMaxBytes(10 * 1024 * 1024)),
 		// Default partitioner hashes a non-nil key and round-robins a nil key —
 		// equivalent to sarama.NewHashPartitioner for our always-keyed produces.
+		//
+		// Restore implicit broker-side topic auto-creation. sarama defaulted
+		// Metadata.AllowAutoTopicCreation=true, so a produce to a not-yet-created
+		// topic triggered the broker (with auto.create.topics.enable=true) to
+		// create it; merkle-service relies on that — it never creates its topics
+		// in production code (only the integration test uses an admin client).
+		// franz defaults this OFF, so without it the first produce to a fresh
+		// broker fails with UNKNOWN_TOPIC_OR_PARTITION ("failed to enqueue") and
+		// consumers find no topic — exactly the round-trip regression introduced
+		// by the sarama->franz migration.
+		kgo.AllowAutoTopicCreation(),
 	}
 
 	client, err := kgo.NewClient(opts...)

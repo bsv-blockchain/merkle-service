@@ -52,6 +52,12 @@ func consumerOpts(brokers []string, groupID string, topics []string) []kgo.Opt {
 		kgo.HeartbeatInterval(3 * time.Second),
 		kgo.RebalanceTimeout(60 * time.Second),
 		kgo.FetchMaxWait(100 * time.Millisecond),
+		// Restore implicit broker-side topic auto-creation (sarama defaulted
+		// Metadata.AllowAutoTopicCreation=true). merkle-service does not create
+		// its topics in production code and relies on broker auto-create; without
+		// this a consumer group on a fresh broker never triggers creation of a
+		// topic that no producer has touched yet. Matches the producer option.
+		kgo.AllowAutoTopicCreation(),
 	}
 }
 
