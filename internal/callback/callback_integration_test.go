@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -33,7 +34,25 @@ func uniqueTopic(t *testing.T, prefix string) string {
 	return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
 }
 
+// requireKafka skips fast when no broker is reachable. franz dials lazily and
+// self-heals an unreachable broker by retrying indefinitely, so without this
+// probe these tests would otherwise burn their whole context timeout waiting on
+// a dead broker before skipping.
+func requireKafka(t *testing.T) {
+	t.Helper()
+	for _, b := range brokers {
+		conn, err := net.DialTimeout("tcp", b, time.Second)
+		if err == nil {
+			conn.Close()
+			return
+		}
+	}
+	t.Skipf("Kafka not reachable at %v; skipping", brokers)
+}
+
 func TestCallbackDelivery_SuccessfulCallback(t *testing.T) {
+	requireKafka(t)
+
 	stumpsTopic := uniqueTopic(t, "cb_stumps")
 	dlqTopic := uniqueTopic(t, "cb_dlq")
 
@@ -132,6 +151,8 @@ func TestCallbackDelivery_SuccessfulCallback(t *testing.T) {
 }
 
 func TestCallbackDelivery_RetryOnFailure(t *testing.T) {
+	requireKafka(t)
+
 	stumpsTopic := uniqueTopic(t, "cb_retry_stumps")
 	dlqTopic := uniqueTopic(t, "cb_retry_dlq")
 
