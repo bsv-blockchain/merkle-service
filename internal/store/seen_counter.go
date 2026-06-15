@@ -159,3 +159,136 @@ func (s *aerospikeSeenCounter) Increment(txid, subtreeID string) (*IncrementResu
 func (s *aerospikeSeenCounter) Threshold() int {
 	return s.threshold
 }
+
+// BatchIncrement records that every txid in txids was seen in subtreeID using
+// two batched phases instead of 2 serial RTTs per txid (throughput review
+// F-4: the sequential Increment loop capped the SEEN path at ~500-1000
+// txids/s per instance):
+//
+//	Phase 1 (bulk, common case): one chunked BatchOperate appends subtreeID to
+//	every txid's unique-subtree list (idempotent: AddUnique|NoFail), then one
+//	chunked BatchGet reads back each record's list size and threshold-fired
+//	flag. Two batch round-trips per 5000 txids.
+//
+//	Phase 2 (rare): only txids whose count has reached the threshold WITHOUT
+//	the fired flag set are candidates for the exactly-once 0->1 transition.
+//	Each candidate goes through the existing generation-CAS Increment, which
+//	preserves the F-045 guarantee: when several workers race, exactly one
+//	observes ThresholdReached=true. A txid crosses the threshold at most once
+//	in its lifetime, so phase 2 is empty in steady state.
+//
+// Returns a result for every txid that succeeded plus the first error
+// encountered (F-058 partial-success contract: the caller emits callbacks for
+// returned results and surfaces the error so the subtree is redelivered; all
+// operations here are idempotent under re-runs).
+func (s *aerospikeSeenCounter) BatchIncrement(txids []string, subtreeID string) (map[string]*IncrementResult, error) {
+	results := make(map[string]*IncrementResult, len(txids))
+	if len(txids) == 0 {
+		return results, nil
+	}
+
+	var firstErr error
+	saveErr := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	for _, chunk := range chunkSlice(txids, aerospikeBatchChunkSize) {
+		if err := s.batchIncrementChunk(chunk, subtreeID, results); err != nil {
+			saveErr(err)
+		}
+	}
+	return results, firstErr
+}
+
+// batchIncrementChunk runs both phases for one <=aerospikeBatchChunkSize chunk.
+func (s *aerospikeSeenCounter) batchIncrementChunk(txids []string, subtreeID string, results map[string]*IncrementResult) error {
+	keys := make([]*as.Key, len(txids))
+	for i, txid := range txids {
+		key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
+		if err != nil {
+			return fmt.Errorf("failed to create key for %s: %w", txid, err)
+		}
+		keys[i] = key
+	}
+
+	// Phase 1a: idempotent bulk append of subtreeID to every txid's list.
+	listPolicy := as.NewListPolicy(as.ListOrderUnordered, as.ListWriteFlagsAddUnique|as.ListWriteFlagsNoFail)
+	batchRecs := make([]as.BatchRecordIfc, len(keys))
+	for i, key := range keys {
+		batchRecs[i] = as.NewBatchWrite(nil, key,
+			as.ListAppendWithPolicyOp(listPolicy, seenSubtreesBin, subtreeID),
+		)
+	}
+	bp := s.client.BatchPolicy(s.maxRetries, s.retryBaseMs)
+	if err := s.client.Client().BatchOperate(bp, batchRecs); err != nil {
+		return fmt.Errorf("batch append seen counters: %w", err)
+	}
+
+	// Per-key append failures: skip those txids (no result entry) and surface
+	// the first error; the caller's redelivery re-runs the whole idempotent batch.
+	appendOK := make([]bool, len(keys))
+	var firstErr error
+	for i, br := range batchRecs {
+		if err := br.BatchRec().Err; err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("batch append seen counter for %s: %w", txids[i], err)
+			}
+			continue
+		}
+		appendOK[i] = true
+	}
+
+	// Phase 1b: bulk read-back of list size + fired flag.
+	records, err := s.client.Client().BatchGet(bp, keys, seenSubtreesBin, seenThresholdFired)
+	if err != nil {
+		if firstErr == nil {
+			firstErr = fmt.Errorf("batch read seen counters: %w", err)
+		}
+		return firstErr
+	}
+
+	for i, record := range records {
+		if !appendOK[i] {
+			continue
+		}
+		if record == nil {
+			// Appended in 1a but missing in 1b (expired between phases, or a
+			// per-key read miss). Treat as a per-key failure for redelivery.
+			if firstErr == nil {
+				firstErr = fmt.Errorf("seen counter for %s missing after batch append", txids[i])
+			}
+			continue
+		}
+
+		size := 0
+		if list, ok := record.Bins[seenSubtreesBin].([]interface{}); ok {
+			size = len(list)
+		}
+		fired := false
+		if firedVal, ok := record.Bins[seenThresholdFired].(int); ok && firedVal == 1 {
+			fired = true
+		}
+
+		if size >= s.threshold && !fired {
+			// Phase 2: candidate for the exactly-once threshold transition.
+			// Delegate to the generation-CAS Increment (idempotent re-append +
+			// atomic 0->1 flip); if a concurrent worker fires first, this call
+			// returns ThresholdReached=false (F-045).
+			res, incErr := s.Increment(txids[i], subtreeID)
+			if incErr != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("firing threshold for %s: %w", txids[i], incErr)
+				}
+				continue
+			}
+			results[txids[i]] = res
+			continue
+		}
+
+		results[txids[i]] = &IncrementResult{NewCount: size, ThresholdReached: false}
+	}
+
+	return firstErr
+}

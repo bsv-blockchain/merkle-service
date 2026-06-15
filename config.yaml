@@ -308,11 +308,6 @@ callback:
   # Env: CALLBACK_DEDUP_TTL_SEC
   dedupTTLSec: 86400
 
-  # Number of concurrent worker goroutines for HTTP callback delivery.
-  # Higher values improve throughput for I/O-bound delivery to many endpoints.
-  # Env: CALLBACK_DELIVERY_WORKERS
-  deliveryWorkers: 64
-
   # Maximum concurrent HTTP connections per callback endpoint.
   # Env: CALLBACK_MAX_CONNS_PER_HOST
   maxConnsPerHost: 32

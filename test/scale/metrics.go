@@ -20,6 +20,12 @@ type MetricsReport struct {
 	TotalWallClock time.Duration // total test duration
 	ServerStats    []ServerStats
 
+	// ManifestTxids is the txid total from the fixture manifest. Batched STUMP
+	// payloads do not enumerate txids, so per-payload counting cannot recover
+	// the txid volume; completeness is verified separately, making the
+	// manifest total the correct numerator for txid throughput.
+	ManifestTxids int
+
 	// Phase timings.
 	BlockProcessingTime    time.Duration // T0→T1: time until first callback (proxy for block processing)
 	CallbackDeliverySpread time.Duration // T1→T2: spread of MINED callback delivery
@@ -120,6 +126,9 @@ func printReport(t *testing.T, report *MetricsReport) {
 		totalBP += s.BlockProcessed
 		totalTxids += s.TotalTxids
 		totalBytes += s.TotalBytes
+	}
+	if totalTxids == 0 {
+		totalTxids = report.ManifestTxids
 	}
 
 	var sb strings.Builder

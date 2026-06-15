@@ -270,7 +270,6 @@ type CallbackConfig struct {
 	TimeoutSec          int `yaml:"timeoutSec"          mapstructure:"timeoutsec"`
 	SeenThreshold       int `yaml:"seenThreshold"       mapstructure:"seenthreshold"`
 	DedupTTLSec         int `yaml:"dedupTTLSec"         mapstructure:"dedupttlsec"`
-	DeliveryWorkers     int `yaml:"deliveryWorkers"     mapstructure:"deliveryworkers"`
 	MaxConnsPerHost     int `yaml:"maxConnsPerHost"     mapstructure:"maxconnsperhost"`
 	MaxIdleConnsPerHost int `yaml:"maxIdleConnsPerHost" mapstructure:"maxidleconnsperhost"`
 	// AllowPrivateIPs disables the SSRF guard that normally rejects
@@ -444,7 +443,6 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("callback.timeoutsec", 10)
 	v.SetDefault("callback.seenthreshold", 3)
 	v.SetDefault("callback.dedupttlsec", 86400)
-	v.SetDefault("callback.deliveryworkers", 64)
 	v.SetDefault("callback.maxconnsperhost", 32)
 	v.SetDefault("callback.maxidleconnsperhost", 16)
 	v.SetDefault("callback.allowprivateips", false)
@@ -580,7 +578,6 @@ func bindEnvVars(v *viper.Viper) {
 		"callback.timeoutsec":          "CALLBACK_TIMEOUT_SEC",
 		"callback.seenthreshold":       "CALLBACK_SEEN_THRESHOLD",
 		"callback.dedupttlsec":         "CALLBACK_DEDUP_TTL_SEC",
-		"callback.deliveryworkers":     "CALLBACK_DELIVERY_WORKERS",
 		"callback.maxconnsperhost":     "CALLBACK_MAX_CONNS_PER_HOST",
 		"callback.maxidleconnsperhost": "CALLBACK_MAX_IDLE_CONNS_PER_HOST",
 		"callback.allowprivateips":     "CALLBACK_ALLOW_PRIVATE_IPS",

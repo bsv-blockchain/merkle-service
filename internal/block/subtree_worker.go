@@ -507,10 +507,14 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 	}
 
 	// Track the first error so the caller can re-drive the whole work item,
-	// while still attempting the remaining URLs (each callback target is
-	// independent — a hiccup on one shouldn't deny delivery to the others on
-	// this attempt).
+	// while still encoding the remaining URLs (each callback target is
+	// independent — an encode hiccup on one shouldn't deny delivery to the
+	// others on this attempt). Valid messages go out in ONE batch publish
+	// (throughput review F-6) instead of one broker-acked RTT per URL; a batch
+	// error re-drives the work item, and the delivery-side dedup absorbs any
+	// records that did land.
 	var firstErr error
+	entries := make([]kafka.BatchEntry, 0, len(result.CallbackGroups))
 	for callbackURL := range result.CallbackGroups {
 		msg := &kafka.CallbackTopicMessage{
 			CallbackURL:   callbackURL,
@@ -530,12 +534,13 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 			}
 			continue
 		}
-		if pubErr := s.callbackProducer.PublishWithHashKey(msg.PartitionKey(), data); pubErr != nil {
-			s.Logger.Error("failed to publish STUMP callback",
-				"callbackURL", callbackURL, "error", pubErr)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("publishing STUMP callback for %s: %w", callbackURL, pubErr)
-			}
+		entries = append(entries, kafka.HashBatchEntry(msg.PartitionKey(), data))
+	}
+	if pubErr := s.callbackProducer.PublishBatch(entries); pubErr != nil {
+		s.Logger.Error("failed to publish STUMP callback batch",
+			"count", len(entries), "error", pubErr)
+		if firstErr == nil {
+			firstErr = fmt.Errorf("publishing STUMP callback batch (%d URLs): %w", len(entries), pubErr)
 		}
 	}
 	return firstErr
@@ -565,7 +570,7 @@ func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overri
 // callbackPublisher is the narrow surface emitBlockProcessedCallbacks needs.
 // Implemented by *kafka.Producer in production; mocked in tests.
 type callbackPublisher interface {
-	PublishWithHashKey(key string, value []byte) error
+	PublishBatch(entries []kafka.BatchEntry) error
 }
 
 // emitBlockProcessedCallbacks publishes BLOCK_PROCESSED messages to every
@@ -621,6 +626,7 @@ func emitBlockProcessedCallbacks(
 	}
 
 	var firstErr error
+	batch := make([]kafka.BatchEntry, 0, len(entries))
 	for _, entry := range entries {
 		msg := &kafka.CallbackTopicMessage{
 			CallbackURL:   entry.URL,
@@ -650,15 +656,20 @@ func emitBlockProcessedCallbacks(
 			}
 			continue
 		}
-		if pubErr := producer.PublishWithHashKey(msg.PartitionKey(), data); pubErr != nil {
-			logger.Error(
-				"failed to publish BLOCK_PROCESSED callback",
-				"callbackURL", entry.URL,
-				"error", pubErr,
-			)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("publishing BLOCK_PROCESSED for %s: %w", entry.URL, pubErr)
-			}
+		batch = append(batch, kafka.HashBatchEntry(msg.PartitionKey(), data))
+	}
+	// One batch publish for every URL (throughput review F-6). On error the
+	// caller re-drives via the counter/redelivery path and the delivery-side
+	// dedup (blockHash + callbackURL + type) absorbs any records that landed.
+	if pubErr := producer.PublishBatch(batch); pubErr != nil {
+		logger.Error(
+			"failed to publish BLOCK_PROCESSED batch",
+			"blockHash", blockHash,
+			"count", len(batch),
+			"error", pubErr,
+		)
+		if firstErr == nil {
+			firstErr = fmt.Errorf("publishing BLOCK_PROCESSED batch for block %s (%d URLs): %w", blockHash, len(batch), pubErr)
 		}
 	}
 

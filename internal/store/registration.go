@@ -234,18 +234,54 @@ func (s *aerospikeRegistration) Get(txid string) ([]CallbackEntry, error) {
 	return parseCallbackEntries(list), nil
 }
 
-// BatchGet returns (url, token) registrations for multiple txids in a single
-// batch call. Same dual-shape parsing as Get.
-func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackEntry, error) {
-	if len(txids) == 0 {
-		return make(map[string][]CallbackEntry), nil
-	}
+// aerospikeBatchChunkSize caps the number of keys sent in a single Aerospike
+// batch call. Aerospike rejects any batch that lands more than
+// batch-max-requests keys (server default: 5000) on a single node with
+// BATCH_MAX_REQUESTS_EXCEEDED — deterministically, on every retry. A
+// teranode-default subtree carries ~1M txids, so an unchunked whole-subtree
+// BatchGet can never succeed on clusters smaller than ~200 nodes. Chunking to
+// the per-node default is safe for any cluster size (a chunk's keys can at
+// worst all hash to one node).
+const aerospikeBatchChunkSize = 5000
 
+// chunkSlice splits items into consecutive sub-slices of at most size
+// elements. The sub-slices share the backing array (no copying).
+func chunkSlice(items []string, size int) [][]string {
+	if len(items) == 0 {
+		return nil
+	}
+	chunks := make([][]string, 0, (len(items)+size-1)/size)
+	for start := 0; start < len(items); start += size {
+		end := start + size
+		if end > len(items) {
+			end = len(items)
+		}
+		chunks = append(chunks, items[start:end])
+	}
+	return chunks
+}
+
+// BatchGet returns (url, token) registrations for multiple txids, issuing one
+// Aerospike batch call per aerospikeBatchChunkSize keys. Same dual-shape
+// parsing as Get.
+func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackEntry, error) {
+	result := make(map[string][]CallbackEntry)
+	for _, chunk := range chunkSlice(txids, aerospikeBatchChunkSize) {
+		if err := s.batchGetChunk(chunk, result); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+// batchGetChunk issues one Aerospike BatchGet for a chunk of at most
+// aerospikeBatchChunkSize txids and merges positive results into result.
+func (s *aerospikeRegistration) batchGetChunk(txids []string, result map[string][]CallbackEntry) error {
 	keys := make([]*as.Key, len(txids))
 	for i, txid := range txids {
 		key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create key for %s: %w", txid, err)
+			return fmt.Errorf("failed to create key for %s: %w", txid, err)
 		}
 		keys[i] = key
 	}
@@ -253,10 +289,9 @@ func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackE
 	bp := s.client.BatchPolicy(s.maxRetries, s.retryBaseMs)
 	records, err := s.client.Client().BatchGet(bp, keys, callbacksBin)
 	if err != nil {
-		return nil, fmt.Errorf("batch get failed: %w", err)
+		return fmt.Errorf("batch get failed: %w", err)
 	}
 
-	result := make(map[string][]CallbackEntry)
 	for i, record := range records {
 		if record == nil {
 			continue
@@ -275,7 +310,7 @@ func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackE
 		}
 	}
 
-	return result, nil
+	return nil
 }
 
 // UpdateTTL updates the TTL of a registration record.
@@ -299,15 +334,46 @@ func (s *aerospikeRegistration) UpdateTTL(txid string, ttl time.Duration) error 
 	return nil
 }
 
-// BatchUpdateTTL updates TTL for multiple txids in batch.
+// BatchUpdateTTL updates TTL for multiple txids using chunked batch Touch
+// operations — one round-trip per node per aerospikeBatchChunkSize keys
+// instead of one Operate RTT per txid (throughput review F-8: the serial loop
+// blocked the subtree-worker hot path ~5-10s per 10k-txid subtree). Failures
+// remain warn-only, preserving the prior best-effort contract.
 func (s *aerospikeRegistration) BatchUpdateTTL(txids []string, ttl time.Duration) error {
 	if len(txids) == 0 {
 		return nil
 	}
 
-	for _, txid := range txids {
-		if err := s.UpdateTTL(txid, ttl); err != nil {
-			s.logger.Warn("failed to update TTL (check Aerospike nsup-period config)", "txid", txid, "error", err)
+	wpol := as.NewBatchWritePolicy()
+	wpol.Expiration = uint32(ttl.Seconds())
+
+	for _, chunk := range chunkSlice(txids, aerospikeBatchChunkSize) {
+		batchRecs := make([]as.BatchRecordIfc, 0, len(chunk))
+		batchTxids := make([]string, 0, len(chunk)) // index-aligned with batchRecs
+		for _, txid := range chunk {
+			key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
+			if err != nil {
+				s.logger.Warn("failed to create key for TTL update", "txid", txid, "error", err)
+				continue
+			}
+			batchRecs = append(batchRecs, as.NewBatchWrite(wpol, key, as.TouchOp()))
+			batchTxids = append(batchTxids, txid)
+		}
+		if len(batchRecs) == 0 {
+			continue
+		}
+
+		bp := s.client.BatchPolicy(s.maxRetries, s.retryBaseMs)
+		if err := s.client.Client().BatchOperate(bp, batchRecs); err != nil {
+			s.logger.Warn("batch TTL update failed (check Aerospike nsup-period config)",
+				"keys", len(batchRecs), "error", err)
+			continue
+		}
+		for i, br := range batchRecs {
+			if err := br.BatchRec().Err; err != nil {
+				s.logger.Warn("failed to update TTL (check Aerospike nsup-period config)",
+					"txid", batchTxids[i], "error", err)
+			}
 		}
 	}
 	return nil

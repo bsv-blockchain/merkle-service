@@ -98,6 +98,33 @@ func (m *mockSeenCounter) Increment(txid, subtreeID string) (*store.IncrementRes
 	return &store.IncrementResult{NewCount: 1, ThresholdReached: false}, nil
 }
 
+func (m *mockSeenCounter) BatchIncrement(txids []string, subtreeID string) (map[string]*store.IncrementResult, error) {
+	return batchViaIncrement(m.Increment, txids, subtreeID)
+}
+
+// batchViaIncrement implements the BatchIncrement partial-success contract on
+// top of a mock's Increment so each fake's behavior (failure injection,
+// idempotency tracking) carries over to the batched path unchanged.
+func batchViaIncrement(
+	inc func(txid, subtreeID string) (*store.IncrementResult, error),
+	txids []string,
+	subtreeID string,
+) (map[string]*store.IncrementResult, error) {
+	results := make(map[string]*store.IncrementResult, len(txids))
+	var firstErr error
+	for _, txid := range txids {
+		res, err := inc(txid, subtreeID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		results[txid] = res
+	}
+	return results, firstErr
+}
+
 type mockRegCache struct {
 	// cached tracks positive cache entries only. A txid present in this
 	// map is treated as "cached and registered". Negative results are
@@ -675,6 +702,10 @@ func (m *mockIdempotentSeenCounter) Increment(txid, subtreeID string) (*store.In
 		NewCount:         newCount,
 		ThresholdReached: thresholdReached,
 	}, nil
+}
+
+func (m *mockIdempotentSeenCounter) BatchIncrement(txids []string, subtreeID string) (map[string]*store.IncrementResult, error) {
+	return batchViaIncrement(m.Increment, txids, subtreeID)
 }
 
 func TestIdempotentSeenCounter_FirstSubtreeIncrements(t *testing.T) {
@@ -1752,6 +1783,10 @@ func (f *failingSeenCounter) Increment(txid, subtreeID string) (*store.Increment
 	f.attempts = append(f.attempts, txid)
 	f.failed++
 	return nil, f.err
+}
+
+func (f *failingSeenCounter) BatchIncrement(txids []string, subtreeID string) (map[string]*store.IncrementResult, error) {
+	return batchViaIncrement(f.Increment, txids, subtreeID)
 }
 
 // TestEmitBatchedSeenCallbacks_IncrementFailureReturnsError verifies that a

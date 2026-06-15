@@ -989,3 +989,49 @@ func TestMigrations_Idempotent(t *testing.T) {
 		t.Fatal("schema_migrations empty after run")
 	}
 }
+
+// TestSeenCounter_BatchIncrement verifies the batched path preserves the
+// per-txid Increment semantics: unique-subtree counting, exactly-once
+// threshold fire across successive batches, and idempotent re-runs.
+func TestSeenCounter_BatchIncrement(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newSeenCounter(db, d, 2)
+
+	txids := []string{"tx-a", "tx-b", "tx-c"}
+
+	// First subtree: every txid at count 1, none fired.
+	results, err := s.BatchIncrement(txids, "st1")
+	if err != nil {
+		t.Fatalf("BatchIncrement st1: %v", err)
+	}
+	if len(results) != len(txids) {
+		t.Fatalf("results for %d txids, want %d", len(results), len(txids))
+	}
+	for txid, res := range results {
+		if res.NewCount != 1 || res.ThresholdReached {
+			t.Errorf("%s after st1: count=%d fired=%v, want count=1 fired=false", txid, res.NewCount, res.ThresholdReached)
+		}
+	}
+
+	// Second distinct subtree: every txid crosses threshold=2 exactly once.
+	results, err = s.BatchIncrement(txids, "st2")
+	if err != nil {
+		t.Fatalf("BatchIncrement st2: %v", err)
+	}
+	for txid, res := range results {
+		if res.NewCount != 2 || !res.ThresholdReached {
+			t.Errorf("%s after st2: count=%d fired=%v, want count=2 fired=true", txid, res.NewCount, res.ThresholdReached)
+		}
+	}
+
+	// Idempotent re-run of the same batch: counts unchanged, no re-fire.
+	results, err = s.BatchIncrement(txids, "st2")
+	if err != nil {
+		t.Fatalf("BatchIncrement st2 rerun: %v", err)
+	}
+	for txid, res := range results {
+		if res.NewCount != 2 || res.ThresholdReached {
+			t.Errorf("%s after st2 rerun: count=%d fired=%v, want count=2 fired=false (exactly-once)", txid, res.NewCount, res.ThresholdReached)
+		}
+	}
+}

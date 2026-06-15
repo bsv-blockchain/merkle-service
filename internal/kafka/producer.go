@@ -46,6 +46,20 @@ type Publisher interface {
 	Close() error
 }
 
+// BatchEntry is one record of a PublishBatch call.
+type BatchEntry struct {
+	Key   string
+	Value []byte
+}
+
+// batchPublisher is an optional Publisher capability: implementations that can
+// publish many records in a single broker round-trip. Producer.PublishBatch
+// type-asserts for it and falls back to per-record Produce otherwise, so test
+// fakes only ever need the 2-method Publisher interface.
+type batchPublisher interface {
+	ProduceBatch(entries []BatchEntry) error
+}
+
 // kgoPublisher is the production Publisher backed by a franz-go client.
 type kgoPublisher struct {
 	client *kgo.Client
@@ -80,6 +94,30 @@ func (k *kgoPublisher) Produce(key string, value []byte) (int32, int64, error) {
 		return 0, 0, err
 	}
 	return r.Partition, r.Offset, nil
+}
+
+// ProduceBatch publishes every entry in ONE synchronous franz call. kgo packs
+// the records into per-leader produce requests, collapsing the N broker-acked
+// round-trips of a serial Publish loop into ~1 per leader (throughput review
+// F-6: ProduceSync batches across concurrent callers, but the pipeline's
+// fan-out loops are single-goroutine, so serial Publish never batched). Any
+// record failure is reported via the returned error; callers treat the batch
+// as retry-on-redelivery, which is safe because the downstream pipeline
+// dedups (idempotent handlers, AttemptCount retry/DLQ).
+func (k *kgoPublisher) ProduceBatch(entries []BatchEntry) error {
+	recs := make([]*kgo.Record, len(entries))
+	for i, e := range entries {
+		rec := &kgo.Record{
+			Topic: k.topic,
+			Value: e.Value,
+		}
+		// teranode #527: leave Key nil when empty (see Produce).
+		if e.Key != "" {
+			rec.Key = []byte(e.Key)
+		}
+		recs[i] = rec
+	}
+	return k.client.ProduceSync(context.Background(), recs...).FirstErr()
 }
 
 // Close flushes buffered records on a detached, bounded context (teranode #683
@@ -134,19 +172,12 @@ func NewProducer(brokers []string, topic string, logger *slog.Logger) (*Producer
 		// clamp (teranode #660) so the cap can never accidentally fall to a value
 		// that rejects normal records. Brokers must set message.max.bytes >= this.
 		kgo.ProducerBatchMaxBytes(clampBatchMaxBytes(10 * 1024 * 1024)),
+		// Sarama parity: sarama's default Metadata.AllowAutoTopicCreation=true
+		// auto-created topics on first produce; kgo defaults this off and
+		// fails with UNKNOWN_TOPIC_OR_PARTITION instead.
+		kgo.AllowAutoTopicCreation(),
 		// Default partitioner hashes a non-nil key and round-robins a nil key —
 		// equivalent to sarama.NewHashPartitioner for our always-keyed produces.
-		//
-		// Restore implicit broker-side topic auto-creation. sarama defaulted
-		// Metadata.AllowAutoTopicCreation=true, so a produce to a not-yet-created
-		// topic triggered the broker (with auto.create.topics.enable=true) to
-		// create it; merkle-service relies on that — it never creates its topics
-		// in production code (only the integration test uses an admin client).
-		// franz defaults this OFF, so without it the first produce to a fresh
-		// broker fails with UNKNOWN_TOPIC_OR_PARTITION ("failed to enqueue") and
-		// consumers find no topic — exactly the round-trip regression introduced
-		// by the sarama->franz migration.
-		kgo.AllowAutoTopicCreation(),
 	}
 
 	client, err := kgo.NewClient(opts...)
@@ -180,6 +211,58 @@ func (p *Producer) PublishWithHashKey(key string, value []byte) error {
 	hash := sha256.Sum256([]byte(key))
 	hashKey := fmt.Sprintf("%x", hash[:8])
 	return p.Publish(hashKey, value)
+}
+
+// PublishBatch sends every entry in one synchronous call when the underlying
+// publisher supports batching (the production kgo client), collapsing N
+// broker-acked round-trips into ~1 per partition leader. Test publishers that
+// only implement the 2-method Publisher interface fall back to a per-entry
+// Publish loop, preserving capture/failure-injection behavior.
+//
+// Entry keys partition exactly like Publish: pre-hash with HashPartitionKey
+// for the PublishWithHashKey equivalent. An error means one or more records
+// may not be durable — callers must NOT ack the triggering Kafka message, so
+// the whole (idempotent) batch is re-published on redelivery.
+func (p *Producer) PublishBatch(entries []BatchEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	bp, ok := p.pub.(batchPublisher)
+	if !ok {
+		// Match the real batch semantics: attempt EVERY entry (kgo's
+		// ProduceSync tries all records and reports the first failure), so one
+		// bad entry doesn't suppress the rest on this attempt; return the
+		// first error so the caller redelivers the (idempotent) batch.
+		var firstErr error
+		for _, e := range entries {
+			if err := p.Publish(e.Key, e.Value); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+
+	start := time.Now()
+	err := bp.ProduceBatch(entries)
+	// Amortize the batch duration across entries so per-message produce
+	// latency metrics stay comparable with the serial path.
+	per := time.Since(start) / time.Duration(len(entries))
+	for _, e := range entries {
+		metrics.ObserveKafkaProduce(p.topic, len(e.Value), per, err)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to publish batch of %d to %s: %w", len(entries), p.topic, err)
+	}
+
+	p.logger.Debug("published batch", "topic", p.topic, "count", len(entries))
+	return nil
+}
+
+// HashBatchEntry builds a BatchEntry whose key is the SHA256-derived partition
+// key for partitionKey — the batch equivalent of PublishWithHashKey.
+func HashBatchEntry(partitionKey string, value []byte) BatchEntry {
+	return BatchEntry{Key: HashPartitionKey(partitionKey), Value: value}
 }
 
 // Close closes the producer.

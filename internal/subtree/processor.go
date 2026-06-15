@@ -28,9 +28,12 @@ type RegistrationGetter interface {
 	Get(txid string) ([]store.CallbackEntry, error)
 }
 
-// SeenCounter abstracts seen-count tracking for testability.
+// SeenCounter abstracts seen-count tracking for testability. BatchIncrement
+// carries the store.SeenCounterStore partial-success contract: results for
+// every txid that succeeded plus the first error (F-058).
 type SeenCounter interface {
 	Increment(txid, subtreeID string) (*store.IncrementResult, error)
+	BatchIncrement(txids []string, subtreeID string) (map[string]*store.IncrementResult, error)
 }
 
 // RegCache abstracts the registration deduplication cache for testability.
@@ -601,33 +604,11 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 	}
 
 	// 4.5: Emit one batched SEEN_ON_NETWORK per callbackURL, chunked so the JSON
-	// payload stays comfortably under Kafka brokers' default message.max.bytes (1MB).
-	for callbackURL, txids := range seenGroups {
-		for _, chunk := range chunkTxIDs(txids, callbackBatchChunkSize) {
-			msg := &kafka.CallbackTopicMessage{
-				CallbackURL:   callbackURL,
-				CallbackToken: urlTokens[callbackURL],
-				Type:          kafka.CallbackSeenOnNetwork,
-				SubtreeHash:   subtreeID,
-				TxIDs:         chunk,
-			}
-			emitStart := time.Now()
-			data, err := msg.Encode()
-			if err != nil {
-				p.Logger.Error("failed to encode batched SEEN_ON_NETWORK", "callbackURL", callbackURL, "error", err)
-				if firstErr == nil {
-					firstErr = fmt.Errorf("encoding SEEN_ON_NETWORK for %s: %w", callbackURL, err)
-				}
-				continue
-			}
-			if err := p.callbackProducer.PublishWithHashKey(msg.PartitionKey(), data); err != nil {
-				p.Logger.Error("failed to publish batched SEEN_ON_NETWORK", "callbackURL", callbackURL, "error", err)
-				if firstErr == nil {
-					firstErr = fmt.Errorf("publishing SEEN_ON_NETWORK for %s: %w", callbackURL, err)
-				}
-			}
-			metrics.ObserveSubtreeEmitSeen(callbackURL, metrics.SeenKindOnNetwork, time.Since(emitStart))
-		}
+	// payload stays comfortably under Kafka brokers' default message.max.bytes
+	// (1MB). All chunks across all URLs go out in ONE batch publish
+	// (throughput review F-6) instead of one broker-acked RTT per chunk.
+	if err := p.emitSeenBatch(seenGroups, urlTokens, subtreeID, kafka.CallbackSeenOnNetwork, metrics.SeenKindOnNetwork); err != nil && firstErr == nil {
+		firstErr = err
 	}
 
 	// 4.6: Increment seen counters and collect threshold-reached txids.
@@ -636,55 +617,112 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 	// logged a warning and continued, while handleMessage still added the
 	// subtree hash to the dedup cache — permanently dropping
 	// SEEN_MULTIPLE_NODES callbacks for the affected txids on redelivery.
-	// Capture the first error and return it so handleMessage re-drives via
-	// handleTransientFailure (which leaves the dedup cache untouched), but
-	// keep iterating remaining txids so independent counters still get their
-	// best-effort increment + threshold callback on this attempt.
+	// BatchIncrement has the same partial-success contract the old per-txid
+	// loop had: results for every txid that succeeded plus the first error;
+	// surface the error so handleMessage re-drives via handleTransientFailure
+	// (which leaves the dedup cache untouched) while threshold callbacks for
+	// the successes still go out on this attempt.
+	//
+	// Batched (throughput review F-4): the previous per-txid Increment loop
+	// cost 2 serial Aerospike RTTs per registered txid (~500-1000 txids/s per
+	// instance); BatchIncrement is 2 batch RTTs per 5000 txids, with the
+	// exactly-once threshold CAS (F-045) run only for the rare crossers.
 	thresholdGroups := make(map[string][]string) // callbackURL → threshold-reached txids
-	for txid, entries := range registeredTxids {
-		incStart := time.Now()
-		result, err := p.seenCounterStore.Increment(txid, subtreeID)
-		metrics.ObserveDB(p.backendLabel(), metrics.StoreSeenCounter, metrics.OpIncrement, incStart, err)
-		if err != nil {
-			p.Logger.Error("failed to increment seen counter", "txid", txid, "subtreeID", subtreeID, "error", err)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("incrementing seen counter for %s: %w", txid, err)
-			}
-			continue
+	if len(registeredTxids) > 0 {
+		txids := make([]string, 0, len(registeredTxids))
+		for txid := range registeredTxids {
+			txids = append(txids, txid)
 		}
-		if result.ThresholdReached {
-			for _, e := range entries {
-				thresholdGroups[e.URL] = append(thresholdGroups[e.URL], txid)
+		metrics.ObserveDBBatchSize(metrics.StoreSeenCounter, metrics.OpIncrement, len(txids))
+		incStart := time.Now()
+		results, incErr := p.seenCounterStore.BatchIncrement(txids, subtreeID)
+		metrics.ObserveDB(p.backendLabel(), metrics.StoreSeenCounter, metrics.OpIncrement, incStart, incErr)
+		if incErr != nil {
+			p.Logger.Error("failed to batch-increment seen counters",
+				"subtreeID", subtreeID, "txids", len(txids), "succeeded", len(results), "error", incErr)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("incrementing seen counters for subtree %s: %w", subtreeID, incErr)
+			}
+		}
+		for txid, result := range results {
+			if result.ThresholdReached {
+				for _, e := range registeredTxids[txid] {
+					thresholdGroups[e.URL] = append(thresholdGroups[e.URL], txid)
+				}
 			}
 		}
 	}
 
-	// Emit one batched SEEN_MULTIPLE_NODES per callbackURL, chunked to fit broker limits.
-	for callbackURL, txids := range thresholdGroups {
+	// Emit one batched SEEN_MULTIPLE_NODES per callbackURL, chunked to fit
+	// broker limits, again as a single batch publish.
+	if err := p.emitSeenBatch(thresholdGroups, urlTokens, subtreeID, kafka.CallbackSeenMultipleNodes, metrics.SeenKindMultipleNodes); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	return firstErr
+}
+
+// emitSeenBatch encodes one CallbackTopicMessage per (callbackURL, txid-chunk)
+// and publishes every message in a single batch produce. Encode failures are
+// per-URL (remaining URLs still go out); a publish failure covers the whole
+// batch and is surfaced for redelivery — the delivery-side dedup absorbs any
+// records that landed.
+func (p *Processor) emitSeenBatch(
+	groups map[string][]string,
+	urlTokens map[string]string,
+	subtreeID string,
+	cbType kafka.CallbackType,
+	seenKind string,
+) error {
+	if len(groups) == 0 {
+		return nil
+	}
+
+	var firstErr error
+	type pending struct {
+		callbackURL string
+	}
+	var meta []pending
+	var entries []kafka.BatchEntry
+	emitStart := time.Now()
+
+	for callbackURL, txids := range groups {
 		for _, chunk := range chunkTxIDs(txids, callbackBatchChunkSize) {
 			msg := &kafka.CallbackTopicMessage{
 				CallbackURL:   callbackURL,
 				CallbackToken: urlTokens[callbackURL],
-				Type:          kafka.CallbackSeenMultipleNodes,
+				Type:          cbType,
 				SubtreeHash:   subtreeID,
 				TxIDs:         chunk,
 			}
-			emitStart := time.Now()
 			data, err := msg.Encode()
 			if err != nil {
-				p.Logger.Error("failed to encode batched SEEN_MULTIPLE_NODES", "callbackURL", callbackURL, "error", err)
+				p.Logger.Error("failed to encode batched seen callback",
+					"type", cbType, "callbackURL", callbackURL, "error", err)
 				if firstErr == nil {
-					firstErr = fmt.Errorf("encoding SEEN_MULTIPLE_NODES for %s: %w", callbackURL, err)
+					firstErr = fmt.Errorf("encoding %s for %s: %w", cbType, callbackURL, err)
 				}
 				continue
 			}
-			if err := p.callbackProducer.PublishWithHashKey(msg.PartitionKey(), data); err != nil {
-				p.Logger.Error("failed to publish batched SEEN_MULTIPLE_NODES", "callbackURL", callbackURL, "error", err)
-				if firstErr == nil {
-					firstErr = fmt.Errorf("publishing SEEN_MULTIPLE_NODES for %s: %w", callbackURL, err)
-				}
-			}
-			metrics.ObserveSubtreeEmitSeen(callbackURL, metrics.SeenKindMultipleNodes, time.Since(emitStart))
+			entries = append(entries, kafka.HashBatchEntry(msg.PartitionKey(), data))
+			meta = append(meta, pending{callbackURL: callbackURL})
+		}
+	}
+
+	if err := p.callbackProducer.PublishBatch(entries); err != nil {
+		p.Logger.Error("failed to publish seen callback batch",
+			"type", cbType, "count", len(entries), "error", err)
+		if firstErr == nil {
+			firstErr = fmt.Errorf("publishing %s batch (%d messages): %w", cbType, len(entries), err)
+		}
+	}
+
+	// Observe per message with the batch duration amortized across entries so
+	// the per-URL emit metric stays comparable with the previous serial path.
+	if len(entries) > 0 {
+		per := time.Since(emitStart) / time.Duration(len(entries))
+		for _, m := range meta {
+			metrics.ObserveSubtreeEmitSeen(m.callbackURL, seenKind, per)
 		}
 	}
 
