@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
@@ -175,20 +174,22 @@ func ProcessBlockSubtree(
 		return nil, fmt.Errorf("building merkle tree for subtree %s: %w", subtreeHash, err)
 	}
 
-	// Convert leaf hashes to [][]byte.
+	// Expose leaf and internal-node hashes to stump.Build as [][]byte WITHOUT
+	// copying. stump.Build only reads these, and the resulting STUMP is fully
+	// serialized by s.Encode() below (which copies into the wire buffer) before
+	// this function returns — so a []byte view into each [32]byte hash is safe
+	// and avoids ~2*nLeaves small allocations per subtree (~64MB of churn at a
+	// teranode-default 1M-leaf subtree, on the block-time fan-out hot path).
+	// Index the backing slices directly: h[:] on a range *copy* would alias the
+	// loop variable.
 	leaves := make([][]byte, len(nodes))
-	for i, node := range nodes {
-		hashCopy := make([]byte, chainhash.HashSize)
-		copy(hashCopy, node.Hash[:])
-		leaves[i] = hashCopy
+	for i := range nodes {
+		leaves[i] = nodes[i].Hash[:]
 	}
-
-	// Convert internal nodes (from BuildMerkleTreeStoreFromBytes) to [][]byte.
 	internalNodes := make([][]byte, len(*merkleTreeStore))
-	for i, h := range *merkleTreeStore {
-		hashCopy := make([]byte, chainhash.HashSize)
-		copy(hashCopy, h[:])
-		internalNodes[i] = hashCopy
+	mts := *merkleTreeStore
+	for i := range mts {
+		internalNodes[i] = mts[i][:]
 	}
 
 	// 6.6: Map registered txids to their leaf indices in the subtree.
