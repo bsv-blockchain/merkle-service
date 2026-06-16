@@ -154,6 +154,20 @@ aerospike:
   # Env: AEROSPIKE_TOTAL_TIMEOUT_MS
   totalTimeoutMs: 15000
 
+  # How many cluster nodes a single BatchGet/BatchOperate fans out to
+  # concurrently. The Aerospike Go client defaults this to 1, issuing each
+  # owning node's sub-batch serially on the calling goroutine — so a batch
+  # whose keys span M nodes costs M sequential round-trips. On the SEEN/MINED
+  # read path that serialization is the dominant per-subtree database cost.
+  #   0  = all owning nodes concurrently (one parallel fan-out) — default
+  #   1  = serial, one node at a time (the Aerospike library default)
+  #   >1 = up to N nodes concurrently
+  # On a large cluster, bound this (e.g. 8) if wide fan-out from many partition
+  # workers at once pushes the per-node pool (connectionQueueSize) under
+  # pressure. Retries do NOT re-fan-out (batch MaxRetries is 0).
+  # Env: AEROSPIKE_BATCH_CONCURRENT_NODES
+  batchConcurrentNodes: 0
+
 # ---------------------------------------------------------------------------
 # Kafka — async messaging between services
 # ---------------------------------------------------------------------------

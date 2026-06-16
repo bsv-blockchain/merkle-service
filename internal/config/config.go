@@ -181,6 +181,23 @@ type AerospikeConfig struct {
 	// ErrorRateWindow is the number of cluster-tend iterations over which
 	// MaxErrorRate accumulates. Default 1 (~1 second of accumulation).
 	ErrorRateWindow int `yaml:"errorRateWindow" mapstructure:"errorratewindow"`
+	// BatchConcurrentNodes controls how many cluster nodes a single
+	// BatchGet/BatchOperate fans out to concurrently. The Aerospike Go client
+	// defaults this to 1 — each owning node's sub-batch is issued serially on
+	// the calling goroutine, so a batch whose keys span M nodes costs M
+	// sequential round-trips. On the SEEN/MINED read path (registration
+	// BatchGet, seen-counter BatchIncrement) that serialization is the dominant
+	// per-subtree database cost.
+	//
+	//	0  = all owning nodes concurrently — one parallel fan-out (default)
+	//	1  = serial, one node at a time (the Aerospike library default)
+	//	>1 = up to N nodes concurrently
+	//
+	// Default 0 (all concurrent). On a large cluster, where a wide fan-out from
+	// many partition workers at once could push the per-node pool
+	// (ConnectionQueueSize) under pressure, set a bound (e.g. 8) to trade some
+	// parallelism for steadier connection usage.
+	BatchConcurrentNodes int `yaml:"batchConcurrentNodes" mapstructure:"batchconcurrentnodes"`
 }
 
 // SeedHosts returns the list of seed hosts to use when constructing the
@@ -397,6 +414,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.idletimeoutsec", 55)
 	v.SetDefault("aerospike.maxerrorrate", 5)
 	v.SetDefault("aerospike.errorratewindow", 1)
+	v.SetDefault("aerospike.batchconcurrentnodes", 0)
 
 	// Kafka
 	v.SetDefault("kafka.brokers", []string{"localhost:9092"})

@@ -23,6 +23,11 @@ type AerospikeClient struct {
 	writeTimeoutMs  int
 	batchTimeoutMs  int
 	socketTimeoutMs int
+	// batchConcurrentNodes is applied to every BatchPolicy as ConcurrentNodes.
+	// 0 (the zero value, and our default) means "fan out to all owning nodes
+	// concurrently"; 1 restores the Aerospike library default of serial
+	// per-node sub-batches. See config.AerospikeConfig.BatchConcurrentNodes.
+	batchConcurrentNodes int
 }
 
 // defaults applied when the corresponding cfg.* field is 0.
@@ -128,6 +133,9 @@ func NewAerospikeClientFromConfig(cfg config.AerospikeConfig, logger *slog.Logge
 		writeTimeoutMs:  nz(cfg.WriteTimeoutMs, defaultWriteTimeoutMs),
 		batchTimeoutMs:  nz(cfg.BatchTimeoutMs, defaultBatchTimeoutMs),
 		socketTimeoutMs: nz(cfg.SocketTimeoutMs, defaultSocketTimeoutMs),
+		// Not run through nz(): 0 is a meaningful value here (all nodes
+		// concurrent), and it is exactly the default we want.
+		batchConcurrentNodes: cfg.BatchConcurrentNodes,
 	}
 
 	logger.Info(
@@ -142,6 +150,7 @@ func NewAerospikeClientFromConfig(cfg config.AerospikeConfig, logger *slog.Logge
 		"writeTimeoutMs", c.writeTimeoutMs,
 		"batchTimeoutMs", c.batchTimeoutMs,
 		"socketTimeoutMs", c.socketTimeoutMs,
+		"batchConcurrentNodes", c.batchConcurrentNodes,
 	)
 
 	return c, nil
@@ -197,5 +206,11 @@ func (c *AerospikeClient) BatchPolicy(maxRetries, retryBaseMs int) *as.BatchPoli
 	bp.SleepBetweenRetries = time.Duration(retryBaseMs) * time.Millisecond
 	bp.TotalTimeout = time.Duration(c.batchTimeoutMs) * time.Millisecond
 	bp.SocketTimeout = time.Duration(c.socketTimeoutMs) * time.Millisecond
+	// Fan a batch out to its owning nodes concurrently instead of serially.
+	// NewBatchPolicy() defaults ConcurrentNodes to 1, which issues each node's
+	// sub-batch one after another on this goroutine; a batch spanning M nodes
+	// then costs M sequential round-trips. 0 (our default) means all nodes at
+	// once. This does not re-fan-out on retry — MaxRetries stays 0.
+	bp.ConcurrentNodes = c.batchConcurrentNodes
 	return bp
 }
