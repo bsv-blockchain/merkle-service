@@ -264,3 +264,77 @@ func TestBatchIncrement_ConcurrentThresholdFiresOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestBatchIncrement_CountIsListSizeAndIdempotent pins the read-back-collapse
+// change: BatchIncrement now derives NewCount from the list-append op's returned
+// size instead of a second BatchGet. This isolates that semantics — a distinct
+// subtree bumps the unique-subtree count by one, and a REPEAT of an
+// already-recorded subtree (AddUnique|NoFail) leaves it unchanged. Threshold is
+// set high so phase 2 never runs and only the phase-1 count path is exercised.
+func TestBatchIncrement_CountIsListSizeAndIdempotent(t *testing.T) {
+	host := os.Getenv("AEROSPIKE_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	port := 3000
+	if p := os.Getenv("AEROSPIKE_PORT"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil {
+			port = v
+		}
+	}
+	ns := os.Getenv("AEROSPIKE_NAMESPACE")
+	if ns == "" {
+		ns = "merkle"
+	}
+	client, err := store.NewAerospikeClient(host, port, ns, 3, 100, slog.Default())
+	if err != nil {
+		t.Skipf("Aerospike not available: %v", err)
+	}
+	defer client.Close()
+
+	const threshold = 100 // high: keep phase 2 (threshold firing) out of the picture
+	setName := fmt.Sprintf("bench_count_%d", time.Now().UnixNano())
+	sc := store.NewSeenCounterStore(client, setName, threshold, 3, 100, slog.Default())
+	txids := benchTxids("count", 50)
+
+	assertCounts := func(stage string, results map[string]*store.IncrementResult, want int) {
+		t.Helper()
+		if len(results) != len(txids) {
+			t.Fatalf("%s: got %d results, want %d", stage, len(results), len(txids))
+		}
+		for _, txid := range txids {
+			res, ok := results[txid]
+			if !ok {
+				t.Fatalf("%s: missing result for %s", stage, txid)
+			}
+			if res.NewCount != want {
+				t.Errorf("%s: txid %s NewCount=%d, want %d", stage, txid, res.NewCount, want)
+			}
+			if res.ThresholdReached {
+				t.Errorf("%s: txid %s fired below threshold", stage, txid)
+			}
+		}
+	}
+
+	// First distinct subtree -> count 1.
+	r1, err := sc.BatchIncrement(txids, "subtree-A")
+	if err != nil {
+		t.Fatalf("BatchIncrement A: %v", err)
+	}
+	assertCounts("subtree-A", r1, 1)
+
+	// Second distinct subtree -> count 2.
+	r2, err := sc.BatchIncrement(txids, "subtree-B")
+	if err != nil {
+		t.Fatalf("BatchIncrement B: %v", err)
+	}
+	assertCounts("subtree-B", r2, 2)
+
+	// Repeat of subtree-A (AddUnique|NoFail) -> count stays 2, proving the size
+	// returned by the append reflects the deduplicated list, not a blind +1.
+	r3, err := sc.BatchIncrement(txids, "subtree-A")
+	if err != nil {
+		t.Fatalf("BatchIncrement A repeat: %v", err)
+	}
+	assertCounts("subtree-A repeat", r3, 2)
+}
