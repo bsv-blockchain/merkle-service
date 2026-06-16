@@ -198,6 +198,20 @@ type AerospikeConfig struct {
 	// (ConnectionQueueSize) under pressure, set a bound (e.g. 8) to trade some
 	// parallelism for steadier connection usage.
 	BatchConcurrentNodes int `yaml:"batchConcurrentNodes" mapstructure:"batchconcurrentnodes"`
+	// BatchChunkConcurrency caps how many of a single batch operation's 5000-key
+	// chunks are issued concurrently. A teranode-default subtree (~1M txids) is
+	// split into ~200 chunks; processed serially (the prior behaviour) that is
+	// ~200 sequential round-trips on one goroutine, the dominant SEEN/MINED
+	// read-path latency. Applies to registration BatchGet and seen-counter
+	// BatchIncrement. 0/1 = serial (one chunk at a time); >1 = up to N chunks
+	// in flight at once. Default 8.
+	//
+	// Connection-budget note: this multiplies with BatchConcurrentNodes and with
+	// the caller's own concurrency (block.batchGetConcurrency, or the number of
+	// active consumer partitions on the SEEN fetcher). Peak in-flight node
+	// connections ≈ callerConcurrency × BatchChunkConcurrency × nodes — keep that
+	// under ConnectionQueueSize, or bound this on large clusters.
+	BatchChunkConcurrency int `yaml:"batchChunkConcurrency" mapstructure:"batchchunkconcurrency"`
 }
 
 // SeedHosts returns the list of seed hosts to use when constructing the
@@ -415,6 +429,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.maxerrorrate", 5)
 	v.SetDefault("aerospike.errorratewindow", 1)
 	v.SetDefault("aerospike.batchconcurrentnodes", 0)
+	v.SetDefault("aerospike.batchchunkconcurrency", 8)
 
 	// Kafka
 	v.SetDefault("kafka.brokers", []string{"localhost:9092"})

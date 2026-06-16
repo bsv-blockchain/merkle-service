@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
@@ -160,22 +161,23 @@ func (s *aerospikeSeenCounter) Threshold() int {
 	return s.threshold
 }
 
-// BatchIncrement records that every txid in txids was seen in subtreeID using
-// two batched phases instead of 2 serial RTTs per txid (throughput review
-// F-4: the sequential Increment loop capped the SEEN path at ~500-1000
-// txids/s per instance):
+// BatchIncrement records that every txid in txids was seen in subtreeID,
+// replacing the sequential 2-RTT-per-txid Increment loop that capped the SEEN
+// path at ~500-1000 txids/s per instance (throughput review F-4).
 //
-//	Phase 1 (bulk, common case): one chunked BatchOperate appends subtreeID to
-//	every txid's unique-subtree list (idempotent: AddUnique|NoFail), then one
-//	chunked BatchGet reads back each record's list size and threshold-fired
-//	flag. Two batch round-trips per 5000 txids.
+// txids are split into <=aerospikeBatchChunkSize chunks, and up to
+// batchChunkConcurrency chunks are processed concurrently. Each chunk
+// (batchIncrementChunk) is a SINGLE batch round-trip that both appends
+// subtreeID to every txid's unique-subtree list AND reads back the count and
+// threshold-fired flag (the list-append op returns the new size, so no separate
+// read-back is needed). Any txid that has just reached the threshold without the
+// fired flag set then goes through the generation-CAS Increment, preserving the
+// F-045 exactly-once guarantee: when several workers race, exactly one observes
+// ThresholdReached=true. That fire path is empty in steady state.
 //
-//	Phase 2 (rare): only txids whose count has reached the threshold WITHOUT
-//	the fired flag set are candidates for the exactly-once 0->1 transition.
-//	Each candidate goes through the existing generation-CAS Increment, which
-//	preserves the F-045 guarantee: when several workers race, exactly one
-//	observes ThresholdReached=true. A txid crosses the threshold at most once
-//	in its lifetime, so phase 2 is empty in steady state.
+// Chunks cover disjoint txids, so each accumulates into its own local result map
+// (and its own CAS calls on distinct keys) merged under a mutex;
+// batchChunkConcurrency<=1 keeps the whole thing serial.
 //
 // Returns a result for every txid that succeeded plus the first error
 // encountered (F-058 partial-success contract: the caller emits callbacks for
@@ -187,19 +189,25 @@ func (s *aerospikeSeenCounter) BatchIncrement(txids []string, subtreeID string) 
 		return results, nil
 	}
 
-	var firstErr error
-	saveErr := func(err error) {
-		if firstErr == nil {
-			firstErr = err
-		}
-	}
-
-	for _, chunk := range chunkSlice(txids, aerospikeBatchChunkSize) {
-		if err := s.batchIncrementChunk(chunk, subtreeID, results); err != nil {
-			saveErr(err)
-		}
-	}
-	return results, firstErr
+	// Chunks carry disjoint txid sets, so each runs into its own local result map
+	// (and its own phase-2 generation-CAS calls on distinct keys) and is merged
+	// under a mutex. batchChunkConcurrency<=1 keeps this fully serial.
+	var mu sync.Mutex
+	err := forEachChunkConcurrent(txids, aerospikeBatchChunkSize, s.client.batchChunkConcurrency,
+		func(chunk []string) error {
+			local := make(map[string]*IncrementResult, len(chunk))
+			chunkErr := s.batchIncrementChunk(chunk, subtreeID, local)
+			// Merge partial results even on error: batchIncrementChunk follows the
+			// F-058 partial-success contract (populate what succeeded, surface the
+			// first error for redelivery).
+			mu.Lock()
+			for k, v := range local {
+				results[k] = v
+			}
+			mu.Unlock()
+			return chunkErr
+		})
+	return results, err
 }
 
 // batchIncrementChunk processes one <=aerospikeBatchChunkSize chunk in a SINGLE
