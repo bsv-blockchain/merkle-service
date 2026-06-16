@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"sync"
 	"syscall"
 	"time"
 
@@ -87,6 +88,21 @@ type Client struct {
 	// short-circuit on unhealthy peers — selection stays at the call
 	// site to preserve the "one URL in, one body out" contract.
 	peerHealth *PeerHealth
+
+	// lookupIP overrides the DNS resolver used by SSRF URL validation. nil
+	// selects net.LookupIP (the production path); tests set a stub to count or
+	// fake resolutions.
+	lookupIP func(host string) ([]net.IP, error)
+
+	// validatedURLs caches SUCCESSFUL SSRF validations of peer DataHub base URLs
+	// for dataHubURLValidationTTL, so a high subtree-fetch rate to the same peer
+	// does not re-run a synchronous DNS lookup (ssrfguard.ValidateURL ->
+	// net.LookupIP) on every fetch. Success only: rejections are never cached, so
+	// a transient resolver blip can't pin a peer as bad and a malicious URL keeps
+	// failing every time. DNS-rebind safety is unaffected — the transport's
+	// Dialer.Control hook re-validates the actually-resolved IP on every TCP
+	// dial, uncached. Keyed by the exact base URL string (stable per peer).
+	validatedURLs sync.Map // rawURL string -> expiry unix-nanos (int64)
 }
 
 // SetPeerHealth attaches a PeerHealth tracker. After this call, every
@@ -159,6 +175,12 @@ func newSSRFAwareHTTPClient(timeoutSec int, allowPrivateIPs bool) *http.Client {
 	transport := &http.Transport{
 		IdleConnTimeout:    90 * time.Second,
 		DisableCompression: false,
+		// Keep keep-alive connections warm for reuse under block-time fan-out.
+		// net/http's default MaxIdleConnsPerHost is 2, so concurrent subtree
+		// fetches to the SAME DataHub peer would otherwise re-dial (and re-TLS)
+		// on all but two of them — pure handshake overhead on the hot path.
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 64,
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -324,13 +346,30 @@ func (c *Client) recordPeerOutcome(dataHubURL string, err error) {
 	c.peerHealth.RecordFailure(dataHubURL)
 }
 
+// dataHubURLValidationTTL bounds how long a successful SSRF validation of a
+// peer DataHub base URL is reused before the DNS lookup is repeated. Short
+// enough that a peer whose DNS legitimately changes is re-checked promptly;
+// the dial-time Control hook enforces SSRF on every connection regardless.
+const dataHubURLValidationTTL = 60 * time.Second
+
 // validateDataHubURL applies the shared SSRF predicate to a peer-supplied
 // DataHub base URL. It runs at request time (so the offending URL never
 // reaches Go's HTTP client) and is reinforced by the Dialer.Control hook
 // installed on the client transport. Errors are wrapped so callers can
 // distinguish SSRF rejection from transport failures.
+//
+// A successful validation is cached for dataHubURLValidationTTL so a burst of
+// fetches to the same peer does not repeat the synchronous DNS lookup. Only
+// successes are cached (see validatedURLs); rejections always re-run.
 func (c *Client) validateDataHubURL(rawURL string) error {
-	if err := ssrfguard.ValidateURL(rawURL, c.allowPrivateIPs, nil); err != nil {
+	if exp, ok := c.validatedURLs.Load(rawURL); ok {
+		if time.Now().UnixNano() < exp.(int64) {
+			return nil
+		}
+		c.validatedURLs.Delete(rawURL)
+	}
+
+	if err := ssrfguard.ValidateURL(rawURL, c.allowPrivateIPs, c.lookupIP); err != nil {
 		c.logger.Warn(
 			"rejecting DataHub URL by SSRF policy",
 			"url", rawURL,
@@ -346,6 +385,7 @@ func (c *Client) validateDataHubURL(rawURL string) error {
 			return fmt.Errorf("DataHub URL validation failed: %w", err)
 		}
 	}
+	c.validatedURLs.Store(rawURL, time.Now().Add(dataHubURLValidationTTL).UnixNano())
 	return nil
 }
 
