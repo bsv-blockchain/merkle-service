@@ -202,72 +202,66 @@ func (s *aerospikeSeenCounter) BatchIncrement(txids []string, subtreeID string) 
 	return results, firstErr
 }
 
-// batchIncrementChunk runs both phases for one <=aerospikeBatchChunkSize chunk.
+// batchIncrementChunk processes one <=aerospikeBatchChunkSize chunk in a SINGLE
+// batch round-trip. Per txid it issues a BatchOperate that both (a) idempotently
+// appends subtreeID to the unique-subtree list and (b) reads the threshold-fired
+// flag. The list-append operation itself returns the resulting list size
+// ("Server returns list size on bin name"), so the post-count is known without a
+// second read-back BatchGet — halving the per-chunk RTTs versus the prior
+// append-then-BatchGet pair.
+//
+// Phase 2 (the exactly-once 0->threshold transition) is unchanged: any txid that
+// has just reached the threshold without the fired flag set is delegated to the
+// generation-CAS Increment, preserving the F-045 guarantee that exactly one
+// concurrent observer reports ThresholdReached=true.
 func (s *aerospikeSeenCounter) batchIncrementChunk(txids []string, subtreeID string, results map[string]*IncrementResult) error {
-	keys := make([]*as.Key, len(txids))
+	listPolicy := as.NewListPolicy(as.ListOrderUnordered, as.ListWriteFlagsAddUnique|as.ListWriteFlagsNoFail)
+	batchRecs := make([]as.BatchRecordIfc, len(txids))
 	for i, txid := range txids {
 		key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
 		if err != nil {
 			return fmt.Errorf("failed to create key for %s: %w", txid, err)
 		}
-		keys[i] = key
-	}
-
-	// Phase 1a: idempotent bulk append of subtreeID to every txid's list.
-	listPolicy := as.NewListPolicy(as.ListOrderUnordered, as.ListWriteFlagsAddUnique|as.ListWriteFlagsNoFail)
-	batchRecs := make([]as.BatchRecordIfc, len(keys))
-	for i, key := range keys {
+		// Two ops in one record transaction: the append returns the new
+		// unique-subtree count on seenSubtreesBin; GetBinOp reads only the fired
+		// flag (a different bin, so its result never collides with the append's).
 		batchRecs[i] = as.NewBatchWrite(nil, key,
 			as.ListAppendWithPolicyOp(listPolicy, seenSubtreesBin, subtreeID),
+			as.GetBinOp(seenThresholdFired),
 		)
 	}
+
 	bp := s.client.BatchPolicy(s.maxRetries, s.retryBaseMs)
 	if err := s.client.Client().BatchOperate(bp, batchRecs); err != nil {
-		return fmt.Errorf("batch append seen counters: %w", err)
+		return fmt.Errorf("batch append/read seen counters: %w", err)
 	}
 
-	// Per-key append failures: skip those txids (no result entry) and surface
-	// the first error; the caller's redelivery re-runs the whole idempotent batch.
-	appendOK := make([]bool, len(keys))
+	// Per-key failures: skip those txids (no result entry) and surface the first
+	// error; the caller's redelivery re-runs the whole idempotent batch.
 	var firstErr error
 	for i, br := range batchRecs {
-		if err := br.BatchRec().Err; err != nil {
+		rec := br.BatchRec()
+		if rec.Err != nil {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("batch append seen counter for %s: %w", txids[i], err)
+				firstErr = fmt.Errorf("batch seen counter for %s: %w", txids[i], rec.Err)
 			}
 			continue
 		}
-		appendOK[i] = true
-	}
-
-	// Phase 1b: bulk read-back of list size + fired flag.
-	records, err := s.client.Client().BatchGet(bp, keys, seenSubtreesBin, seenThresholdFired)
-	if err != nil {
-		if firstErr == nil {
-			firstErr = fmt.Errorf("batch read seen counters: %w", err)
-		}
-		return firstErr
-	}
-
-	for i, record := range records {
-		if !appendOK[i] {
-			continue
-		}
-		if record == nil {
-			// Appended in 1a but missing in 1b (expired between phases, or a
-			// per-key read miss). Treat as a per-key failure for redelivery.
+		if rec.Record == nil {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("seen counter for %s missing after batch append", txids[i])
+				firstErr = fmt.Errorf("seen counter for %s missing after batch operate", txids[i])
 			}
 			continue
 		}
 
+		// AddUnique|NoFail: a duplicate subtreeID leaves the count unchanged, so
+		// the returned size is the current unique-subtree count either way.
 		size := 0
-		if list, ok := record.Bins[seenSubtreesBin].([]interface{}); ok {
-			size = len(list)
+		if v, ok := rec.Record.Bins[seenSubtreesBin].(int); ok {
+			size = v
 		}
 		fired := false
-		if firedVal, ok := record.Bins[seenThresholdFired].(int); ok && firedVal == 1 {
+		if firedVal, ok := rec.Record.Bins[seenThresholdFired].(int); ok && firedVal == 1 {
 			fired = true
 		}
 
