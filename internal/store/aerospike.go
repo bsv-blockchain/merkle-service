@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	as "github.com/aerospike/aerospike-client-go/v7"
+	as "github.com/aerospike/aerospike-client-go/v8"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 )

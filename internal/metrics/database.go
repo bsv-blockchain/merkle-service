@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"time"
 
-	as "github.com/aerospike/aerospike-client-go/v7"
-	astypes "github.com/aerospike/aerospike-client-go/v7/types"
+	as "github.com/aerospike/aerospike-client-go/v8"
+	astypes "github.com/aerospike/aerospike-client-go/v8/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

@@ -3,7 +3,7 @@ module github.com/bsv-blockchain/merkle-service
 go 1.26.2
 
 require (
-	github.com/aerospike/aerospike-client-go/v7 v7.10.2
+	github.com/aerospike/aerospike-client-go/v8 v8.7.0
 	github.com/bsv-blockchain/go-bt/v2 v2.6.7
 	github.com/bsv-blockchain/go-sdk v1.2.24
 	github.com/bsv-blockchain/go-subtree v1.4.4
@@ -32,7 +32,6 @@ require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2 // indirect
 	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29 // indirect
-	github.com/aerospike/aerospike-client-go/v8 v8.7.0 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.42.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.13 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.32.25 // indirect
