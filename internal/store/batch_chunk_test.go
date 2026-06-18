@@ -90,7 +90,7 @@ func TestForEachChunkConcurrent_CoversEveryItemOnce(t *testing.T) {
 			seen := make(map[string]int, n)
 			var chunkCount atomic.Int64
 
-			err := forEachChunkConcurrent(items, aerospikeBatchChunkSize, concurrency, func(chunk []string) error {
+			err := forEachChunkConcurrent(items, concurrency, func(chunk []string) error {
 				chunkCount.Add(1)
 				// Mirror the caller pattern: build a per-chunk local result, then
 				// merge under the mutex.
@@ -131,7 +131,7 @@ func TestForEachChunkConcurrent_AttemptsAllAndReturnsError(t *testing.T) {
 			var attempts atomic.Int64
 			sentinel := errors.New("boom")
 
-			err := forEachChunkConcurrent(items, aerospikeBatchChunkSize, concurrency, func(chunk []string) error {
+			err := forEachChunkConcurrent(items, concurrency, func(chunk []string) error {
 				attempts.Add(1)
 				if chunk[0] == "txid-5000" { // the 2nd chunk fails
 					return sentinel
@@ -153,7 +153,7 @@ func TestForEachChunkConcurrent_AttemptsAllAndReturnsError(t *testing.T) {
 // concurrency setting.
 func TestForEachChunkConcurrent_SingleChunkStaysSerial(t *testing.T) {
 	var calls atomic.Int64
-	if err := forEachChunkConcurrent(mkTxids(10), aerospikeBatchChunkSize, 16, func(_ []string) error {
+	if err := forEachChunkConcurrent(mkTxids(10), 16, func(_ []string) error {
 		calls.Add(1)
 		return nil
 	}); err != nil {
@@ -164,7 +164,7 @@ func TestForEachChunkConcurrent_SingleChunkStaysSerial(t *testing.T) {
 	}
 
 	calls.Store(0)
-	if err := forEachChunkConcurrent(nil, aerospikeBatchChunkSize, 16, func(_ []string) error {
+	if err := forEachChunkConcurrent(nil, 16, func(_ []string) error {
 		calls.Add(1)
 		return nil
 	}); err != nil {

@@ -193,7 +193,7 @@ func (s *aerospikeSeenCounter) BatchIncrement(txids []string, subtreeID string) 
 	// (and its own phase-2 generation-CAS calls on distinct keys) and is merged
 	// under a mutex. batchChunkConcurrency<=1 keeps this fully serial.
 	var mu sync.Mutex
-	err := forEachChunkConcurrent(txids, aerospikeBatchChunkSize, s.client.batchChunkConcurrency,
+	err := forEachChunkConcurrent(txids, s.client.batchChunkConcurrency,
 		func(chunk []string) error {
 			local := make(map[string]*IncrementResult, len(chunk))
 			chunkErr := s.batchIncrementChunk(chunk, subtreeID, local)
@@ -233,7 +233,8 @@ func (s *aerospikeSeenCounter) batchIncrementChunk(txids []string, subtreeID str
 		// Two ops in one record transaction: the append returns the new
 		// unique-subtree count on seenSubtreesBin; GetBinOp reads only the fired
 		// flag (a different bin, so its result never collides with the append's).
-		batchRecs[i] = as.NewBatchWrite(nil, key,
+		batchRecs[i] = as.NewBatchWrite(
+			nil, key,
 			as.ListAppendWithPolicyOp(listPolicy, seenSubtreesBin, subtreeID),
 			as.GetBinOp(seenThresholdFired),
 		)

@@ -263,7 +263,7 @@ func chunkSlice(items []string, size int) [][]string {
 	return chunks
 }
 
-// forEachChunkConcurrent splits items into <=chunkSize chunks and invokes fn on
+// forEachChunkConcurrent splits items into <=aerospikeBatchChunkSize chunks and invokes fn on
 // each, running up to `concurrency` chunks at once. concurrency<=1 (or a single
 // chunk) runs them serially with no goroutine overhead. Every chunk is attempted
 // regardless of errors — matching the best-effort batch loops this replaces —
@@ -272,8 +272,8 @@ func chunkSlice(items []string, size int) [][]string {
 // fn MUST be safe for concurrent invocation: confine its writes to chunk-disjoint
 // state or synchronize them. Keys are disjoint across chunks, so callers merge
 // per-chunk results under a mutex.
-func forEachChunkConcurrent(items []string, chunkSize, concurrency int, fn func(chunk []string) error) error {
-	chunks := chunkSlice(items, chunkSize)
+func forEachChunkConcurrent(items []string, concurrency int, fn func(chunk []string) error) error {
+	chunks := chunkSlice(items, aerospikeBatchChunkSize)
 	if concurrency <= 1 || len(chunks) <= 1 {
 		var firstErr error
 		for _, chunk := range chunks {
@@ -300,7 +300,7 @@ func forEachChunkConcurrent(items []string, chunkSize, concurrency int, fn func(
 func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackEntry, error) {
 	result := make(map[string][]CallbackEntry)
 	var mu sync.Mutex
-	err := forEachChunkConcurrent(txids, aerospikeBatchChunkSize, s.client.batchChunkConcurrency,
+	err := forEachChunkConcurrent(txids, s.client.batchChunkConcurrency,
 		func(chunk []string) error {
 			// Per-chunk local map: chunk key sets are disjoint, so we merge into
 			// the shared result under a mutex rather than write the map concurrently.

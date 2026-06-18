@@ -118,7 +118,8 @@ func (s *aerospikeSubtreeCounter) Decrement(blockHash string) (remaining int, da
 	// Decrement then read back ONLY the counter bin: GetBinOp(subtreeCounterBin)
 	// returns the post-add value without dragging the block-data bin over the
 	// wire the way GetOp (read-all-bins) did on every decrement.
-	record, err := s.client.Client().Operate(wp, key,
+	record, err := s.client.Client().Operate(
+		wp, key,
 		as.AddOp(as.NewBin(subtreeCounterBin, -1)),
 		as.GetBinOp(subtreeCounterBin),
 	)
@@ -145,7 +146,7 @@ func (s *aerospikeSubtreeCounter) Decrement(blockHash string) (remaining int, da
 		switch {
 		case dErr != nil:
 			var asErr as.Error
-			if !(errors.As(dErr, &asErr) && asErr.Matches(astypes.KEY_NOT_FOUND_ERROR)) {
+			if !errors.As(dErr, &asErr) || !asErr.Matches(astypes.KEY_NOT_FOUND_ERROR) {
 				s.logger.Warn("failed to read block-processed data from counter", "blockHash", blockHash, "error", dErr)
 			}
 		case dataRec != nil:
