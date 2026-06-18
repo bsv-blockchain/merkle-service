@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 	astypes "github.com/aerospike/aerospike-client-go/v8/types"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -261,15 +263,60 @@ func chunkSlice(items []string, size int) [][]string {
 	return chunks
 }
 
+// forEachChunkConcurrent splits items into <=chunkSize chunks and invokes fn on
+// each, running up to `concurrency` chunks at once. concurrency<=1 (or a single
+// chunk) runs them serially with no goroutine overhead. Every chunk is attempted
+// regardless of errors — matching the best-effort batch loops this replaces —
+// and the first error any fn reports is returned.
+//
+// fn MUST be safe for concurrent invocation: confine its writes to chunk-disjoint
+// state or synchronize them. Keys are disjoint across chunks, so callers merge
+// per-chunk results under a mutex.
+func forEachChunkConcurrent(items []string, chunkSize, concurrency int, fn func(chunk []string) error) error {
+	chunks := chunkSlice(items, chunkSize)
+	if concurrency <= 1 || len(chunks) <= 1 {
+		var firstErr error
+		for _, chunk := range chunks {
+			if err := fn(chunk); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+
+	g := new(errgroup.Group)
+	g.SetLimit(concurrency)
+	for _, chunk := range chunks {
+		g.Go(func() error { return fn(chunk) })
+	}
+	return g.Wait()
+}
+
 // BatchGet returns (url, token) registrations for multiple txids, issuing one
-// Aerospike batch call per aerospikeBatchChunkSize keys. Same dual-shape
-// parsing as Get.
+// Aerospike batch call per aerospikeBatchChunkSize keys, up to
+// batchChunkConcurrency chunks concurrently. Same dual-shape parsing as Get.
+// Any chunk error fails the whole call (the caller redelivers; all ops are
+// idempotent reads).
 func (s *aerospikeRegistration) BatchGet(txids []string) (map[string][]CallbackEntry, error) {
 	result := make(map[string][]CallbackEntry)
-	for _, chunk := range chunkSlice(txids, aerospikeBatchChunkSize) {
-		if err := s.batchGetChunk(chunk, result); err != nil {
-			return nil, err
-		}
+	var mu sync.Mutex
+	err := forEachChunkConcurrent(txids, aerospikeBatchChunkSize, s.client.batchChunkConcurrency,
+		func(chunk []string) error {
+			// Per-chunk local map: chunk key sets are disjoint, so we merge into
+			// the shared result under a mutex rather than write the map concurrently.
+			local := make(map[string][]CallbackEntry, len(chunk))
+			if cErr := s.batchGetChunk(chunk, local); cErr != nil {
+				return cErr
+			}
+			mu.Lock()
+			for k, v := range local {
+				result[k] = v
+			}
+			mu.Unlock()
+			return nil
+		})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }

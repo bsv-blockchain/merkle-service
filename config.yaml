@@ -168,6 +168,21 @@ aerospike:
   # Env: AEROSPIKE_BATCH_CONCURRENT_NODES
   batchConcurrentNodes: 0
 
+  # How many of a single batch operation's 5000-key chunks are issued
+  # concurrently (registration BatchGet, seen-counter BatchIncrement). A
+  # teranode-default subtree (~1M txids) splits into ~210 chunks; serially that
+  # is ~210 sequential round-trips on one goroutine — the dominant SEEN/MINED
+  # read-path latency.
+  #   0 or 1 = serial, one chunk at a time (prior behaviour)
+  #   >1     = up to N chunks in flight at once
+  # Connection budget: this multiplies with batchConcurrentNodes and the
+  # caller's own concurrency (block.batchGetConcurrency, or active consumer
+  # partitions on the SEEN fetcher). Peak in-flight node connections ≈
+  # callerConcurrency × batchChunkConcurrency × nodes — keep under
+  # connectionQueueSize, or bound this on large clusters.
+  # Env: AEROSPIKE_BATCH_CHUNK_CONCURRENCY
+  batchChunkConcurrency: 8
+
 # ---------------------------------------------------------------------------
 # Kafka — async messaging between services
 # ---------------------------------------------------------------------------

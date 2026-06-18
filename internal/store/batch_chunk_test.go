@@ -1,7 +1,10 @@
 package store
 
 import (
+	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -62,5 +65,112 @@ func TestChunkSlice(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func mkTxids(n int) []string {
+	s := make([]string, n)
+	for i := range s {
+		s[i] = fmt.Sprintf("txid-%d", i)
+	}
+	return s
+}
+
+// TestForEachChunkConcurrent_CoversEveryItemOnce checks the primitive that drives
+// concurrent BatchGet/BatchIncrement: regardless of concurrency, every item is
+// handled exactly once across the chunks. Run with -race, the shared-map merge
+// pattern the real callers use is also exercised for data races.
+func TestForEachChunkConcurrent_CoversEveryItemOnce(t *testing.T) {
+	for _, concurrency := range []int{0, 1, 4, 16} {
+		t.Run(fmt.Sprintf("concurrency=%d", concurrency), func(t *testing.T) {
+			const n = 23_456 // 5 chunks at size 5000, last partial
+			items := mkTxids(n)
+
+			var mu sync.Mutex
+			seen := make(map[string]int, n)
+			var chunkCount atomic.Int64
+
+			err := forEachChunkConcurrent(items, aerospikeBatchChunkSize, concurrency, func(chunk []string) error {
+				chunkCount.Add(1)
+				// Mirror the caller pattern: build a per-chunk local result, then
+				// merge under the mutex.
+				local := make([]string, len(chunk))
+				copy(local, chunk)
+				mu.Lock()
+				for _, id := range local {
+					seen[id]++
+				}
+				mu.Unlock()
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(seen) != n {
+				t.Fatalf("covered %d distinct items, want %d", len(seen), n)
+			}
+			for id, c := range seen {
+				if c != 1 {
+					t.Fatalf("item %s handled %d times, want exactly 1", id, c)
+				}
+			}
+			if got := chunkCount.Load(); got != 5 {
+				t.Fatalf("ran %d chunks, want 5", got)
+			}
+		})
+	}
+}
+
+// TestForEachChunkConcurrent_AttemptsAllAndReturnsError pins the best-effort
+// contract: a failing chunk does not abort the others, and an error is still
+// surfaced (so the caller redelivers).
+func TestForEachChunkConcurrent_AttemptsAllAndReturnsError(t *testing.T) {
+	for _, concurrency := range []int{1, 8} {
+		t.Run(fmt.Sprintf("concurrency=%d", concurrency), func(t *testing.T) {
+			items := mkTxids(20_000) // 4 chunks
+			var attempts atomic.Int64
+			sentinel := errors.New("boom")
+
+			err := forEachChunkConcurrent(items, aerospikeBatchChunkSize, concurrency, func(chunk []string) error {
+				attempts.Add(1)
+				if chunk[0] == "txid-5000" { // the 2nd chunk fails
+					return sentinel
+				}
+				return nil
+			})
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("error = %v, want sentinel", err)
+			}
+			if got := attempts.Load(); got != 4 {
+				t.Fatalf("attempted %d chunks, want all 4 despite the failure", got)
+			}
+		})
+	}
+}
+
+// TestForEachChunkConcurrent_SingleChunkStaysSerial confirms the no-goroutine
+// fast path: a single chunk (or empty input) runs inline regardless of the
+// concurrency setting.
+func TestForEachChunkConcurrent_SingleChunkStaysSerial(t *testing.T) {
+	var calls atomic.Int64
+	if err := forEachChunkConcurrent(mkTxids(10), aerospikeBatchChunkSize, 16, func(_ []string) error {
+		calls.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("single chunk ran %d times, want 1", calls.Load())
+	}
+
+	calls.Store(0)
+	if err := forEachChunkConcurrent(nil, aerospikeBatchChunkSize, 16, func(_ []string) error {
+		calls.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatalf("unexpected error on empty: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("empty input ran fn %d times, want 0", calls.Load())
 	}
 }

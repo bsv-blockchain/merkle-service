@@ -28,6 +28,11 @@ type AerospikeClient struct {
 	// concurrently"; 1 restores the Aerospike library default of serial
 	// per-node sub-batches. See config.AerospikeConfig.BatchConcurrentNodes.
 	batchConcurrentNodes int
+	// batchChunkConcurrency caps how many of a batch operation's 5000-key chunks
+	// are issued concurrently (registration BatchGet, seen-counter
+	// BatchIncrement). <=1 runs chunks serially. See
+	// config.AerospikeConfig.BatchChunkConcurrency.
+	batchChunkConcurrency int
 }
 
 // defaults applied when the corresponding cfg.* field is 0.
@@ -44,6 +49,10 @@ const (
 	// node instead of stacking timeouts on it.
 	defaultMaxErrorRate    = 5
 	defaultErrorRateWindow = 1
+	// defaultBatchChunkConcurrency fans a multi-chunk batch out 8-wide. Matches
+	// the low end of the throughput-review recommendation (8-16); operators bound
+	// it on large clusters via aerospike.batchChunkConcurrency.
+	defaultBatchChunkConcurrency = 8
 )
 
 // NewAerospikeClient creates a new Aerospike client wrapper from a single seed.
@@ -64,10 +73,11 @@ func NewAerospikeClient(host string, port int, namespace string, maxRetries, ret
 		namespace:       namespace,
 		logger:          logger,
 		policy:          policy,
-		readTimeoutMs:   defaultReadTimeoutMs,
-		writeTimeoutMs:  defaultWriteTimeoutMs,
-		batchTimeoutMs:  defaultBatchTimeoutMs,
-		socketTimeoutMs: defaultSocketTimeoutMs,
+		readTimeoutMs:         defaultReadTimeoutMs,
+		writeTimeoutMs:        defaultWriteTimeoutMs,
+		batchTimeoutMs:        defaultBatchTimeoutMs,
+		socketTimeoutMs:       defaultSocketTimeoutMs,
+		batchChunkConcurrency: defaultBatchChunkConcurrency,
 	}, nil
 }
 
@@ -135,7 +145,8 @@ func NewAerospikeClientFromConfig(cfg config.AerospikeConfig, logger *slog.Logge
 		socketTimeoutMs: nz(cfg.SocketTimeoutMs, defaultSocketTimeoutMs),
 		// Not run through nz(): 0 is a meaningful value here (all nodes
 		// concurrent), and it is exactly the default we want.
-		batchConcurrentNodes: cfg.BatchConcurrentNodes,
+		batchConcurrentNodes:  cfg.BatchConcurrentNodes,
+		batchChunkConcurrency: nz(cfg.BatchChunkConcurrency, defaultBatchChunkConcurrency),
 	}
 
 	logger.Info(
@@ -151,6 +162,7 @@ func NewAerospikeClientFromConfig(cfg config.AerospikeConfig, logger *slog.Logge
 		"batchTimeoutMs", c.batchTimeoutMs,
 		"socketTimeoutMs", c.socketTimeoutMs,
 		"batchConcurrentNodes", c.batchConcurrentNodes,
+		"batchChunkConcurrency", c.batchChunkConcurrency,
 	)
 
 	return c, nil
