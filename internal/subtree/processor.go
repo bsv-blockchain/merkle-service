@@ -157,6 +157,7 @@ func (p *Processor) Init(_ interface{}) error {
 		p.cfg.Kafka.ConsumerGroup+"-subtree",
 		[]string{p.cfg.Kafka.SubtreeTopic},
 		p.handleMessage,
+		p.cfg.Kafka.TopicPartitions(),
 		p.Logger,
 	)
 	if err != nil {

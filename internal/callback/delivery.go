@@ -218,6 +218,7 @@ func (d *DeliveryService) Init(_ interface{}) error {
 		d.cfg.Kafka.ConsumerGroup+"-callback",
 		[]string{d.cfg.Kafka.CallbackTopic},
 		d.handleMessage,
+		nil, // 'callback' must stay at 1 partition until a cross-partition BLOCK_PROCESSED barrier exists
 		d.Logger,
 	)
 	if err != nil {

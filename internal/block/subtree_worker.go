@@ -149,6 +149,7 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 		s.kafkaCfg.ConsumerGroup+"-subtree-worker",
 		[]string{s.kafkaCfg.SubtreeWorkTopic},
 		s.handleMessage,
+		s.kafkaCfg.TopicPartitions(),
 		s.Logger,
 	)
 	if err != nil {

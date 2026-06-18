@@ -227,6 +227,14 @@ func (a AerospikeConfig) SeedHosts() []string {
 }
 
 // KafkaConfig holds Kafka connection configuration.
+// Default partition counts for the two safe-to-widen topics. subtree-work gets
+// the most because a block fans out into hundreds–thousands of independent
+// subtree build units; subtree (the SEEN path) gets a smaller spread.
+const (
+	defaultSubtreePartitions     = 12
+	defaultSubtreeWorkPartitions = 24
+)
+
 type KafkaConfig struct {
 	Brokers             []string `yaml:"brokers"             mapstructure:"brokers"`
 	SubtreeTopic        string   `yaml:"subtreeTopic"        mapstructure:"subtreetopic"`
@@ -237,6 +245,44 @@ type KafkaConfig struct {
 	SubtreeWorkTopic    string   `yaml:"subtreeWorkTopic"    mapstructure:"subtreeworktopic"`
 	SubtreeWorkDLQTopic string   `yaml:"subtreeWorkDlqTopic" mapstructure:"subtreeworkdlqtopic"`
 	ConsumerGroup       string   `yaml:"consumerGroup"       mapstructure:"consumergroup"`
+
+	// SubtreePartitions / SubtreeWorkPartitions set how many partitions the
+	// 'subtree' and 'subtree-work' topics are created with (and grown to on
+	// startup). These two topics carry independent, idempotent, per-subtree work
+	// units with NO ordering requirement between them, so partitioning them is
+	// purely a parallelism lever: a consumer group can run at most one in-order
+	// worker goroutine per partition, so partitions cap how many subtrees a stage
+	// can fetch/build concurrently. Defaults: subtree-work 24, subtree 12.
+	//
+	// The 'block' and 'callback' topics are deliberately NOT configurable here and
+	// stay at 1 partition: 'block' is low-rate, and 'callback' relies on
+	// single-partition ordering to keep BLOCK_PROCESSED behind its STUMPs until a
+	// cross-partition delivery barrier exists (see docs/callback-topic-partition-design.md).
+	SubtreePartitions     int `yaml:"subtreePartitions"     mapstructure:"subtreepartitions"`
+	SubtreeWorkPartitions int `yaml:"subtreeWorkPartitions" mapstructure:"subtreeworkpartitions"`
+}
+
+// TopicPartitions maps each topic name to the partition count it should be
+// created with (and grown to). Only the two safe-to-widen topics carry a count
+// above 1; every other topic is absent, which callers/EnsureTopics treat as the
+// default of 1. Counts <= 0 fall back to the built-in default.
+func (k KafkaConfig) TopicPartitions() map[string]int32 {
+	subtree := k.SubtreePartitions
+	if subtree <= 0 {
+		subtree = defaultSubtreePartitions
+	}
+	work := k.SubtreeWorkPartitions
+	if work <= 0 {
+		work = defaultSubtreeWorkPartitions
+	}
+	m := make(map[string]int32, 2)
+	if k.SubtreeTopic != "" {
+		m[k.SubtreeTopic] = int32(subtree) //nolint:gosec // partition counts are small, config-validated
+	}
+	if k.SubtreeWorkTopic != "" {
+		m[k.SubtreeWorkTopic] = int32(work) //nolint:gosec // partition counts are small, config-validated
+	}
+	return m
 }
 
 // P2PMsgBusConfig holds configuration for the underlying libp2p message bus.
@@ -441,6 +487,8 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("kafka.subtreeworktopic", "subtree-work")
 	v.SetDefault("kafka.subtreeworkdlqtopic", "subtree-work-dlq")
 	v.SetDefault("kafka.consumergroup", "merkle-service")
+	v.SetDefault("kafka.subtreepartitions", defaultSubtreePartitions)
+	v.SetDefault("kafka.subtreeworkpartitions", defaultSubtreeWorkPartitions)
 
 	// P2P
 	v.SetDefault("p2p.network", "main")

@@ -222,6 +222,20 @@ kafka:
   # Env: KAFKA_CONSUMER_GROUP
   consumerGroup: merkle-service
 
+  # Partition counts for the two topics that carry independent, per-subtree work
+  # units with no ordering requirement. More partitions = more subtrees a stage
+  # can fetch/build in parallel (a consumer group runs one in-order worker per
+  # partition). Created at this width on first start, and grown to it on later
+  # starts if the topic already exists narrower (partition counts only ever
+  # increase). The 'block' and 'callback' topics are intentionally fixed at 1
+  # partition and are not configurable here — 'block' is low-rate, and 'callback'
+  # depends on single-partition ordering to keep BLOCK_PROCESSED behind its
+  # STUMPs (see docs/callback-topic-partition-design.md).
+  # Env: KAFKA_SUBTREE_PARTITIONS
+  subtreePartitions: 12
+  # Env: KAFKA_SUBTREE_WORK_PARTITIONS
+  subtreeWorkPartitions: 24
+
 # ---------------------------------------------------------------------------
 # P2P — Teranode network connectivity via go-teranode-p2p-client
 # ---------------------------------------------------------------------------

@@ -79,7 +79,7 @@ func TestKafka_ProduceConsumeRoundTrip(t *testing.T) {
 		return nil
 	}
 
-	consumer, err := kafka.NewConsumer(brokers, groupID, []string{topic}, handler, slog.Default())
+	consumer, err := kafka.NewConsumer(brokers, groupID, []string{topic}, handler, nil, slog.Default())
 	if err != nil {
 		t.Skipf("Kafka not available: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestKafka_ProduceMultipleConsumeInOrder(t *testing.T) {
 		return nil
 	}
 
-	consumer, err := kafka.NewConsumer(brokers, groupID, []string{topic}, handler, slog.Default())
+	consumer, err := kafka.NewConsumer(brokers, groupID, []string{topic}, handler, nil, slog.Default())
 	if err != nil {
 		t.Skipf("Kafka not available: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestKafka_ConsumerGroupOffsetManagement(t *testing.T) {
 		return nil
 	}
 
-	consumer1, err := kafka.NewConsumer(brokers, groupID, []string{topic}, handler1, slog.Default())
+	consumer1, err := kafka.NewConsumer(brokers, groupID, []string{topic}, handler1, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("failed to create consumer1: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestKafka_ConsumerGroupOffsetManagement(t *testing.T) {
 		return nil
 	}
 
-	consumer2, err := kafka.NewConsumer(brokers, groupID, []string{topic}, handler2, slog.Default())
+	consumer2, err := kafka.NewConsumer(brokers, groupID, []string{topic}, handler2, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("failed to create consumer2: %v", err)
 	}
