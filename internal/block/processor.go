@@ -121,6 +121,7 @@ func (p *Processor) Init(cfg interface{}) error {
 		p.kafkaCfg.ConsumerGroup+"-block",
 		[]string{p.kafkaCfg.BlockTopic},
 		p.handleMessage,
+		nil, // 'block' is low-rate and deliberately stays at 1 partition
 		p.Logger,
 	)
 	if err != nil {

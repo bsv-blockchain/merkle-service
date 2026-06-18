@@ -124,7 +124,11 @@ type Consumer struct {
 // this service consumes, replaying from the earliest available offset is always
 // correct: the handlers are idempotent and the backlog must be processed, never
 // dropped.
-func NewConsumer(brokers []string, groupID string, topics []string, handler MessageHandler, logger *slog.Logger) (*Consumer, error) {
+// partitions optionally maps a subscribed topic name to the partition count it
+// should be created with (and grown to) by the startup EnsureTopics call; topics
+// absent from the map default to 1. Pass nil to create/keep every subscribed
+// topic at 1 partition.
+func NewConsumer(brokers []string, groupID string, topics []string, handler MessageHandler, partitions map[string]int32, logger *slog.Logger) (*Consumer, error) {
 	c := &Consumer{
 		groupID: groupID,
 		topics:  topics,
@@ -134,14 +138,15 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 		workers: make(map[topicPartition]*partitionWorker),
 	}
 
-	// Ensure the subscribed topics exist before joining the group, so partition
-	// assignment is immediate rather than waiting for a metadata refresh to
-	// discover a lazily-auto-created topic (see EnsureTopics — this is what left
-	// /reprocess block messages unconsumed under franz). Best-effort: a transient
-	// failure is logged, not fatal — the consumer still works via metadata
-	// refresh + producer-side auto-creation, just less promptly.
+	// Ensure the subscribed topics exist (at their configured partition count)
+	// before joining the group, so partition assignment is immediate rather than
+	// waiting for a metadata refresh to discover a lazily-auto-created topic (see
+	// EnsureTopics — this is what left /reprocess block messages unconsumed under
+	// franz). Best-effort: a transient failure is logged, not fatal — the consumer
+	// still works via metadata refresh + producer-side auto-creation, just less
+	// promptly (and at the default partition count until a later start grows it).
 	ensureCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if eErr := EnsureTopics(ensureCtx, brokers, topics, logger); eErr != nil && logger != nil {
+	if eErr := EnsureTopics(ensureCtx, brokers, topics, partitions, logger); eErr != nil && logger != nil {
 		logger.Warn("could not pre-create consumer topics; relying on auto-create",
 			"groupID", groupID, "topics", topics, "error", eErr)
 	}
