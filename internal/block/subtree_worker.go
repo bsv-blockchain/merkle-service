@@ -367,7 +367,10 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 			// next session.
 			return fmt.Errorf("encoding subtree work message for DLQ: %w", encErr)
 		}
-		if pubErr := s.dlqProducer.Publish(workMsg.SubtreeHash, data); pubErr != nil {
+		// PublishWithHashKey to keep the worker's subtree-hash keying uniform with
+		// the retry/fan-out paths (SHA256-derived). The DLQ is its own topic so
+		// this is cosmetic for co-location, but it avoids a confusing mixed scheme.
+		if pubErr := s.dlqProducer.PublishWithHashKey(workMsg.SubtreeHash, data); pubErr != nil {
 			return fmt.Errorf("publishing subtree work message to DLQ: %w", pubErr)
 		}
 		return nil
@@ -387,7 +390,13 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 	if encErr != nil {
 		return fmt.Errorf("encoding subtree work message for retry: %w", encErr)
 	}
-	if pubErr := s.retryProducer.Publish(workMsg.SubtreeHash, data); pubErr != nil {
+	// PublishWithHashKey (not Publish) so the retried item keys IDENTICALLY to the
+	// block-processor's fan-out, which publishes subtree-work via HashBatchEntry
+	// (a SHA256-derived key). A raw key here would be hashed differently by the
+	// broker and land the retry on a DIFFERENT partition than its original —
+	// harmless for these independent units, but it breaks same-subtree partition
+	// stability. Keep the keying consistent across fan-out and retry.
+	if pubErr := s.retryProducer.PublishWithHashKey(workMsg.SubtreeHash, data); pubErr != nil {
 		return fmt.Errorf("re-publishing subtree work message for retry: %w", pubErr)
 	}
 	// Intentionally do NOT decrement on retry — only success or DLQ counts.
