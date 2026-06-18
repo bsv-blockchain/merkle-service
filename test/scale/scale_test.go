@@ -228,6 +228,9 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 	counterSetName := fmt.Sprintf("scale_counter_%d", time.Now().UnixNano())
 	subtreeCounter := store.NewSubtreeCounterStore(asClient, counterSetName, 600, 3, 100, logger)
 
+	expectedStumpSetName := fmt.Sprintf("scale_expstump_%d", time.Now().UnixNano())
+	expectedStumps := store.NewExpectedStumpStore(asClient, expectedStumpSetName, 600, 3, 100, logger)
+
 	// Start block processor.
 	kafkaCfg := config.KafkaConfig{
 		Brokers:          []string{kafkaBroker},
@@ -260,7 +263,7 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 	t.Cleanup(func() { processor.Stop() })
 
 	// Start subtree worker service.
-	subtreeWorker := block.NewSubtreeWorkerService(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, stumpStore, urlRegistry, subtreeCounter, logger)
+	subtreeWorker := block.NewSubtreeWorkerService(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, stumpStore, urlRegistry, subtreeCounter, expectedStumps, logger)
 	if err := subtreeWorker.Init(nil); err != nil {
 		t.Fatalf("failed to init subtree worker: %v", err)
 	}

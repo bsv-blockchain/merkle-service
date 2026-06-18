@@ -69,10 +69,10 @@ func NewAerospikeClient(host string, port int, namespace string, maxRetries, ret
 	}
 
 	return &AerospikeClient{
-		client:          client,
-		namespace:       namespace,
-		logger:          logger,
-		policy:          policy,
+		client:                client,
+		namespace:             namespace,
+		logger:                logger,
+		policy:                policy,
 		readTimeoutMs:         defaultReadTimeoutMs,
 		writeTimeoutMs:        defaultWriteTimeoutMs,
 		batchTimeoutMs:        defaultBatchTimeoutMs,

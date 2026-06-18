@@ -95,6 +95,7 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 	urlRegistry := store.NewCallbackURLRegistry(asClient, fmt.Sprintf("prod_urls_%d", stamp), 0, 3, 100, logger)
 	dataHubRegistry := store.NewDataHubRegistry(asClient, fmt.Sprintf("prod_datahub_%d", stamp), 0, 3, 100, logger)
 	subtreeCounter := store.NewSubtreeCounterStore(asClient, fmt.Sprintf("prod_counter_%d", stamp), 600, 3, 100, logger)
+	expectedStumps := store.NewExpectedStumpStore(asClient, fmt.Sprintf("prod_expstump_%d", stamp), 600, 3, 100, logger)
 	// seenThreshold 3 = config.yaml default; with a single announcement per
 	// subtree no SEEN_MULTIPLE_NODES fires, matching one-node observation.
 	seenCounter := store.NewSeenCounterStore(asClient, fmt.Sprintf("prod_seen_%d", stamp), 3, 3, 100, logger)
@@ -192,7 +193,7 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 	t.Cleanup(func() { processor.Stop() })
 
 	// --- Subtree worker ---
-	worker := block.NewSubtreeWorkerService(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, stumpStore, urlRegistry, subtreeCounter, logger)
+	worker := block.NewSubtreeWorkerService(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, stumpStore, urlRegistry, subtreeCounter, expectedStumps, logger)
 	if err := worker.Init(nil); err != nil {
 		t.Fatalf("failed to init subtree worker: %v", err)
 	}
@@ -298,15 +299,16 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 	minedRate := float64(manifest.TotalTxids) / minedDur.Seconds()
 	totalDur := seenDur + minedDur
 	totalRate := float64(manifest.TotalTxids) / totalDur.Seconds()
-	t.Logf("\n"+
-		"╔══════════════════════════════════════════════════════════════╗\n"+
-		"║          PRODUCTION-SHAPE SCALE REPORT                       ║\n"+
-		"╠══════════════════════════════════════════════════════════════╣\n"+
-		"║ Topology: subtree=%dp, subtree-work=%dp, callback=%dp, delivery=%d ║\n"+
-		"║ SEEN phase (announce→delivered):  %-12s %9.0f txids/s ║\n"+
-		"║ MINED phase (inject→delivered):   %-12s %9.0f txids/s ║\n"+
-		"║ Total (both phases, %7d txids): %-12s %8.0f txids/s ║\n"+
-		"╚══════════════════════════════════════════════════════════════╝",
+	t.Logf(
+		"\n"+
+			"╔══════════════════════════════════════════════════════════════╗\n"+
+			"║          PRODUCTION-SHAPE SCALE REPORT                       ║\n"+
+			"╠══════════════════════════════════════════════════════════════╣\n"+
+			"║ Topology: subtree=%dp, subtree-work=%dp, callback=%dp, delivery=%d ║\n"+
+			"║ SEEN phase (announce→delivered):  %-12s %9.0f txids/s ║\n"+
+			"║ MINED phase (inject→delivered):   %-12s %9.0f txids/s ║\n"+
+			"║ Total (both phases, %7d txids): %-12s %8.0f txids/s ║\n"+
+			"╚══════════════════════════════════════════════════════════════╝",
 		prodSubtreePartitions, prodSubtreeWorkPartitions, prodCallbackPartitions, prodDeliveryInstances,
 		seenDur.Round(time.Millisecond), seenRate,
 		minedDur.Round(time.Millisecond), minedRate,

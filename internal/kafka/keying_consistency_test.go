@@ -31,7 +31,7 @@ func TestFanoutAndRetryKeyingAgree(t *testing.T) {
 // fan-out, so the broker would place them on different partitions.
 func TestRawKeyDiffersFromHashedKey(t *testing.T) {
 	const subtreeHash = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
-	raw := subtreeHash                     // old retry: Publish(subtreeHash) -> raw key
+	raw := subtreeHash                      // old retry: Publish(subtreeHash) -> raw key
 	hashed := HashPartitionKey(subtreeHash) // fan-out / fixed retry
 	if raw == hashed {
 		t.Fatalf("expected raw and hashed keys to differ; both were %q", raw)

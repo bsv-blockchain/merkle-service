@@ -69,7 +69,8 @@ func (s *aerospikeExpectedStump) AddSubtreeIndex(blockHash string, subtreeIndex 
 		if err != nil {
 			return fmt.Errorf("expected-stump key for %s: %w", url, err)
 		}
-		recs = append(recs, as.NewBatchWrite(wpol, key,
+		recs = append(recs, as.NewBatchWrite(
+			wpol, key,
 			as.ListAppendWithPolicyOp(listPolicy, expectedIndicesBin, subtreeIndex),
 		))
 	}

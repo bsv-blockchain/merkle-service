@@ -25,7 +25,7 @@ func TestKafkaConfig_TopicPartitions(t *testing.T) {
 		k := KafkaConfig{SubtreeTopic: "subtree", SubtreeWorkTopic: "subtree-work", SubtreePartitions: 4, SubtreeWorkPartitions: 32}
 		m := k.TopicPartitions()
 		if m["subtree"] != 4 || m["subtree-work"] != 32 {
-			t.Errorf("explicit counts not honoured: %+v", m)
+			t.Errorf("explicit counts not honored: %+v", m)
 		}
 	})
 
