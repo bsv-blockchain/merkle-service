@@ -110,6 +110,13 @@ aerospike:
   # Env: AEROSPIKE_SUBTREE_COUNTER_TTL_SEC
   subtreeCounterTTLSec: 600
 
+  # Aerospike set storing, per (block, callbackURL), the set of subtree indices
+  # that produced a STUMP — surfaced on BLOCK_PROCESSED so the receiver can
+  # detect a missing STUMP. Shares subtreeCounterTTLSec (same lifetime: both
+  # live only until the block is fully processed).
+  # Env: AEROSPIKE_EXPECTED_STUMP_SET
+  expectedStumpSet: merkle_expected_stumps
+
   # Aerospike set used for cross-subtree callback accumulation (batching MINED messages).
   # Env: AEROSPIKE_CALLBACK_ACCUMULATOR_SET
   callbackAccumulatorSet: merkle_callback_accum

@@ -248,6 +248,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		if err := emitBlockProcessedCallbacks(
 			p.Logger,
 			p.urlRegistry,
+			nil, // coinbase-only block: no subtrees -> no STUMPs -> empty expected set
 			p.callbackProducer,
 			blockMsg.Hash,
 			blockMsg.OverrideCallbackURL,

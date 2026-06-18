@@ -44,6 +44,7 @@ var ttlTables = []ttlTable{
 	},
 	{parent: "callback_dedup"},
 	{parent: "subtree_counters"},
+	{parent: "expected_stumps"},
 	{
 		parent:    "callback_accumulator",
 		parentKey: "block_hash",

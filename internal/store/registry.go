@@ -14,6 +14,7 @@ type Registry struct {
 	CallbackAccumulator CallbackAccumulatorStore
 	SeenCounter         SeenCounterStore
 	SubtreeCounter      SubtreeCounterStore
+	ExpectedStump       ExpectedStumpStore
 
 	// Health reports backend reachability for the API health endpoint. May be
 	// nil for backends that don't need a liveness probe (e.g., an in-memory
