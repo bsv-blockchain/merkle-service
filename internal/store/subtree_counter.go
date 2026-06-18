@@ -89,11 +89,15 @@ func (s *aerospikeSubtreeCounter) Init(blockHash string, count int, data *BlockP
 }
 
 // Decrement atomically decrements the counter for the given blockHash and
-// returns the new value. The Operate call already fetches every bin via GetOp,
-// so when the counter has drained (remaining <= 0) the stashed
-// BlockProcessedData is decoded from the same record and returned — no extra
-// round trip. data is nil while remaining > 0 (the common per-subtree path) to
-// avoid needless JSON work, and nil at zero if no data was stamped at Init.
+// returns the new value. The Operate reads back the counter via GetBinOp (the
+// add op itself returns no value), so the common per-subtree path
+// (remaining > 0) is a single round trip that ships only the small counter bin
+// — NOT the stashed BlockProcessedData, which the previous GetOp (read-all-bins)
+// re-transferred on every one of a block's N decrements (O(N) wasted block-data
+// bytes per block; tens of MB for large blocks). Only on the final decrement
+// (remaining <= 0) do we make one targeted read of the block-data bin and decode
+// it. data is nil while remaining > 0, and nil at zero if no data was stamped at
+// Init or it could not be read back.
 func (s *aerospikeSubtreeCounter) Decrement(blockHash string) (remaining int, data *BlockProcessedData, err error) {
 	key, err := as.NewKey(s.client.Namespace(), s.setName, blockHash)
 	if err != nil {
@@ -111,7 +115,13 @@ func (s *aerospikeSubtreeCounter) Decrement(blockHash string) (remaining int, da
 	// keep being processed.
 	wp.Expiration = uint32(s.ttlSec) //nolint:gosec // ttlSec is config-validated and fits uint32
 
-	record, err := s.client.Client().Operate(wp, key, as.AddOp(as.NewBin(subtreeCounterBin, -1)), as.GetOp())
+	// Decrement then read back ONLY the counter bin: GetBinOp(subtreeCounterBin)
+	// returns the post-add value without dragging the block-data bin over the
+	// wire the way GetOp (read-all-bins) did on every decrement.
+	record, err := s.client.Client().Operate(wp, key,
+		as.AddOp(as.NewBin(subtreeCounterBin, -1)),
+		as.GetBinOp(subtreeCounterBin),
+	)
 	if err != nil {
 		var asErr as.Error
 		if errors.As(err, &asErr) && asErr.Matches(astypes.KEY_NOT_FOUND_ERROR) {
@@ -125,15 +135,27 @@ func (s *aerospikeSubtreeCounter) Decrement(blockHash string) (remaining int, da
 		return 0, nil, fmt.Errorf("unexpected type for counter bin: %T", record.Bins[subtreeCounterBin])
 	}
 
-	// Only decode the stashed block data on the final decrement — the per-subtree
-	// hot path (remaining > 0) skips the JSON work entirely.
+	// Only the final decrement needs the stashed block data — read it with one
+	// targeted single-bin Get rather than shipping it on every decrement. Block
+	// data is immutable once Init stamped it and the record's TTL was just
+	// re-stamped above, so this follow-up read is safe; a miss (record gone, or
+	// no data stamped) is tolerated and surfaces as data == nil.
 	if val <= 0 {
-		if raw, ok := record.Bins[blockDataBin].(string); ok && raw != "" {
-			var d BlockProcessedData
-			if uErr := json.Unmarshal([]byte(raw), &d); uErr != nil {
-				s.logger.Warn("failed to decode block-processed data from counter", "blockHash", blockHash, "error", uErr)
-			} else {
-				data = &d
+		dataRec, dErr := s.client.Client().Get(s.client.ReadPolicy(), key, blockDataBin)
+		switch {
+		case dErr != nil:
+			var asErr as.Error
+			if !(errors.As(dErr, &asErr) && asErr.Matches(astypes.KEY_NOT_FOUND_ERROR)) {
+				s.logger.Warn("failed to read block-processed data from counter", "blockHash", blockHash, "error", dErr)
+			}
+		case dataRec != nil:
+			if raw, ok := dataRec.Bins[blockDataBin].(string); ok && raw != "" {
+				var d BlockProcessedData
+				if uErr := json.Unmarshal([]byte(raw), &d); uErr != nil {
+					s.logger.Warn("failed to decode block-processed data from counter", "blockHash", blockHash, "error", uErr)
+				} else {
+					data = &d
+				}
 			}
 		}
 	}
