@@ -104,6 +104,15 @@ type CallbackTopicMessage struct {
 	SubtreeCount  *int     `json:"subtreeCount,omitempty"`
 	SubtreeHashes []string `json:"subtreeHashes,omitempty"`
 	CoinbaseBUMP  string   `json:"coinbaseBump,omitempty"`
+
+	// ExpectedSubtreeIndices is the set of subtree indices (ascending) that
+	// produced a STUMP for this callback URL in this block. Only set on
+	// BLOCK_PROCESSED. It lets the receiver detect a missing STUMP — STUMPs are
+	// sparse (only subtrees with a tracked tx produce one), so without it a lost
+	// STUMP is indistinguishable from a legitimately-absent one and its txs are
+	// silently never marked MINED. Additive and omitempty: older consumers
+	// ignore it.
+	ExpectedSubtreeIndices []int `json:"expectedSubtreeIndices,omitempty"`
 }
 
 // PartitionKey returns the Kafka partition key for this callback message.

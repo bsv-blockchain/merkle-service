@@ -93,6 +93,10 @@ func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Lo
 			asClient, cfg.Aerospike.SubtreeCounterSet, cfg.Aerospike.SubtreeCounterTTLSec,
 			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
 		),
+		ExpectedStump: NewExpectedStumpStore(
+			asClient, cfg.Aerospike.ExpectedStumpSet, cfg.Aerospike.SubtreeCounterTTLSec,
+			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
+		),
 		Health: asClient,
 	}
 	r.AddCloser(func() error { asClient.Close(); return nil })

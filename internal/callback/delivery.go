@@ -72,10 +72,11 @@ type callbackPayload struct {
 
 	// BLOCK_PROCESSED enrichment — see CallbackTopicMessage. Additive and
 	// omitempty so consumers that don't read them are unaffected.
-	MerkleRoot    string   `json:"merkleRoot,omitempty"`
-	SubtreeCount  *int     `json:"subtreeCount,omitempty"`
-	SubtreeHashes []string `json:"subtreeHashes,omitempty"`
-	CoinbaseBUMP  string   `json:"coinbaseBump,omitempty"`
+	MerkleRoot             string   `json:"merkleRoot,omitempty"`
+	SubtreeCount           *int     `json:"subtreeCount,omitempty"`
+	SubtreeHashes          []string `json:"subtreeHashes,omitempty"`
+	CoinbaseBUMP           string   `json:"coinbaseBump,omitempty"`
+	ExpectedSubtreeIndices []int    `json:"expectedSubtreeIndices,omitempty"`
 }
 
 // DeliveryService consumes callback messages from the callback Kafka topic
@@ -639,10 +640,11 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 		// BLOCK_PROCESSED enrichment — pass through verbatim. Empty for other
 		// callback types (and for BLOCK_PROCESSED produced before the producer
 		// stamped them), where omitempty drops them from the JSON.
-		MerkleRoot:    msg.MerkleRoot,
-		SubtreeCount:  msg.SubtreeCount,
-		SubtreeHashes: msg.SubtreeHashes,
-		CoinbaseBUMP:  msg.CoinbaseBUMP,
+		MerkleRoot:             msg.MerkleRoot,
+		SubtreeCount:           msg.SubtreeCount,
+		SubtreeHashes:          msg.SubtreeHashes,
+		CoinbaseBUMP:           msg.CoinbaseBUMP,
+		ExpectedSubtreeIndices: msg.ExpectedSubtreeIndices,
 	}
 
 	// STUMP bytes are claim-checked: CallbackTopicMessage carries only a ref,

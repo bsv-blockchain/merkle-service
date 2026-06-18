@@ -87,6 +87,7 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 		CallbackAccumulator: newCallbackAccumulator(db, d, cfg.Aerospike.CallbackAccumulatorTTLSec),
 		SeenCounter:         newSeenCounter(db, d, cfg.Callback.SeenThreshold),
 		SubtreeCounter:      newSubtreeCounter(db, d, cfg.Aerospike.SubtreeCounterTTLSec),
+		ExpectedStump:       newExpectedStump(db, d, cfg.Aerospike.SubtreeCounterTTLSec),
 		Health:              &pingHealth{db: db},
 	}
 	r.AddCloser(func() error {

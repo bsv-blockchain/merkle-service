@@ -132,6 +132,25 @@ type SubtreeCounterStore interface {
 	Decrement(blockHash string) (remaining int, data *BlockProcessedData, err error)
 }
 
+// ExpectedStumpStore records, per (block, callbackURL), the set of subtree
+// indices that produced a STUMP for that URL. BLOCK_PROCESSED carries this set
+// so the receiver knows exactly which STUMPs to expect and can detect a missing
+// one (STUMPs are sparse — only subtrees with a tracked tx produce one — so the
+// receiver cannot otherwise tell a legitimately-absent STUMP from a lost one).
+//
+// Adds are idempotent per (block, URL, index): a re-driven subtree work item
+// never double-counts. The record's TTL is re-stamped on every add and is sized
+// to outlive the block's processing, mirroring the subtree counter.
+type ExpectedStumpStore interface {
+	// AddSubtreeIndex records that subtreeIndex produced a STUMP for each URL in
+	// callbackURLs, within blockHash. Must be durable before the block's subtree
+	// counter drains to zero so the set is complete when BLOCK_PROCESSED is read.
+	AddSubtreeIndex(blockHash string, subtreeIndex int, callbackURLs []string) error
+	// GetSubtreeIndices returns the recorded subtree indices for (block, URL) in
+	// ascending order, or an empty slice if none were recorded.
+	GetSubtreeIndices(blockHash, callbackURL string) ([]int, error)
+}
+
 // BackendHealth reports whether the underlying backend (Aerospike cluster, SQL
 // connection pool) is reachable. Used by the API /health endpoint.
 type BackendHealth interface {

@@ -42,6 +42,7 @@ type SubtreeWorkerService struct {
 	stumpStore       store.StumpStore
 	urlRegistry      store.CallbackURLRegistry
 	subtreeCounter   store.SubtreeCounterStore
+	expectedStumps   store.ExpectedStumpStore
 	dataHubClient    *datahub.Client
 	regCache         RegCache
 	batchSem         chan struct{}
@@ -56,6 +57,7 @@ func NewSubtreeWorkerService(
 	stumpStore store.StumpStore,
 	urlRegistry store.CallbackURLRegistry,
 	subtreeCounter store.SubtreeCounterStore,
+	expectedStumps store.ExpectedStumpStore,
 	logger *slog.Logger,
 ) *SubtreeWorkerService {
 	s := &SubtreeWorkerService{
@@ -67,6 +69,7 @@ func NewSubtreeWorkerService(
 		stumpStore:     stumpStore,
 		urlRegistry:    urlRegistry,
 		subtreeCounter: subtreeCounter,
+		expectedStumps: expectedStumps,
 	}
 	s.InitBase("subtree-worker")
 	if logger != nil {
@@ -303,6 +306,21 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 	if result != nil && len(result.CallbackGroups) > 0 {
 		if pubErr := s.publishSubtreeCallbacks(workMsg, result); pubErr != nil {
 			return s.handleTransientFailure(workMsg, pubErr)
+		}
+		// Record this subtree's index into each matched URL's expected-STUMP set
+		// BEFORE decrementing the counter, so the set is complete when the last
+		// subtree drains the counter and BLOCK_PROCESSED reads it. Reliable, not
+		// best-effort: an under-counted set would let arcade under-expect STUMPs
+		// and silently miss one — so a failure re-drives the (idempotent) work
+		// item, exactly like the counter decrement below.
+		if s.expectedStumps != nil {
+			urls := make([]string, 0, len(result.CallbackGroups))
+			for callbackURL := range result.CallbackGroups {
+				urls = append(urls, callbackURL)
+			}
+			if recErr := s.expectedStumps.AddSubtreeIndex(workMsg.BlockHash, workMsg.SubtreeIndex, urls); recErr != nil {
+				return s.handleTransientFailure(workMsg, fmt.Errorf("recording expected-STUMP indices: %w", recErr))
+			}
 		}
 	}
 
@@ -574,7 +592,7 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 // emit fires again; duplicate BLOCK_PROCESSED messages are deduplicated at
 // the callback delivery service (keyed by blockHash + callbackURL + type).
 func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overrideToken string, blockData *store.BlockProcessedData) error {
-	return emitBlockProcessedCallbacks(s.Logger, s.urlRegistry, s.callbackProducer, blockHash, overrideURL, overrideToken, blockData)
+	return emitBlockProcessedCallbacks(s.Logger, s.urlRegistry, s.expectedStumps, s.callbackProducer, blockHash, overrideURL, overrideToken, blockData)
 }
 
 // callbackPublisher is the narrow surface emitBlockProcessedCallbacks needs.
@@ -609,6 +627,7 @@ type callbackPublisher interface {
 func emitBlockProcessedCallbacks(
 	logger *slog.Logger,
 	urlRegistry store.CallbackURLRegistry,
+	expectedStumps store.ExpectedStumpStore,
 	producer callbackPublisher,
 	blockHash, overrideURL, overrideToken string,
 	blockData *store.BlockProcessedData,
@@ -653,6 +672,23 @@ func emitBlockProcessedCallbacks(
 			msg.SubtreeCount = &blockData.SubtreeCount
 			msg.SubtreeHashes = blockData.SubtreeHashes
 			msg.CoinbaseBUMP = blockData.CoinbaseBUMP
+		}
+		// Attach the set of subtree indices that produced a STUMP for this URL so
+		// the receiver can detect a missing one. A read failure must not ship a
+		// BLOCK_PROCESSED without its expected set (that would silently disable
+		// detection for the block), so skip this URL and surface the error — the
+		// caller re-drives and the downstream dedup absorbs any duplicate.
+		if expectedStumps != nil {
+			indices, idxErr := expectedStumps.GetSubtreeIndices(blockHash, entry.URL)
+			if idxErr != nil {
+				logger.Error("failed to read expected-STUMP indices for BLOCK_PROCESSED",
+					"blockHash", blockHash, "callbackURL", entry.URL, "error", idxErr)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("reading expected-STUMP indices for %s: %w", entry.URL, idxErr)
+				}
+				continue
+			}
+			msg.ExpectedSubtreeIndices = indices
 		}
 		data, encErr := msg.Encode()
 		if encErr != nil {

@@ -123,6 +123,11 @@ type AerospikeConfig struct {
 	CallbackURLRegistryTTLSec int    `yaml:"callbackUrlRegistryTTLSec" mapstructure:"callbackurlregistryttlsec"`
 	SubtreeCounterSet         string `yaml:"subtreeCounterSet"    mapstructure:"subtreecounterset"`
 	SubtreeCounterTTLSec      int    `yaml:"subtreeCounterTTLSec" mapstructure:"subtreecounterttlsec"`
+	// ExpectedStumpSet stores, per (block, callbackURL), the set of subtree
+	// indices that produced a STUMP — surfaced on BLOCK_PROCESSED so the receiver
+	// can detect a missing STUMP. Shares the subtree counter's TTL (same
+	// lifetime: both live until the block is fully processed).
+	ExpectedStumpSet string `yaml:"expectedStumpSet" mapstructure:"expectedstumpset"`
 	CallbackAccumulatorSet    string `yaml:"callbackAccumulatorSet"    mapstructure:"callbackaccumulatorset"`
 	CallbackAccumulatorTTLSec int    `yaml:"callbackAccumulatorTTLSec" mapstructure:"callbackaccumulatorttlsec"`
 	// DataHubRegistry is the Aerospike set name for the on-demand /reprocess
@@ -451,6 +456,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.callbackurlregistry", "merkle_callback_urls")
 	v.SetDefault("aerospike.callbackurlregistryttlsec", 7*24*60*60)
 	v.SetDefault("aerospike.subtreecounterset", "merkle_subtree_counters")
+	v.SetDefault("aerospike.expectedstumpset", "merkle_expected_stumps")
 	// 1h. With Decrement re-stamping the TTL on every subtree, this is an
 	// inactivity window, not a hard block-processing deadline — it only fires
 	// if a block makes zero subtree progress for a full hour. The former 600s
@@ -596,6 +602,7 @@ func bindEnvVars(v *viper.Viper) {
 		"aerospike.callbackurlregistryttlsec":   "AEROSPIKE_CALLBACK_URL_REGISTRY_TTL_SEC",
 		"aerospike.subtreecounterset":           "AEROSPIKE_SUBTREE_COUNTER_SET",
 		"aerospike.subtreecounterttlsec":        "AEROSPIKE_SUBTREE_COUNTER_TTL_SEC",
+		"aerospike.expectedstumpset":            "AEROSPIKE_EXPECTED_STUMP_SET",
 		"aerospike.callbackaccumulatorset":      "AEROSPIKE_CALLBACK_ACCUMULATOR_SET",
 		"aerospike.callbackaccumulatorttlsec":   "AEROSPIKE_CALLBACK_ACCUMULATOR_TTL_SEC",
 		"aerospike.datahubregistry":             "AEROSPIKE_DATAHUB_REGISTRY",
