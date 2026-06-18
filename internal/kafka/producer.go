@@ -205,12 +205,13 @@ func (p *Producer) Publish(key string, value []byte) error {
 	return nil
 }
 
-// PublishWithHashKey sends a message using a SHA256 hash of the key for partitioning.
-// Useful for callback URL-based partitioning.
+// PublishWithHashKey sends a message keyed by the SHA256-derived partition key
+// of key — the single-record equivalent of HashBatchEntry. Both go through
+// HashPartitionKey, so a record published this way lands on the same partition
+// as one fanned out via HashBatchEntry for the same key (the property the
+// subtree-work retry path and the callback emit/retry paths rely on).
 func (p *Producer) PublishWithHashKey(key string, value []byte) error {
-	hash := sha256.Sum256([]byte(key))
-	hashKey := fmt.Sprintf("%x", hash[:8])
-	return p.Publish(hashKey, value)
+	return p.Publish(HashPartitionKey(key), value)
 }
 
 // PublishBatch sends every entry in one synchronous call when the underlying
