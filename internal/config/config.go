@@ -127,7 +127,7 @@ type AerospikeConfig struct {
 	// indices that produced a STUMP — surfaced on BLOCK_PROCESSED so the receiver
 	// can detect a missing STUMP. Shares the subtree counter's TTL (same
 	// lifetime: both live until the block is fully processed).
-	ExpectedStumpSet string `yaml:"expectedStumpSet" mapstructure:"expectedstumpset"`
+	ExpectedStumpSet          string `yaml:"expectedStumpSet" mapstructure:"expectedstumpset"`
 	CallbackAccumulatorSet    string `yaml:"callbackAccumulatorSet"    mapstructure:"callbackaccumulatorset"`
 	CallbackAccumulatorTTLSec int    `yaml:"callbackAccumulatorTTLSec" mapstructure:"callbackaccumulatorttlsec"`
 	// DataHubRegistry is the Aerospike set name for the on-demand /reprocess
@@ -282,10 +282,10 @@ func (k KafkaConfig) TopicPartitions() map[string]int32 {
 	}
 	m := make(map[string]int32, 2)
 	if k.SubtreeTopic != "" {
-		m[k.SubtreeTopic] = int32(subtree) //nolint:gosec // partition counts are small, config-validated
+		m[k.SubtreeTopic] = int32(subtree)
 	}
 	if k.SubtreeWorkTopic != "" {
-		m[k.SubtreeWorkTopic] = int32(work) //nolint:gosec // partition counts are small, config-validated
+		m[k.SubtreeWorkTopic] = int32(work)
 	}
 	return m
 }

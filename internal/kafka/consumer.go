@@ -152,7 +152,8 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 	}
 	cancel()
 
-	opts := append(consumerOpts(brokers, groupID, topics),
+	opts := append(
+		consumerOpts(brokers, groupID, topics),
 		// Rebalances are processed only inside PollFetches, so the
 		// assigned/revoked/lost callbacks below run on the poll goroutine and
 		// partitions are never moved while a dispatch is in flight.
