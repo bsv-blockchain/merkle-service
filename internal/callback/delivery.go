@@ -115,6 +115,9 @@ type DeliveryService struct {
 	httpClient    *http.Client
 	dedupStore    CallbackDeduper
 	stumpStore    store.StumpStore
+	// urlRegistry trips a per-URL circuit breaker after a DLQ'd callback so dead
+	// endpoints stop receiving fan-out. nil disables the breaker.
+	urlRegistry store.CallbackURLRegistry
 
 	// bodyCache memoizes the fully-marshaled HTTP body of STUMP callbacks,
 	// keyed by (StumpRef, BlockHash, SubtreeIndex). The auth token travels in
@@ -139,12 +142,13 @@ const bodyCacheMaxEntries = 64
 // NewDeliveryService creates a new callback DeliveryService. stumpStore is
 // required whenever STUMP-type messages are delivered — it is the claim-check
 // store holding the STUMP bytes referenced by CallbackTopicMessage.StumpRef.
-func NewDeliveryService(cfg *config.Config, dedupStore CallbackDeduper, stumpStore store.StumpStore) *DeliveryService {
+func NewDeliveryService(cfg *config.Config, dedupStore CallbackDeduper, stumpStore store.StumpStore, urlRegistry store.CallbackURLRegistry) *DeliveryService {
 	return &DeliveryService{
-		cfg:        cfg,
-		dedupStore: dedupStore,
-		stumpStore: stumpStore,
-		bodyCache:  make(map[string][]byte, bodyCacheMaxEntries),
+		cfg:         cfg,
+		dedupStore:  dedupStore,
+		stumpStore:  stumpStore,
+		urlRegistry: urlRegistry,
+		bodyCache:   make(map[string][]byte, bodyCacheMaxEntries),
 	}
 }
 
@@ -497,7 +501,11 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 			"reason", "permanent",
 			"cause", cause,
 		)
-		return d.publishToDLQDurably(cbMsg)
+		if err := d.publishToDLQDurably(cbMsg); err != nil {
+			return err
+		}
+		d.recordCallbackURLFailure(cbMsg.CallbackURL)
+		return nil
 	}
 
 	// Retry budget exhausted: route to DLQ.
@@ -511,7 +519,11 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 			"subtreeIndex", cbMsg.SubtreeIndex,
 			"cause", cause,
 		)
-		return d.publishToDLQDurably(cbMsg)
+		if err := d.publishToDLQDurably(cbMsg); err != nil {
+			return err
+		}
+		d.recordCallbackURLFailure(cbMsg.CallbackURL)
+		return nil
 	}
 
 	// Bump retry count + compute next NextRetryAt using linear backoff, then
@@ -533,6 +545,31 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 	)
 
 	return d.republishForRetry(cbMsg, "retry after delivery failure")
+}
+
+// recordCallbackURLFailure trips the per-URL circuit breaker after a callback
+// to this URL was DLQ'd. When the URL crosses cfg.Callback.BreakerThreshold it
+// is disabled in the registry so BLOCK_PROCESSED / STUMP fan-out stops
+// targeting it; a re-registration via /watch clears the breaker. A nil registry
+// or a non-positive threshold disables the breaker entirely. Best-effort —
+// a registry error is logged, not propagated (the DLQ publish already
+// succeeded, so the source offset must still be committed).
+func (d *DeliveryService) recordCallbackURLFailure(callbackURL string) {
+	threshold := d.cfg.Callback.BreakerThreshold
+	if d.urlRegistry == nil || threshold <= 0 || callbackURL == "" {
+		return
+	}
+	disabled, err := d.urlRegistry.RecordFailure(callbackURL, threshold)
+	if err != nil {
+		d.Logger.Warn("failed to record callback URL breaker failure",
+			"callbackUrl", callbackURL, "error", err)
+		return
+	}
+	if disabled {
+		d.Logger.Warn("callback URL auto-disabled after repeated DLQ'd deliveries — "+
+			"re-register via /watch to re-enable",
+			"callbackUrl", callbackURL, "threshold", threshold)
+	}
 }
 
 // republishForRetry encodes cbMsg and publishes it back to the callback

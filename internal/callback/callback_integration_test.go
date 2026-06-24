@@ -90,7 +90,7 @@ func TestCallbackDelivery_SuccessfulCallback(t *testing.T) {
 		},
 	}
 
-	svc := callback.NewDeliveryService(cfg, nil, newTestStumpStore())
+	svc := callback.NewDeliveryService(cfg, nil, newTestStumpStore(), nil)
 	if err := svc.Init(nil); err != nil {
 		t.Skipf("Kafka not available; skipping: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestCallbackDelivery_RetryOnFailure(t *testing.T) {
 		},
 	}
 
-	svc := callback.NewDeliveryService(cfg, nil, newTestStumpStore())
+	svc := callback.NewDeliveryService(cfg, nil, newTestStumpStore(), nil)
 	if err := svc.Init(nil); err != nil {
 		t.Skipf("Kafka not available; skipping: %v", err)
 	}

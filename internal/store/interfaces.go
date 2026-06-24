@@ -63,6 +63,12 @@ type CallbackDedupStore interface {
 type CallbackURLRegistry interface {
 	Add(callbackURL, callbackToken string) error
 	GetAll() ([]CallbackEntry, error)
+	// RecordFailure increments the per-URL failure counter after a callback to
+	// this URL was DLQ'd. When the counter reaches threshold the URL is
+	// disabled so GetAll stops returning it (a subsequent Add re-enables it).
+	// Returns whether the URL is now disabled. A non-positive threshold or an
+	// unknown URL is a no-op.
+	RecordFailure(callbackURL string, threshold int) (disabled bool, err error)
 }
 
 // DataHubRegistry remembers every DataHub URL the block processor has

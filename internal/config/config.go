@@ -354,6 +354,11 @@ type CallbackConfig struct {
 	DedupTTLSec         int `yaml:"dedupTTLSec"         mapstructure:"dedupttlsec"`
 	MaxConnsPerHost     int `yaml:"maxConnsPerHost"     mapstructure:"maxconnsperhost"`
 	MaxIdleConnsPerHost int `yaml:"maxIdleConnsPerHost" mapstructure:"maxidleconnsperhost"`
+	// BreakerThreshold is the number of DLQ'd callbacks to a single URL that
+	// trips its circuit breaker. Once tripped the URL is disabled in the
+	// registry and BLOCK_PROCESSED / STUMP fan-out stops targeting it (a fresh
+	// /watch re-enables it). Default 20; set <= 0 to disable the breaker.
+	BreakerThreshold int `yaml:"breakerThreshold" mapstructure:"breakerthreshold"`
 	// AllowPrivateIPs disables the SSRF guard that normally rejects
 	// callback URLs (or dial addresses) pointing at loopback,
 	// link-local, or RFC1918 destinations. Default false. Operators
@@ -526,6 +531,7 @@ func registerDefaults(v *viper.Viper) {
 
 	// Callback
 	v.SetDefault("callback.maxretries", 5)
+	v.SetDefault("callback.breakerthreshold", 20)
 	v.SetDefault("callback.backoffbasesec", 30)
 	v.SetDefault("callback.timeoutsec", 10)
 	v.SetDefault("callback.seenthreshold", 3)
