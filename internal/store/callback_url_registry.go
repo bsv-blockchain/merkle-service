@@ -164,3 +164,13 @@ func (r *aerospikeCallbackURLRegistry) GetAll() ([]CallbackEntry, error) {
 	}
 	return entries, nil
 }
+
+// RecordFailure is a no-op for the Aerospike backend: it has no durable
+// per-URL failure counter, and dead URLs are already bounded by the per-record
+// TTL eviction (a URL that stops re-registering disappears within the TTL
+// window). The circuit breaker is implemented on the SQL backend, which is the
+// production registry. Returns (false, nil) so callers treat the URL as still
+// enabled.
+func (r *aerospikeCallbackURLRegistry) RecordFailure(_ string, _ int) (bool, error) {
+	return false, nil
+}

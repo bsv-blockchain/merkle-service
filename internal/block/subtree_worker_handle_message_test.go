@@ -711,6 +711,7 @@ type fakeURLRegistry struct {
 }
 
 func (f *fakeURLRegistry) Add(callbackURL, callbackToken string) error { return nil }
+func (f *fakeURLRegistry) RecordFailure(string, int) (bool, error)     { return false, nil }
 func (f *fakeURLRegistry) GetAll() ([]store.CallbackEntry, error) {
 	if f.getAllErr != nil {
 		return nil, f.getAllErr

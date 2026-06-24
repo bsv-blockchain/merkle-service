@@ -215,7 +215,7 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 		},
 	}
 	for i := 0; i < prodDeliveryInstances; i++ {
-		ds := callback.NewDeliveryService(deliveryCfg, nil, stumpStore)
+		ds := callback.NewDeliveryService(deliveryCfg, nil, stumpStore, nil)
 		if err := ds.Init(nil); err != nil {
 			t.Fatalf("failed to init delivery service %d: %v", i, err)
 		}

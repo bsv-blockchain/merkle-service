@@ -170,7 +170,8 @@ func keys(m map[string][]string) []string {
 // in override mode must NOT consult the registry at all.
 type explodingURLRegistry struct{}
 
-func (explodingURLRegistry) Add(string, string) error { return nil }
+func (explodingURLRegistry) Add(string, string) error                { return nil }
+func (explodingURLRegistry) RecordFailure(string, int) (bool, error) { return false, nil }
 func (explodingURLRegistry) GetAll() ([]store.CallbackEntry, error) {
 	return nil, errors.New("registry must not be consulted on /reprocess")
 }
