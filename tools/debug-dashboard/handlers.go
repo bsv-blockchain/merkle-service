@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
@@ -96,11 +97,12 @@ func (h *Handlers) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// POST to merkle-service /watch
-	payload := map[string]string{
-		"txid":        txid,
-		"callbackUrl": callbackURL,
-	}
+	// POST to merkle-service /watch. Wire format: field names must match
+	// api.WatchRequest's json tags — do NOT rename to the log-field canon.
+	payload := struct {
+		TxID        string `json:"txid"`
+		CallbackURL string `json:"callbackUrl"`
+	}{TxID: txid, CallbackURL: callbackURL}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		data := h.newHomeData()
@@ -127,7 +129,7 @@ func (h *Handlers) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.txidTracker.Add(txid, []string{callbackURL})
-	h.logger.Info("registered txid", "txid", txid, "callbackUrl", callbackURL)
+	h.logger.Info("registered txid", logfields.TxID(txid), logfields.CallbackURL(callbackURL))
 
 	data := h.newHomeData()
 	data.Flash = fmt.Sprintf("Registered txid %s with callback URL %s", txid[:16]+"...", callbackURL)

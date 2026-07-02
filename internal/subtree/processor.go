@@ -651,7 +651,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 		metrics.ObserveDB(p.backendLabel(), metrics.StoreSeenCounter, metrics.OpIncrement, incStart, incErr)
 		if incErr != nil {
 			p.Logger.Error("failed to batch-increment seen counters",
-				logfields.SubtreeHash(subtreeID), "txids", len(txids), "succeeded", len(results), "error", incErr)
+				logfields.SubtreeHash(subtreeID), "txid_count", len(txids), "succeeded", len(results), "error", incErr)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("incrementing seen counters for subtree %s: %w", subtreeID, incErr)
 			}

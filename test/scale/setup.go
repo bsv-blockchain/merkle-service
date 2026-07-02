@@ -55,7 +55,7 @@ func preloadRegistrations(manifest *Manifest, txids [][]byte, regStore store.Reg
 				completed++
 				if completed%10 == 0 {
 					txidsPerInstance := arcade.TxidEnd - arcade.TxidStart
-					logger.Info("pre-loaded registrations", "arcadeInstances", completed, "txids", completed*txidsPerInstance)
+					logger.Info("pre-loaded registrations", "arcadeInstances", completed, "txid_count", completed*txidsPerInstance)
 				}
 				mu.Unlock()
 			}
