@@ -8,6 +8,8 @@ import (
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 	astypes "github.com/aerospike/aerospike-client-go/v8/types"
+
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 )
 
 const (
@@ -75,7 +77,7 @@ func (s *aerospikeSubtreeCounter) Init(blockHash string, count int, data *BlockP
 		if mErr != nil {
 			// Non-fatal: a counter without block data still drives
 			// BLOCK_PROCESSED; the consumer just falls back to a datahub.
-			s.logger.Warn("failed to encode block-processed data for counter", "blockHash", blockHash, "error", mErr)
+			s.logger.Warn("failed to encode block-processed data for counter", logfields.BlockHash(blockHash), "error", mErr)
 		} else {
 			bins[blockDataBin] = string(encoded)
 		}
@@ -147,13 +149,13 @@ func (s *aerospikeSubtreeCounter) Decrement(blockHash string) (remaining int, da
 		case dErr != nil:
 			var asErr as.Error
 			if !errors.As(dErr, &asErr) || !asErr.Matches(astypes.KEY_NOT_FOUND_ERROR) {
-				s.logger.Warn("failed to read block-processed data from counter", "blockHash", blockHash, "error", dErr)
+				s.logger.Warn("failed to read block-processed data from counter", logfields.BlockHash(blockHash), "error", dErr)
 			}
 		case dataRec != nil:
 			if raw, ok := dataRec.Bins[blockDataBin].(string); ok && raw != "" {
 				var d BlockProcessedData
 				if uErr := json.Unmarshal([]byte(raw), &d); uErr != nil {
-					s.logger.Warn("failed to decode block-processed data from counter", "blockHash", blockHash, "error", uErr)
+					s.logger.Warn("failed to decode block-processed data from counter", logfields.BlockHash(blockHash), "error", uErr)
 				} else {
 					data = &d
 				}

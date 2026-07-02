@@ -10,6 +10,8 @@ import (
 	as "github.com/aerospike/aerospike-client-go/v8"
 	astypes "github.com/aerospike/aerospike-client-go/v8/types"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 )
 
 const (
@@ -400,7 +402,7 @@ func (s *aerospikeRegistration) BatchUpdateTTL(txids []string, ttl time.Duration
 		for _, txid := range chunk {
 			key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
 			if err != nil {
-				s.logger.Warn("failed to create key for TTL update", "txid", txid, "error", err)
+				s.logger.Warn("failed to create key for TTL update", logfields.TxID(txid), "error", err)
 				continue
 			}
 			batchRecs = append(batchRecs, as.NewBatchWrite(wpol, key, as.TouchOp()))
@@ -419,7 +421,7 @@ func (s *aerospikeRegistration) BatchUpdateTTL(txids []string, ttl time.Duration
 		for i, br := range batchRecs {
 			if err := br.BatchRec().Err; err != nil {
 				s.logger.Warn("failed to update TTL (check Aerospike nsup-period config)",
-					"txid", batchTxids[i], "error", err)
+					logfields.TxID(batchTxids[i]), "error", err)
 			}
 		}
 	}

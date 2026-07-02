@@ -13,6 +13,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -309,14 +310,14 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 
 	p.Logger.Debug(
 		"processing subtree announcement",
-		"hash", subtreeMsg.Hash,
-		"dataHubUrl", subtreeMsg.DataHubURL,
+		logfields.SubtreeHash(subtreeMsg.Hash),
+		logfields.DataHubURL(subtreeMsg.DataHubURL),
 		"attemptCount", subtreeMsg.AttemptCount,
 	)
 
 	// Check dedup cache — skip if already successfully processed.
 	if p.dedupCache != nil && p.dedupCache.Contains(subtreeMsg.Hash) {
-		p.Logger.Debug("skipping duplicate subtree message", "hash", subtreeMsg.Hash)
+		p.Logger.Debug("skipping duplicate subtree message", logfields.SubtreeHash(subtreeMsg.Hash))
 		metrics.ObserveSubtreeProcessing(metrics.OutcomeDedupHit, time.Since(start))
 		return nil
 	}
@@ -330,8 +331,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	if ph := p.dataHubClient.PeerHealth(); ph != nil && !ph.IsHealthy(subtreeMsg.DataHubURL) {
 		p.Logger.Debug(
 			"skipping subtree fetch: peer marked unhealthy",
-			"hash", subtreeMsg.Hash,
-			"dataHubUrl", subtreeMsg.DataHubURL,
+			logfields.SubtreeHash(subtreeMsg.Hash),
+			logfields.DataHubURL(subtreeMsg.DataHubURL),
 		)
 		metrics.ObserveSubtreeProcessing(metrics.OutcomeSkippedUnhealthy, time.Since(start))
 		return nil
@@ -367,7 +368,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	if err != nil {
 		return p.handleTransientFailure(subtreeMsg, "parsing subtree txids", err, start)
 	}
-	p.Logger.Debug("processing subtree txids", "length", len(txids), "hash", subtreeMsg.Hash)
+	p.Logger.Debug("processing subtree txids", "length", len(txids), logfields.SubtreeHash(subtreeMsg.Hash))
 	metrics.ObserveSubtreeCounts(len(txids), 0)
 
 	if len(txids) == 0 {
@@ -423,7 +424,7 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 	if nextAttempt >= maxAttempts {
 		p.Logger.Error(
 			"subtree message exceeded max attempts, routing to DLQ",
-			"hash", subtreeMsg.Hash,
+			logfields.SubtreeHash(subtreeMsg.Hash),
 			"stage", stage,
 			"attemptCount", subtreeMsg.AttemptCount,
 			"maxAttempts", maxAttempts,
@@ -439,7 +440,7 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 
 	p.Logger.Warn(
 		"subtree message transient failure, re-publishing for retry",
-		"hash", subtreeMsg.Hash,
+		logfields.SubtreeHash(subtreeMsg.Hash),
 		"stage", stage,
 		"attemptCount", subtreeMsg.AttemptCount,
 		"nextAttempt", nextAttempt,
@@ -468,9 +469,9 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 func (p *Processor) handlePermanentFailure(subtreeMsg *kafka.SubtreeMessage, stage string, cause error, start time.Time) error {
 	p.Logger.Warn(
 		"subtree message permanent failure, routing to DLQ",
-		"hash", subtreeMsg.Hash,
+		logfields.SubtreeHash(subtreeMsg.Hash),
 		"stage", stage,
-		"dataHubUrl", subtreeMsg.DataHubURL,
+		logfields.DataHubURL(subtreeMsg.DataHubURL),
 		"attemptCount", subtreeMsg.AttemptCount,
 		"error", cause,
 	)
@@ -650,7 +651,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 		metrics.ObserveDB(p.backendLabel(), metrics.StoreSeenCounter, metrics.OpIncrement, incStart, incErr)
 		if incErr != nil {
 			p.Logger.Error("failed to batch-increment seen counters",
-				"subtreeID", subtreeID, "txids", len(txids), "succeeded", len(results), "error", incErr)
+				logfields.SubtreeHash(subtreeID), "txids", len(txids), "succeeded", len(results), "error", incErr)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("incrementing seen counters for subtree %s: %w", subtreeID, incErr)
 			}
@@ -709,7 +710,7 @@ func (p *Processor) emitSeenBatch(
 			data, err := msg.Encode()
 			if err != nil {
 				p.Logger.Error("failed to encode batched seen callback",
-					"type", cbType, "callbackURL", callbackURL, "error", err)
+					"type", cbType, logfields.CallbackURL(callbackURL), "error", err)
 				if firstErr == nil {
 					firstErr = fmt.Errorf("encoding %s for %s: %w", cbType, callbackURL, err)
 				}

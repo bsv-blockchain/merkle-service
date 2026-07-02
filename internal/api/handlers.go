@@ -13,6 +13,7 @@ import (
 
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -100,7 +101,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Warn(
 			"rejected callback URL registration",
 			"reason", err.Error(),
-			"txid", req.TxID,
+			logfields.TxID(req.TxID),
 		)
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: msg})
 		return
@@ -127,13 +128,13 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		// off accordingly. The body still uses the standard ErrorResponse shape.
 		if errors.Is(err, store.ErrMaxCallbacksPerTxIDExceeded) {
 			s.Logger.Warn("registration rejected: per-txid callback cap exceeded",
-				"txid", req.TxID, "callbackUrl", req.CallbackURL)
+				logfields.TxID(req.TxID), logfields.CallbackURL(req.CallbackURL))
 			writeJSON(w, http.StatusTooManyRequests, ErrorResponse{
 				Error: "too many callback URLs registered for this txid",
 			})
 			return
 		}
-		s.Logger.Error("failed to add registration", "txid", req.TxID, "error", err)
+		s.Logger.Error("failed to add registration", logfields.TxID(req.TxID), "error", err)
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal server error"})
 		return
 	}
@@ -146,9 +147,14 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		regErr := s.urlRegistry.Add(req.CallbackURL, req.CallbackToken)
 		metrics.ObserveDB(s.backendLabel(), metrics.StoreCallbackURLRegistry, metrics.OpAdd, regStart, regErr)
 		if regErr != nil {
-			s.Logger.Warn("failed to add callback URL to registry", "url", req.CallbackURL, "error", regErr)
+			s.Logger.Warn("failed to add callback URL to registry", logfields.CallbackURL(req.CallbackURL), "error", regErr)
 		}
 	}
+
+	// Success log so a txid's /watch registration is searchable — before this
+	// the only way to confirm a registration went through was to find it
+	// missing from a later SEEN/callback-related log line.
+	s.Logger.Info("registration accepted", logfields.TxID(req.TxID), logfields.CallbackURL(req.CallbackURL))
 
 	writeJSON(w, http.StatusOK, WatchResponse{
 		Status:  "ok",
@@ -193,7 +199,7 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 	entries, err := s.regStore.Get(txid)
 	metrics.ObserveDB(s.backendLabel(), metrics.StoreRegistration, metrics.OpGet, getStart, err)
 	if err != nil {
-		s.Logger.Error("failed to lookup registration", "txid", txid, "error", err)
+		s.Logger.Error("failed to lookup registration", logfields.TxID(txid), "error", err)
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal server error"})
 		return
 	}
@@ -202,6 +208,8 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 	for _, e := range entries {
 		urls = append(urls, e.URL)
 	}
+
+	s.Logger.Debug("registration lookup", logfields.TxID(txid), "callbackUrlCount", len(urls))
 
 	writeJSON(w, http.StatusOK, LookupResponse{
 		TxID:         txid,
@@ -275,7 +283,7 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Warn(
 			"rejected reprocess callback URL",
 			"reason", err.Error(),
-			"blockHash", req.BlockHash,
+			logfields.BlockHash(req.BlockHash),
 		)
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: msg})
 		return
@@ -302,7 +310,7 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	if probeErr != nil {
 		s.Logger.Warn(
 			"reprocess: no DataHub served block",
-			"blockHash", req.BlockHash,
+			logfields.BlockHash(req.BlockHash),
 			"candidates", len(candidates),
 			"status", status,
 			"error", probeErr,
@@ -335,7 +343,7 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	encoded, err := blockMsg.Encode()
 	if err != nil {
 		s.Logger.Error("failed to encode reprocess block message",
-			"blockHash", req.BlockHash, "error", err)
+			logfields.BlockHash(req.BlockHash), "error", err)
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal server error"})
 		return
 	}
@@ -344,16 +352,16 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	partitionKey := req.BlockHash + "|" + req.CallbackURL
 	if err := s.blockProducer.PublishWithHashKey(partitionKey, encoded); err != nil {
 		s.Logger.Error("failed to publish reprocess block message",
-			"blockHash", req.BlockHash, "error", err)
+			logfields.BlockHash(req.BlockHash), "error", err)
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to enqueue reprocess"})
 		return
 	}
 
 	s.Logger.Info(
 		"reprocess enqueued",
-		"blockHash", req.BlockHash,
-		"dataHubUrl", resolvedURL,
-		"callbackUrl", req.CallbackURL,
+		logfields.BlockHash(req.BlockHash),
+		logfields.DataHubURL(resolvedURL),
+		logfields.CallbackURL(req.CallbackURL),
 	)
 	writeJSON(w, http.StatusAccepted, ReprocessResponse{
 		Status:     "queued",
@@ -400,8 +408,8 @@ func (s *Server) clearReprocessDedup(blockHash, callbackURL string, subtreeHashe
 		if err := s.dedupStore.Delete(e.key, callbackURL, e.typeName); err != nil {
 			s.Logger.Warn(
 				"reprocess: failed to clear callback dedup entry",
-				"blockHash", blockHash,
-				"callbackUrl", callbackURL,
+				logfields.BlockHash(blockHash),
+				logfields.CallbackURL(callbackURL),
 				"type", e.typeName,
 				"dedupTxidKey", e.key,
 				"error", err,
@@ -413,8 +421,8 @@ func (s *Server) clearReprocessDedup(blockHash, callbackURL string, subtreeHashe
 
 	s.Logger.Info(
 		"reprocess: cleared callback dedup entries",
-		"blockHash", blockHash,
-		"callbackUrl", callbackURL,
+		logfields.BlockHash(blockHash),
+		logfields.CallbackURL(callbackURL),
 		"clearedCount", cleared,
 		"attemptedCount", len(entries),
 		"subtreeCount", len(subtreeHashes),
@@ -492,7 +500,7 @@ func (s *Server) probeDataHubsForBlock(parentCtx context.Context, candidates []s
 		// always tried. Discovered peers are skipped while unhealthy.
 		if i >= fallbackCount && ph != nil && !ph.IsHealthy(url) {
 			s.Logger.Debug("reprocess: skipping unhealthy discovered DataHub peer",
-				"dataHubUrl", url, "blockHash", blockHash)
+				logfields.DataHubURL(url), logfields.BlockHash(blockHash))
 			continue
 		}
 
@@ -508,8 +516,8 @@ func (s *Server) probeDataHubsForBlock(parentCtx context.Context, candidates []s
 		}
 		s.Logger.Debug(
 			"reprocess probe failed",
-			"dataHubUrl", url,
-			"blockHash", blockHash,
+			logfields.DataHubURL(url),
+			logfields.BlockHash(blockHash),
 			"notFound", errors.Is(ferr, datahub.ErrNotFound),
 			"error", ferr,
 		)

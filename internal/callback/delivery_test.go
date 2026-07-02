@@ -16,6 +16,7 @@ import (
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
@@ -725,9 +726,9 @@ func TestProcessDelivery_DedupSkipsDuplicate(t *testing.T) {
 
 // TestProcessDelivery_DedupSkipLogsInfo pins issue #122 mitigation: the
 // per-message dedup-skip log is at INFO level (not DEBUG) so production
-// operators can grep by callbackUrl and immediately see when a
+// operators can grep by callback_url and immediately see when a
 // subscriber's deliveries are being silently suppressed. Includes the
-// structured fields needed for diagnosis: blockHash, callbackUrl,
+// structured fields needed for diagnosis: block_hash, callback_url,
 // type, subtreeIndex, dedupKey.
 func TestProcessDelivery_DedupSkipLogsInfo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -769,11 +770,11 @@ func TestProcessDelivery_DedupSkipLogsInfo(t *testing.T) {
 	if entry["msg"] != "skipping duplicate callback delivery" {
 		t.Errorf("unexpected msg: %v", entry["msg"])
 	}
-	if entry["callbackUrl"] != "https://subscriber.example/cb" {
-		t.Errorf("missing/wrong callbackUrl: %v", entry["callbackUrl"])
+	if entry[logfields.KeyCallbackURL] != "https://subscriber.example/cb" {
+		t.Errorf("missing/wrong %s: %v", logfields.KeyCallbackURL, entry[logfields.KeyCallbackURL])
 	}
-	if entry["blockHash"] != "blockhash-xyz" {
-		t.Errorf("missing/wrong blockHash: %v", entry["blockHash"])
+	if entry[logfields.KeyBlockHash] != "blockhash-xyz" {
+		t.Errorf("missing/wrong %s: %v", logfields.KeyBlockHash, entry[logfields.KeyBlockHash])
 	}
 	if entry["type"] != "BLOCK_PROCESSED" {
 		t.Errorf("missing/wrong type: %v", entry["type"])

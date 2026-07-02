@@ -14,6 +14,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -226,7 +227,7 @@ func middlewareLogger(logger *slog.Logger) func(next http.Handler) http.Handler 
 				"path", r.URL.Path,
 				"status", ww.Status(),
 				"duration", time.Since(start),
-				"requestId", middleware.GetReqID(r.Context()),
+				logfields.RequestID(middleware.GetReqID(r.Context())),
 			)
 		})
 	}
