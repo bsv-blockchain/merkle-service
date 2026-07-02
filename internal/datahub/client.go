@@ -16,6 +16,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/model"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
@@ -165,15 +166,19 @@ func NewClientWithSSRFGuard(timeoutSec, maxRetries int, maxBlockBytes, maxSubtre
 	}
 }
 
-// newSSRFAwareHTTPClient builds the underlying http.Client used by the
-// DataHub client. A net.Dialer.Control hook calls
+// newSSRFAwareTransport builds the SSRF-guarded *http.Transport used by
+// newSSRFAwareHTTPClient. A net.Dialer.Control hook calls
 // ssrfguard.CheckDialAddress on every TCP dial so a peer that bypasses
 // the request-time URL check (e.g. via DNS rebinding) is still rejected
 // at connection time. The Control hook receives the resolved
 // "ip:port" address from Go's resolver — there is no opportunity for a
 // hostname to be substituted between resolution and dial.
-func newSSRFAwareHTTPClient(timeoutSec int, allowPrivateIPs bool) *http.Client {
-	transport := &http.Transport{
+//
+// Split out from newSSRFAwareHTTPClient so tests can inspect the raw
+// connection-pool tuning directly, without unwrapping the otelhttp.Transport
+// that wraps it in the client.
+func newSSRFAwareTransport(allowPrivateIPs bool) *http.Transport {
+	return &http.Transport{
 		IdleConnTimeout:    90 * time.Second,
 		DisableCompression: false,
 		// Keep keep-alive connections warm for reuse under block-time fan-out.
@@ -193,9 +198,19 @@ func newSSRFAwareHTTPClient(timeoutSec int, allowPrivateIPs bool) *http.Client {
 			},
 		}).DialContext,
 	}
+}
+
+// newSSRFAwareHTTPClient builds the http.Client used by the DataHub client,
+// wrapping newSSRFAwareTransport with otelhttp.NewTransport so every
+// outbound DataHub request carries a client span with the active trace's
+// traceparent header — closing the arcade->merkle->arcade trace across the
+// merkle-service->DataHub hop. With telemetry disabled this uses the global
+// no-op TracerProvider, so the wrap adds no real spans or allocations beyond
+// the wrapper's own inert bookkeeping.
+func newSSRFAwareHTTPClient(timeoutSec int, allowPrivateIPs bool) *http.Client {
 	return &http.Client{
 		Timeout:   time.Duration(timeoutSec) * time.Second,
-		Transport: transport,
+		Transport: otelhttp.NewTransport(newSSRFAwareTransport(allowPrivateIPs)),
 	}
 }
 

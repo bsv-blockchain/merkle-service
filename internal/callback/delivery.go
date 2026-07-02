@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
@@ -916,6 +917,13 @@ func maxIdleConnsPerHostOrDefault(v int) int {
 // to private/loopback/link-local IPs unless cfg.AllowPrivateIPs is set.
 // The hook fires after DNS resolution so DNS rebinding cannot bypass it
 // (Go's resolver passes the resolved IP to Control as part of address).
+//
+// The SSRF-guarded transport is wrapped with otelhttp.NewTransport so every
+// callback POST carries a client span and a traceparent header derived from
+// deliverCallback's request context — this is what lets the trace begun on
+// Kafka consume (see internal/kafka's consumer span, once wired) ride all
+// the way back into arcade's callback handler. With telemetry disabled this
+// uses the global no-op TracerProvider, so the wrap is inert.
 func newDeliveryHTTPClient(cfg config.CallbackConfig) *http.Client {
 	allowPrivate := cfg.AllowPrivateIPs
 	transport := &http.Transport{
@@ -939,7 +947,7 @@ func newDeliveryHTTPClient(cfg config.CallbackConfig) *http.Client {
 	}
 	return &http.Client{
 		Timeout:   time.Duration(cfg.TimeoutSec) * time.Second,
-		Transport: transport,
+		Transport: otelhttp.NewTransport(transport),
 	}
 }
 
