@@ -113,6 +113,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Subtree.MaxAttempts != 3 {
 		t.Errorf("Subtree.MaxAttempts: expected 3, got %d", cfg.Subtree.MaxAttempts)
 	}
+	if cfg.Subtree.SeenTxidLogMax != 1000 {
+		t.Errorf("Subtree.SeenTxidLogMax: expected 1000, got %d", cfg.Subtree.SeenTxidLogMax)
+	}
 
 	// Block defaults
 	if cfg.Block.WorkerPoolSize != 16 {

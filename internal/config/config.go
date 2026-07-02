@@ -321,6 +321,12 @@ type SubtreeConfig struct {
 	// permanently-failing subtree (e.g. DataHub 404) stalled the partition
 	// forever because the consumer doesn't MarkMessage on handler error.
 	MaxAttempts int `yaml:"maxAttempts" mapstructure:"maxattempts"`
+	// SeenTxidLogMax caps how many matched txids are included (as logfields.TxIDs)
+	// on the Info log emitted for each SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES
+	// batch published to a callback URL. 0 disables the txids array entirely
+	// and logs only the count — useful when a batch can carry thousands of
+	// txids and the full list would dominate log volume.
+	SeenTxidLogMax int `yaml:"seenTxidLogMax" mapstructure:"seentxidlogmax"`
 }
 
 // BlockConfig holds block processing configuration.
@@ -520,6 +526,7 @@ func registerDefaults(v *viper.Viper) {
 	// (initial + 2 retries) gives us recovery from transient blips without
 	// turning into a self-inflicted DoS.
 	v.SetDefault("subtree.maxattempts", 3)
+	v.SetDefault("subtree.seentxidlogmax", 1000)
 
 	// Block
 	v.SetDefault("block.workerpoolsize", 16)
@@ -657,6 +664,7 @@ func bindEnvVars(v *viper.Viper) {
 		"subtree.cachemaxmb":     "SUBTREE_CACHE_MAX_MB",
 		"subtree.dedupcachesize": "SUBTREE_DEDUP_CACHE_SIZE",
 		"subtree.maxattempts":    "SUBTREE_MAX_ATTEMPTS",
+		"subtree.seentxidlogmax": "SUBTREE_SEEN_TXID_LOG_MAX",
 
 		// Block
 		"block.workerpoolsize":      "BLOCK_WORKER_POOL_SIZE",

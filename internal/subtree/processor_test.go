@@ -1,7 +1,9 @@
 package subtree
 
 import (
+	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +22,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
@@ -1266,6 +1269,196 @@ func TestBatchedSeenCallbacks_ChunksLargeBatch(t *testing.T) {
 	}
 	if len(seenTxids) != total {
 		t.Errorf("expected %d unique txids across chunks, got %d", total, len(seenTxids))
+	}
+}
+
+// testSeenBatchCallbackURL is the callback URL shared by the SEEN-batch
+// logging tests below; extracted to a constant so the repeated literal
+// doesn't trip goconst.
+const testSeenBatchCallbackURL = "http://arcade.example.com/cb"
+
+// newTestProcessorWithCfg is like newTestProcessor but lets the caller supply
+// cfg (for Subtree.SeenTxidLogMax) and a logger (to capture structured log
+// output for assertions).
+func newTestProcessorWithCfg(t *testing.T, regStore RegistrationGetter, seenCounter SeenCounter, cfg *config.Config, logger *slog.Logger) *Processor {
+	t.Helper()
+	mockProducer := &mockSyncProducer{}
+	p := &Processor{
+		cfg:               cfg,
+		registrationStore: regStore,
+		seenCounterStore:  seenCounter,
+		callbackProducer:  kafka.NewTestProducer(mockProducer, "callback-test", logger),
+	}
+	p.InitBase("subtree-test")
+	p.Logger = logger
+	return p
+}
+
+// seenBatchLogEntries decodes every JSON log line in buf and returns only
+// the "seen callback batch published" entries emitted by emitSeenBatch.
+func seenBatchLogEntries(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log line: %v\nraw: %s", err, line)
+		}
+		if entry["msg"] == "seen callback batch published" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// TestEmitSeenBatch_LogsTxidsCappedAtConfig verifies that the SEEN batch
+// success log includes a "txids" array capped at Subtree.SeenTxidLogMax, with
+// "txids_truncated" set once the matched set exceeds the cap.
+func TestEmitSeenBatch_LogsTxidsCappedAtConfig(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg := &config.Config{Subtree: config.SubtreeConfig{SeenTxidLogMax: 3}}
+
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p := newTestProcessorWithCfg(t, regStore, &mockSeenCounter{}, cfg, logger)
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+		"tx2": {testSeenBatchCallbackURL},
+		"tx3": {testSeenBatchCallbackURL},
+		"tx4": {testSeenBatchCallbackURL},
+		"tx5": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-cap"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
+
+	entries := seenBatchLogEntries(t, &buf)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 seen-batch log entry, got %d", len(entries))
+	}
+	entry := entries[0]
+
+	if got := entry["txid_count"]; got != float64(5) {
+		t.Errorf("txid_count: expected 5, got %v", got)
+	}
+	txids, ok := entry[logfields.KeyTxIDs].([]any)
+	if !ok {
+		t.Fatalf("expected %s to be a JSON array, got %T (%v)", logfields.KeyTxIDs, entry[logfields.KeyTxIDs], entry[logfields.KeyTxIDs])
+	}
+	if len(txids) != 3 {
+		t.Errorf("expected txids capped at 3, got %d: %v", len(txids), txids)
+	}
+	if truncated, _ := entry["txids_truncated"].(bool); !truncated {
+		t.Errorf("expected txids_truncated=true, got %v", entry["txids_truncated"])
+	}
+	if entry[logfields.KeySubtreeHash] != "subtree-cap" {
+		t.Errorf("missing/wrong %s: %v", logfields.KeySubtreeHash, entry[logfields.KeySubtreeHash])
+	}
+	if entry[logfields.KeyCallbackURL] != testSeenBatchCallbackURL {
+		t.Errorf("missing/wrong %s: %v", logfields.KeyCallbackURL, entry[logfields.KeyCallbackURL])
+	}
+}
+
+// TestEmitSeenBatch_LogsAllTxidsWhenUnderCap verifies the txids array is not
+// marked truncated, and contains every matched txid, when the batch size is
+// within Subtree.SeenTxidLogMax.
+func TestEmitSeenBatch_LogsAllTxidsWhenUnderCap(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg := &config.Config{Subtree: config.SubtreeConfig{SeenTxidLogMax: 1000}}
+
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p := newTestProcessorWithCfg(t, regStore, &mockSeenCounter{}, cfg, logger)
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+		"tx2": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-under-cap"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
+
+	entries := seenBatchLogEntries(t, &buf)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 seen-batch log entry, got %d", len(entries))
+	}
+	entry := entries[0]
+
+	if got := entry["txid_count"]; got != float64(2) {
+		t.Errorf("txid_count: expected 2, got %v", got)
+	}
+	txids, ok := entry[logfields.KeyTxIDs].([]any)
+	if !ok || len(txids) != 2 {
+		t.Fatalf("expected 2 txids logged, got %v", entry[logfields.KeyTxIDs])
+	}
+	if truncated, _ := entry["txids_truncated"].(bool); truncated {
+		t.Errorf("expected txids_truncated=false, got %v", entry["txids_truncated"])
+	}
+}
+
+// TestEmitSeenBatch_CountsOnlyWhenLogMaxZero verifies that
+// Subtree.SeenTxidLogMax=0 omits the txids array entirely and logs only the count.
+func TestEmitSeenBatch_CountsOnlyWhenLogMaxZero(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg := &config.Config{Subtree: config.SubtreeConfig{SeenTxidLogMax: 0}}
+
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p := newTestProcessorWithCfg(t, regStore, &mockSeenCounter{}, cfg, logger)
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+		"tx2": {testSeenBatchCallbackURL},
+		"tx3": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-counts-only"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
+
+	entries := seenBatchLogEntries(t, &buf)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 seen-batch log entry, got %d", len(entries))
+	}
+	entry := entries[0]
+
+	if got := entry["txid_count"]; got != float64(3) {
+		t.Errorf("txid_count: expected 3, got %v", got)
+	}
+	if _, present := entry[logfields.KeyTxIDs]; present {
+		t.Errorf("expected no %s field in counts-only mode, got %v", logfields.KeyTxIDs, entry[logfields.KeyTxIDs])
+	}
+	if _, present := entry["txids_truncated"]; present {
+		t.Errorf("expected no txids_truncated field in counts-only mode, got %v", entry["txids_truncated"])
+	}
+}
+
+// TestEmitSeenBatch_NilCfgLogsCountsOnly verifies that a nil cfg (as used by
+// unit tests constructing Processor via struct literal without wiring
+// config.Load()) falls back to counts-only logging rather than panicking.
+func TestEmitSeenBatch_NilCfgLogsCountsOnly(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p := newTestProcessorWithCfg(t, regStore, &mockSeenCounter{}, nil, logger)
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-nil-cfg"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
+
+	entries := seenBatchLogEntries(t, &buf)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 seen-batch log entry, got %d", len(entries))
+	}
+	if _, present := entries[0][logfields.KeyTxIDs]; present {
+		t.Errorf("expected no %s field with nil cfg, got %v", logfields.KeyTxIDs, entries[0][logfields.KeyTxIDs])
 	}
 }
 

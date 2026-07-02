@@ -693,6 +693,7 @@ func (p *Processor) emitSeenBatch(
 	var firstErr error
 	type pending struct {
 		callbackURL string
+		chunk       []string
 	}
 	var meta []pending
 	var entries []kafka.BatchEntry
@@ -717,15 +718,16 @@ func (p *Processor) emitSeenBatch(
 				continue
 			}
 			entries = append(entries, kafka.HashBatchEntry(msg.PartitionKey(), data))
-			meta = append(meta, pending{callbackURL: callbackURL})
+			meta = append(meta, pending{callbackURL: callbackURL, chunk: chunk})
 		}
 	}
 
-	if err := p.callbackProducer.PublishBatch(entries); err != nil {
+	pubErr := p.callbackProducer.PublishBatch(entries)
+	if pubErr != nil {
 		p.Logger.Error("failed to publish seen callback batch",
-			"type", cbType, "count", len(entries), "error", err)
+			"type", cbType, "count", len(entries), "error", pubErr)
 		if firstErr == nil {
-			firstErr = fmt.Errorf("publishing %s batch (%d messages): %w", cbType, len(entries), err)
+			firstErr = fmt.Errorf("publishing %s batch (%d messages): %w", cbType, len(entries), pubErr)
 		}
 	}
 
@@ -738,7 +740,45 @@ func (p *Processor) emitSeenBatch(
 		}
 	}
 
+	// Log matched txids only once the batch is durably published — a failed
+	// publish is surfaced above and redriven by the caller, so logging success
+	// here too would be misleading. One Info line per (callbackURL, chunk)
+	// keeps a SEEN_ON_NETWORK/SEEN_MULTIPLE_NODES txid searchable in Coralogix
+	// without having to reconstruct it from downstream callback delivery logs.
+	if pubErr == nil {
+		maxLog := p.seenTxidLogMax()
+		for _, m := range meta {
+			fields := []any{
+				logfields.SubtreeHash(subtreeID),
+				logfields.CallbackURL(m.callbackURL),
+				"type", string(cbType),
+				"txid_count", len(m.chunk),
+			}
+			truncated := false
+			if maxLog > 0 {
+				txids := m.chunk
+				if len(txids) > maxLog {
+					txids = txids[:maxLog]
+					truncated = true
+				}
+				fields = append(fields, logfields.TxIDs(txids), "txids_truncated", truncated)
+			}
+			p.Logger.Info("seen callback batch published", fields...)
+		}
+	}
+
 	return firstErr
+}
+
+// seenTxidLogMax returns the configured cap on how many matched txids are
+// included on the SEEN batch-published log (see emitSeenBatch). 0 means log
+// counts only. Falls back to 0 (counts-only) when cfg is nil, which unit
+// tests that construct Processor via struct literal rely on.
+func (p *Processor) seenTxidLogMax() int {
+	if p.cfg == nil {
+		return 0
+	}
+	return p.cfg.Subtree.SeenTxidLogMax
 }
 
 // backendLabel returns the store-backend label for DB metrics: "aerospike"
