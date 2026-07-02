@@ -186,7 +186,7 @@ func startDeliveryService(t *testing.T, callbackTopic string) (*callback.Deliver
 	}
 
 	stumpStore := store.NewStumpStore(store.NewMemoryBlobStore(), 0, testLogger())
-	ds := callback.NewDeliveryService(cfg, nil, stumpStore, nil)
+	ds := callback.NewDeliveryService(cfg, nil, stumpStore, nil, testLogger())
 	if err := ds.Init(nil); err != nil {
 		t.Fatalf("failed to init delivery service: %v", err)
 	}

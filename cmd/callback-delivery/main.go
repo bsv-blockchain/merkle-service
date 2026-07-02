@@ -27,7 +27,7 @@ func main() {
 	}
 	defer func() { _ = registry.Close() }()
 
-	deliverySvc := callback.NewDeliveryService(cfg, registry.CallbackDedup, registry.Stump, registry.CallbackURLRegistry)
+	deliverySvc := callback.NewDeliveryService(cfg, registry.CallbackDedup, registry.Stump, registry.CallbackURLRegistry, logger)
 
 	var metricsSrv *metrics.Server
 	if cfg.Metrics.Enabled {

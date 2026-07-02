@@ -27,7 +27,7 @@ func main() {
 	}
 	defer func() { _ = registry.Close() }()
 
-	processor := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree)
+	processor := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree, logger)
 
 	var metricsSrv *metrics.Server
 	if cfg.Metrics.Enabled {

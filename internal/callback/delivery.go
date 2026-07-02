@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sort"
@@ -142,14 +143,23 @@ const bodyCacheMaxEntries = 64
 // NewDeliveryService creates a new callback DeliveryService. stumpStore is
 // required whenever STUMP-type messages are delivered — it is the claim-check
 // store holding the STUMP bytes referenced by CallbackTopicMessage.StumpRef.
-func NewDeliveryService(cfg *config.Config, dedupStore CallbackDeduper, stumpStore store.StumpStore, urlRegistry store.CallbackURLRegistry) *DeliveryService {
-	return &DeliveryService{
+// logger, when non-nil, overrides the default logger InitBase would
+// otherwise install — this is what lets the configured LOG_LEVEL reach the
+// callback-delivery service instead of silently falling back to InitBase's
+// hardcoded Info logger.
+func NewDeliveryService(cfg *config.Config, dedupStore CallbackDeduper, stumpStore store.StumpStore, urlRegistry store.CallbackURLRegistry, logger *slog.Logger) *DeliveryService {
+	d := &DeliveryService{
 		cfg:         cfg,
 		dedupStore:  dedupStore,
 		stumpStore:  stumpStore,
 		urlRegistry: urlRegistry,
 		bodyCache:   make(map[string][]byte, bodyCacheMaxEntries),
 	}
+	d.InitBase("callback-delivery")
+	if logger != nil {
+		d.Logger = logger
+	}
+	return d
 }
 
 // cachedBody returns the memoized body for key, or nil.

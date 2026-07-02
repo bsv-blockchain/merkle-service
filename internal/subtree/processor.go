@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -64,19 +65,28 @@ type Processor struct {
 	dataHubClient     *datahub.Client
 }
 
-// NewProcessor creates a new subtree Processor.
+// NewProcessor creates a new subtree Processor. logger, when non-nil,
+// overrides the default logger InitBase would otherwise install — this is
+// what lets the configured LOG_LEVEL reach the subtree-fetcher instead of
+// silently falling back to InitBase's hardcoded Info logger.
 func NewProcessor(
 	cfg *config.Config,
 	registrationStore RegistrationGetter,
 	seenCounterStore SeenCounter,
 	subtreeStore store.SubtreeStore,
+	logger *slog.Logger,
 ) *Processor {
-	return &Processor{
+	p := &Processor{
 		cfg:               cfg,
 		registrationStore: registrationStore,
 		seenCounterStore:  seenCounterStore,
 		subtreeStore:      subtreeStore,
 	}
+	p.InitBase("subtree-fetcher")
+	if logger != nil {
+		p.Logger = logger
+	}
+	return p
 }
 
 // Init initializes the subtree processor, setting up the Kafka consumer, producer, and registration cache.
