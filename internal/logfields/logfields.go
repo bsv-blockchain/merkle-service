@@ -78,3 +78,13 @@ func PeerID(v string) slog.Attr { return slog.String(KeyPeerID, v) }
 
 // RequestID returns the canonical attribute for an HTTP request id.
 func RequestID(v string) slog.Attr { return slog.String(KeyRequestID, v) }
+
+// TraceID returns the canonical attribute for an OTEL trace id. Used by
+// NewTraceHandler to stamp log records made under a valid span context; call
+// sites generally don't need this directly.
+func TraceID(v string) slog.Attr { return slog.String(KeyTraceID, v) }
+
+// SpanID returns the canonical attribute for an OTEL span id. Used by
+// NewTraceHandler to stamp log records made under a valid span context; call
+// sites generally don't need this directly.
+func SpanID(v string) slog.Attr { return slog.String(KeySpanID, v) }

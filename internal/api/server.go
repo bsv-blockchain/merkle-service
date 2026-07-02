@@ -10,6 +10,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
@@ -149,7 +152,11 @@ func (s *Server) Router() chi.Router {
 func (s *Server) Init(cfg interface{}) error {
 	s.router = chi.NewRouter()
 
-	// Middleware
+	// Middleware. tracingRouteMiddleware runs outermost (before RequestID) so
+	// it observes the fully-routed request before naming the span — it relies
+	// on the span otelhttp.NewHandler starts at the http.Server.Handler layer
+	// below already being present in the request context.
+	s.router.Use(tracingRouteMiddleware)
 	s.router.Use(middleware.RequestID)
 	s.router.Use(middlewareLogger(s.Logger))
 	s.router.Use(metrics.ChiMiddleware)
@@ -163,14 +170,38 @@ func (s *Server) Init(cfg interface{}) error {
 	s.router.Get("/api/lookup/{txid}", s.handleLookup)
 
 	s.httpServer = &http.Server{
-		Addr:         fmt.Sprintf(":%d", s.cfg.Port),
-		Handler:      s.router,
+		Addr: fmt.Sprintf(":%d", s.cfg.Port),
+		// otelhttp.NewHandler starts (and ends) one span per inbound request
+		// around the whole router. With telemetry disabled this uses the
+		// global no-op TracerProvider, so Start/End are inert.
+		Handler:      otelhttp.NewHandler(s.router, "merkle-api"),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
 	return nil
+}
+
+// tracingRouteMiddleware renames the request's active OTEL span (started by
+// the outer otelhttp.NewHandler wrapping s.router — see Init) to
+// "METHOD route" and stamps the http.route attribute, once chi routing has
+// resolved the matched pattern. Route patterns (e.g. "/api/lookup/{txid}")
+// are used instead of the raw path so span names/attributes stay
+// low-cardinality; unmatched requests (404s) are labeled "unmatched" —
+// mirrors metrics.RoutePattern exactly so both signals agree.
+//
+// trace.SpanFromContext returns a no-op span when the context carries none
+// (telemetry disabled), so SetName/SetAttributes are inert in that case.
+func tracingRouteMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+
+		route := metrics.RoutePattern(r)
+		span := trace.SpanFromContext(r.Context())
+		span.SetName(r.Method + " " + route)
+		span.SetAttributes(semconv.HTTPRoute(route))
+	})
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -221,7 +252,11 @@ func middlewareLogger(logger *slog.Logger) func(next http.Handler) http.Handler 
 
 			next.ServeHTTP(ww, r)
 
-			logger.Info(
+			// InfoContext (not Info) so a logger wrapped with
+			// logfields.NewTraceHandler (see service.NewLogger) stamps this
+			// line with trace_id/span_id from the request's OTEL span.
+			logger.InfoContext(
+				r.Context(),
 				"request",
 				"method", r.Method,
 				"path", r.URL.Path,
