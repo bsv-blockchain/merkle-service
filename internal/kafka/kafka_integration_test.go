@@ -95,7 +95,7 @@ func TestKafka_ProduceConsumeRoundTrip(t *testing.T) {
 	// Allow consumer group to stabilize.
 	time.Sleep(3 * time.Second)
 
-	if err := producer.Publish(expectedKey, expectedValue); err != nil {
+	if err := producer.Publish(context.Background(), expectedKey, expectedValue); err != nil {
 		t.Fatalf("Publish failed: %v", err)
 	}
 
@@ -158,7 +158,7 @@ func TestKafka_ProduceMultipleConsumeInOrder(t *testing.T) {
 	// and thus maintain ordering.
 	for i := 0; i < msgCount; i++ {
 		val := fmt.Sprintf("msg-%d", i)
-		if err := producer.Publish("same-key", []byte(val)); err != nil {
+		if err := producer.Publish(context.Background(), "same-key", []byte(val)); err != nil {
 			t.Fatalf("Publish #%d failed: %v", i, err)
 		}
 	}
@@ -225,7 +225,7 @@ func TestKafka_ConsumerGroupOffsetManagement(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	for i := 0; i < firstBatchCount; i++ {
-		if err := producer.Publish("key", []byte(fmt.Sprintf("batch1-msg-%d", i))); err != nil {
+		if err := producer.Publish(context.Background(), "key", []byte(fmt.Sprintf("batch1-msg-%d", i))); err != nil {
 			t.Fatalf("Publish batch1 #%d failed: %v", i, err)
 		}
 	}
@@ -245,7 +245,7 @@ func TestKafka_ConsumerGroupOffsetManagement(t *testing.T) {
 	// --- Phase 2: Produce more messages, start a new consumer with same group ---
 	secondBatchCount := 2
 	for i := 0; i < secondBatchCount; i++ {
-		if err := producer.Publish("key", []byte(fmt.Sprintf("batch2-msg-%d", i))); err != nil {
+		if err := producer.Publish(context.Background(), "key", []byte(fmt.Sprintf("batch2-msg-%d", i))); err != nil {
 			t.Fatalf("Publish batch2 #%d failed: %v", i, err)
 		}
 	}

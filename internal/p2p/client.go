@@ -12,9 +12,12 @@ import (
 
 	p2p "github.com/bsv-blockchain/go-teranode-p2p-client"
 	teranode "github.com/bsv-blockchain/teranode/services/p2p"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -165,7 +168,7 @@ func (c *Client) Start(ctx context.Context) error {
 
 	c.Logger.Info(
 		"p2p client created",
-		"peerID", client.GetID(),
+		logfields.PeerID(client.GetID()),
 		"network", client.GetNetwork(),
 		"dhtMode", c.cfg.MsgBus.DHTMode,
 		"port", c.cfg.MsgBus.Port,
@@ -382,7 +385,7 @@ func (c *Client) handleNodeStatusMessage(msg teranode.NodeStatusMessage) {
 	if raw == "" {
 		c.Logger.Debug(
 			"node_status has no datahub url",
-			"peerID", msg.PeerID,
+			logfields.PeerID(msg.PeerID),
 			"clientName", msg.ClientName,
 		)
 		return
@@ -391,8 +394,8 @@ func (c *Client) handleNodeStatusMessage(msg teranode.NodeStatusMessage) {
 	if err := ssrfguard.ValidateURL(raw, c.allowPrivateIPs, nil); err != nil {
 		c.Logger.Warn(
 			"rejected discovered datahub url",
-			"peerID", msg.PeerID,
-			"url", raw,
+			logfields.PeerID(msg.PeerID),
+			logfields.DataHubURL(raw),
 			"error", err,
 		)
 		return
@@ -408,8 +411,8 @@ func (c *Client) handleNodeStatusMessage(msg teranode.NodeStatusMessage) {
 	if err := c.dataHubRegistry.Add(normalized); err != nil {
 		c.Logger.Warn(
 			"failed to record discovered datahub url in registry",
-			"peerID", msg.PeerID,
-			"url", normalized,
+			logfields.PeerID(msg.PeerID),
+			logfields.DataHubURL(normalized),
 			"error", err,
 		)
 		return
@@ -417,9 +420,9 @@ func (c *Client) handleNodeStatusMessage(msg teranode.NodeStatusMessage) {
 
 	c.Logger.Debug(
 		"registered peer datahub url from node_status",
-		"peerID", msg.PeerID,
+		logfields.PeerID(msg.PeerID),
 		"clientName", msg.ClientName,
-		"url", normalized,
+		logfields.DataHubURL(normalized),
 	)
 }
 
@@ -453,10 +456,18 @@ func (c *Client) processBlockMessages(ctx context.Context, ch <-chan teranode.Bl
 // ErrPublishExhausted). Encoding errors and transient publish errors are
 // logged and swallowed so the loop can continue on subsequent messages.
 func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeMessage) error {
+	// Root span: this announcement is the origin of its own trace (see
+	// startAnnouncementSpan). The hash is an ATTRIBUTE, never the span name,
+	// to keep cardinality bounded.
+	ctx, span := startAnnouncementSpan(ctx, "subtree announce",
+		attribute.String(logfields.KeySubtreeHash, msg.Hash),
+	)
+	defer span.End()
+
 	c.Logger.Debug(
 		"received subtree announcement",
-		"hash", msg.Hash,
-		"dataHubUrl", msg.DataHubURL,
+		logfields.SubtreeHash(msg.Hash),
+		logfields.DataHubURL(msg.DataHubURL),
 	)
 
 	kafkaMsg := kafka.SubtreeMessage{
@@ -470,13 +481,20 @@ func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeM
 	if err != nil {
 		c.Logger.Error(
 			"failed to encode subtree message for kafka",
-			"hash", msg.Hash,
+			logfields.SubtreeHash(msg.Hash),
 			"error", err,
 		)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil
 	}
 
-	return c.publishWithRetry(ctx, c.subtreeProducer, msg.Hash, encoded, "subtree")
+	err = c.publishWithRetry(ctx, c.subtreeProducer, msg.Hash, encoded, "subtree")
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
 
 // handleBlockMessage maps a teranode BlockMessage to a Kafka BlockMessage and publishes it.
@@ -485,11 +503,22 @@ func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeM
 // ErrPublishExhausted). Encoding errors and transient publish errors are
 // logged and swallowed so the loop can continue on subsequent messages.
 func (c *Client) handleBlockMessage(ctx context.Context, msg teranode.BlockMessage) error {
-	c.Logger.Debug(
+	// Root span: this announcement is the origin of its own trace (see
+	// startAnnouncementSpan). The hash is an ATTRIBUTE, never the span name,
+	// to keep cardinality bounded.
+	ctx, span := startAnnouncementSpan(ctx, "block announce",
+		attribute.String(logfields.KeyBlockHash, msg.Hash),
+	)
+	defer span.End()
+
+	// Info (not Debug): blocks are rare (~10min cadence) compared to subtree
+	// announcements, so a live-tail of block observations is useful in
+	// production without enabling DEBUG.
+	c.Logger.Info(
 		"received block announcement",
-		"hash", msg.Hash,
-		"height", msg.Height,
-		"dataHubUrl", msg.DataHubURL,
+		logfields.BlockHash(msg.Hash),
+		logfields.BlockHeight(msg.Height),
+		logfields.DataHubURL(msg.DataHubURL),
 	)
 
 	kafkaMsg := kafka.BlockMessage{
@@ -506,13 +535,20 @@ func (c *Client) handleBlockMessage(ctx context.Context, msg teranode.BlockMessa
 	if err != nil {
 		c.Logger.Error(
 			"failed to encode block message for kafka",
-			"hash", msg.Hash,
+			logfields.BlockHash(msg.Hash),
 			"error", err,
 		)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil
 	}
 
-	return c.publishWithRetry(ctx, c.blockProducer, msg.Hash, encoded, "block")
+	err = c.publishWithRetry(ctx, c.blockProducer, msg.Hash, encoded, "block")
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
 
 // publishWithRetry attempts to publish a message to Kafka with exponential
@@ -532,7 +568,7 @@ func (c *Client) publishWithRetry(ctx context.Context, producer *kafka.Producer,
 	delay := baseRetryDelay
 
 	for attempt := 1; attempt <= maxPublishRetries; attempt++ {
-		err := producer.Publish(key, value)
+		err := producer.Publish(ctx, key, value)
 		if err == nil {
 			return nil
 		}

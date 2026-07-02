@@ -84,11 +84,10 @@ func TestValidateDataHubURL_ExpiredEntryRevalidates(t *testing.T) {
 }
 
 func TestNewSSRFAwareHTTPClient_PoolTuning(t *testing.T) {
-	client := newSSRFAwareHTTPClient(5, false)
-	tr, ok := client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("transport is %T, want *http.Transport", client.Transport)
-	}
+	// newSSRFAwareHTTPClient wraps this transport in otelhttp.NewTransport
+	// for outbound trace propagation, so the pool-tuning invariants are
+	// checked against the raw builder rather than unwrapping client.Transport.
+	tr := newSSRFAwareTransport(false)
 	// Guard against a regression back to net/http's default of 2 idle
 	// conns/host, which forces re-dials under same-peer fan-out.
 	if tr.MaxIdleConnsPerHost != 64 {
@@ -96,5 +95,19 @@ func TestNewSSRFAwareHTTPClient_PoolTuning(t *testing.T) {
 	}
 	if tr.MaxIdleConns != 128 {
 		t.Errorf("MaxIdleConns = %d, want 128", tr.MaxIdleConns)
+	}
+}
+
+// TestNewSSRFAwareHTTPClient_WrapsOtelTransport verifies newSSRFAwareHTTPClient
+// wraps the SSRF-guarded transport with otelhttp.NewTransport (rather than
+// exposing the raw *http.Transport directly), so outbound DataHub requests
+// carry a client span / traceparent header.
+func TestNewSSRFAwareHTTPClient_WrapsOtelTransport(t *testing.T) {
+	client := newSSRFAwareHTTPClient(5, false)
+	if _, ok := client.Transport.(*http.Transport); ok {
+		t.Fatal("Transport is a raw *http.Transport; expected it to be wrapped in otelhttp.NewTransport")
+	}
+	if client.Transport == nil {
+		t.Fatal("Transport is nil")
 	}
 }

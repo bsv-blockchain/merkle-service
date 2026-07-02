@@ -11,6 +11,7 @@ import (
 
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	"github.com/bsv-blockchain/merkle-service/internal/stump"
@@ -113,7 +114,7 @@ func (p *Processor) buildBlockProcessedData(
 		// Without the merkle root a consumer can't validate against the canonical
 		// chain, but the subtree list is still useful. Log and carry on.
 		p.Logger.Warn("BLOCK_PROCESSED: could not extract merkle root from header",
-			"blockHash", blockMsg.Hash, "error", err)
+			logfields.BlockHash(blockMsg.Hash), "error", err)
 		return data
 	}
 	data.MerkleRoot = merkleRoot.String()
@@ -127,7 +128,7 @@ func (p *Processor) buildBlockProcessedData(
 	cbTxID, err := coinbaseTxIDFromHex(blockMsg.Coinbase)
 	if err != nil {
 		p.Logger.Warn("BLOCK_PROCESSED: could not compute coinbase txid; omitting coinbase BUMP",
-			"blockHash", blockMsg.Hash, "error", err)
+			logfields.BlockHash(blockMsg.Hash), "error", err)
 		return data
 	}
 
@@ -136,7 +137,7 @@ func (p *Processor) buildBlockProcessedData(
 		h, hErr := chainhash.NewHashFromStr(s)
 		if hErr != nil {
 			p.Logger.Warn("BLOCK_PROCESSED: bad subtree hash; omitting coinbase BUMP",
-				"blockHash", blockMsg.Hash, "subtreeHash", s, "error", hErr)
+				logfields.BlockHash(blockMsg.Hash), logfields.SubtreeHash(s), "error", hErr)
 			return data
 		}
 		roots[i] = *h
@@ -147,7 +148,7 @@ func (p *Processor) buildBlockProcessedData(
 	raw, err := p.dataHubClient.FetchSubtreeRaw(ctx, resolvedURL, meta.Subtrees[0])
 	if err != nil {
 		p.Logger.Warn("BLOCK_PROCESSED: could not fetch subtree 0; omitting coinbase BUMP",
-			"blockHash", blockMsg.Hash, "error", err)
+			logfields.BlockHash(blockMsg.Hash), "error", err)
 		return data
 	}
 	if p.subtreeStore != nil {
@@ -158,14 +159,14 @@ func (p *Processor) buildBlockProcessedData(
 	nodes, err := datahub.ParseRawNodes(raw)
 	if err != nil {
 		p.Logger.Warn("BLOCK_PROCESSED: could not parse subtree 0; omitting coinbase BUMP",
-			"blockHash", blockMsg.Hash, "error", err)
+			logfields.BlockHash(blockMsg.Hash), "error", err)
 		return data
 	}
 
 	siblings, err := buildCoinbaseSiblings(nodes, roots)
 	if err != nil {
 		p.Logger.Warn("BLOCK_PROCESSED: could not build coinbase siblings; omitting coinbase BUMP",
-			"blockHash", blockMsg.Hash, "error", err)
+			logfields.BlockHash(blockMsg.Hash), "error", err)
 		return data
 	}
 
@@ -177,7 +178,7 @@ func (p *Processor) buildBlockProcessedData(
 	if !bytes.Equal(computed, merkleRoot[:]) {
 		computedHash, _ := chainhash.NewHash(computed)
 		p.Logger.Warn("BLOCK_PROCESSED: coinbase BUMP self-validation failed; omitting coinbase BUMP",
-			"blockHash", blockMsg.Hash,
+			logfields.BlockHash(blockMsg.Hash),
 			"computedRoot", hashString(computedHash),
 			"headerRoot", merkleRoot.String())
 		metrics.CoinbaseBumpValidationFailures.Inc()

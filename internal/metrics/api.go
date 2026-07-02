@@ -91,7 +91,7 @@ func ChiMiddleware(next http.Handler) http.Handler {
 		ww := chimiddleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		next.ServeHTTP(ww, r)
 
-		route := routePattern(r)
+		route := RoutePattern(r)
 		status := StatusClass(ww.Status(), nil)
 		duration := time.Since(start).Seconds()
 
@@ -106,11 +106,15 @@ func ChiMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// routePattern extracts the chi route template (e.g. "/api/lookup/{txid}")
+// RoutePattern extracts the chi route template (e.g. "/api/lookup/{txid}")
 // for use as a bounded route label. Falls back to "unmatched" when chi
 // couldn't resolve the path so a flood of 404 probes doesn't explode
 // cardinality.
-func routePattern(r *http.Request) string {
+//
+// Exported so the OTEL inbound-tracing middleware (internal/api) can tag
+// spans with the exact same low-cardinality route label used for the RED
+// metrics here, rather than re-deriving it.
+func RoutePattern(r *http.Request) string {
 	if ctx := chi.RouteContext(r.Context()); ctx != nil {
 		if p := ctx.RoutePattern(); p != "" {
 			return p

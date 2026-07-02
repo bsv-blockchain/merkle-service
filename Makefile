@@ -1,4 +1,4 @@
-.PHONY: build test test-e2e-postgres lint docker-up docker-down run debug-dashboard scale-test mega-scale-test generate-mega-fixtures lint-store-imports
+.PHONY: build test test-e2e-postgres lint docker-up docker-down run debug-dashboard scale-test mega-scale-test generate-mega-fixtures lint-store-imports lint-logfields
 
 build:
 	go build ./...
@@ -6,7 +6,7 @@ build:
 test:
 	go test ./...
 
-lint:
+lint: lint-logfields
 	golangci-lint run
 
 docker-up:
@@ -46,3 +46,18 @@ lint-store-imports:
 		exit 1; \
 	fi
 	@echo "ok: cmd/ store imports look clean"
+
+# Fails if any non-test source file under internal/, cmd/, or tools/ logs a
+# field under a pre-canon key name (see internal/logfields) instead of the
+# snake_case canon shared with arcade. Struct-tag lines (json:/yaml:/
+# mapstructure:) and HTML form field reads (FormValue) are exempt — those
+# are wire formats, not log fields, and must NOT be renamed to match the
+# log-field canon.
+lint-logfields:
+	@if grep -rnE '"(blockHash|subtreeHash|subtreeID|subtreeIndex|callbackUrl|callbackURL|blockHeight|peerID|peerId|requestId|dataHubUrl)"' internal/ cmd/ tools/ --include='*.go' \
+		| grep -v '_test\.go' \
+		| grep -v 'json:' | grep -v 'yaml:' | grep -v 'mapstructure:' | grep -v 'FormValue'; then \
+		echo "ERROR: found a banned pre-canon log-field key literal — use internal/logfields constructors instead"; \
+		exit 1; \
+	fi
+	@echo "ok: no banned log-field key literals found"

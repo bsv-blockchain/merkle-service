@@ -3,20 +3,22 @@
 
 FROM golang:1.26-alpine AS builder
 
+ARG VERSION=dev
+
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
 # Build all service binaries.
-RUN CGO_ENABLED=0 go build -o /bin/merkle-service ./cmd/merkle-service
-RUN CGO_ENABLED=0 go build -o /bin/block-processor ./cmd/block-processor
-RUN CGO_ENABLED=0 go build -o /bin/subtree-worker ./cmd/subtree-worker
-RUN CGO_ENABLED=0 go build -o /bin/callback-delivery ./cmd/callback-delivery
-RUN CGO_ENABLED=0 go build -o /bin/subtree-fetcher ./cmd/subtree-fetcher
-RUN CGO_ENABLED=0 go build -o /bin/api-server ./cmd/api-server
-RUN CGO_ENABLED=0 go build -o /bin/p2p-client ./cmd/p2p-client
-RUN CGO_ENABLED=0 go build -o /bin/watch ./cmd/watch
+RUN CGO_ENABLED=0 go build -ldflags "-X github.com/bsv-blockchain/merkle-service/internal/version.Version=${VERSION}" -o /bin/merkle-service ./cmd/merkle-service
+RUN CGO_ENABLED=0 go build -ldflags "-X github.com/bsv-blockchain/merkle-service/internal/version.Version=${VERSION}" -o /bin/block-processor ./cmd/block-processor
+RUN CGO_ENABLED=0 go build -ldflags "-X github.com/bsv-blockchain/merkle-service/internal/version.Version=${VERSION}" -o /bin/subtree-worker ./cmd/subtree-worker
+RUN CGO_ENABLED=0 go build -ldflags "-X github.com/bsv-blockchain/merkle-service/internal/version.Version=${VERSION}" -o /bin/callback-delivery ./cmd/callback-delivery
+RUN CGO_ENABLED=0 go build -ldflags "-X github.com/bsv-blockchain/merkle-service/internal/version.Version=${VERSION}" -o /bin/subtree-fetcher ./cmd/subtree-fetcher
+RUN CGO_ENABLED=0 go build -ldflags "-X github.com/bsv-blockchain/merkle-service/internal/version.Version=${VERSION}" -o /bin/api-server ./cmd/api-server
+RUN CGO_ENABLED=0 go build -ldflags "-X github.com/bsv-blockchain/merkle-service/internal/version.Version=${VERSION}" -o /bin/p2p-client ./cmd/p2p-client
+RUN CGO_ENABLED=0 go build -ldflags "-X github.com/bsv-blockchain/merkle-service/internal/version.Version=${VERSION}" -o /bin/watch ./cmd/watch
 
 # Runtime image with all binaries.
 FROM alpine:3.24

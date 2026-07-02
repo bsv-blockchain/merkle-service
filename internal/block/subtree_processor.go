@@ -9,6 +9,7 @@ import (
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	"github.com/bsv-blockchain/merkle-service/internal/stump"
@@ -84,8 +85,8 @@ func ProcessBlockSubtree(
 	if err != nil || rawData == nil {
 		logger.Debug(
 			"subtree not in blob store, fetching from DataHub",
-			"subtreeHash", subtreeHash,
-			"blockHash", blockHash,
+			logfields.SubtreeHash(subtreeHash),
+			logfields.BlockHash(blockHash),
 		)
 		rawData, err = dhClient.FetchSubtreeRaw(ctx, dataHubURL, subtreeHash)
 		if err != nil {
@@ -93,7 +94,7 @@ func ProcessBlockSubtree(
 		}
 		// Store for potential future use.
 		if storeErr := subtreeStore.StoreSubtree(subtreeHash, rawData, blockHeight); storeErr != nil {
-			logger.Warn("failed to store fetched subtree", "hash", subtreeHash, "error", storeErr)
+			logger.Warn("failed to store fetched subtree", logfields.SubtreeHash(subtreeHash), "error", storeErr)
 		}
 	}
 
@@ -231,8 +232,8 @@ func ProcessBlockSubtree(
 
 	logger.Info(
 		"processed block subtree",
-		"subtreeHash", subtreeHash,
-		"blockHash", blockHash,
+		logfields.SubtreeHash(subtreeHash),
+		logfields.BlockHash(blockHash),
 		"registeredTxids", len(registrations),
 	)
 

@@ -1,7 +1,10 @@
 package subtree
 
 import (
+	"bytes"
+	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +23,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
@@ -990,7 +994,7 @@ type mockSyncProducer struct {
 	messages []capturedMessage
 }
 
-func (m *mockSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (m *mockSyncProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, capturedMessage{Key: key, Value: value})
@@ -1042,7 +1046,7 @@ func TestBatchedSeenCallbacks_SingleCallbackURL(t *testing.T) {
 		"tx3":   {"http://arcade.example.com/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1082,7 +1086,7 @@ func TestBatchedSeenCallbacks_MultipleCallbackURLs(t *testing.T) {
 		"tx3":   {"http://url-A/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1121,7 +1125,7 @@ func TestBatchedSeenCallbacks_PropagatesCallbackToken(t *testing.T) {
 		testTx1: {url},
 		testTx2: {url},
 	}
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, map[string]string{url: token}), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, map[string]string{url: token}), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1140,7 +1144,7 @@ func TestBatchedSeenCallbacks_NoRegistered(t *testing.T) {
 	regStore := &mockRegStore{registrations: map[string][]string{}}
 	p, mockProd := newTestProcessor(t, regStore, &mockSeenCounter{})
 
-	if err := p.emitBatchedSeenCallbacks(map[string][]store.CallbackEntry{}, "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), map[string][]store.CallbackEntry{}, "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1161,7 +1165,7 @@ func TestBatchedSeenCallbacks_SeenMultipleNodesThreshold(t *testing.T) {
 		testTx2: {"http://arcade/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1202,7 +1206,7 @@ func TestBatchedSeenCallbacks_PartialThreshold(t *testing.T) {
 		testTx2: {"http://arcade/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1235,7 +1239,7 @@ func TestBatchedSeenCallbacks_ChunksLargeBatch(t *testing.T) {
 		registered[fmt.Sprintf("tx%05d", i)] = []string{"http://arcade/cb"}
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1266,6 +1270,263 @@ func TestBatchedSeenCallbacks_ChunksLargeBatch(t *testing.T) {
 	}
 	if len(seenTxids) != total {
 		t.Errorf("expected %d unique txids across chunks, got %d", total, len(seenTxids))
+	}
+}
+
+// testSeenBatchCallbackURL is the callback URL shared by the SEEN-batch
+// logging tests below; extracted to a constant so the repeated literal
+// doesn't trip goconst.
+const testSeenBatchCallbackURL = "http://arcade.example.com/cb"
+
+// newTestProcessorWithCfg is like newTestProcessor but lets the caller supply
+// cfg (for Subtree.SeenTxidLogMax) and a logger (to capture structured log
+// output for assertions).
+func newTestProcessorWithCfg(t *testing.T, regStore RegistrationGetter, seenCounter SeenCounter, cfg *config.Config, logger *slog.Logger) *Processor {
+	t.Helper()
+	mockProducer := &mockSyncProducer{}
+	p := &Processor{
+		cfg:               cfg,
+		registrationStore: regStore,
+		seenCounterStore:  seenCounter,
+		callbackProducer:  kafka.NewTestProducer(mockProducer, "callback-test", logger),
+	}
+	p.InitBase("subtree-test")
+	p.Logger = logger
+	return p
+}
+
+// seenBatchLogEntries decodes every JSON log line in buf and returns only
+// the "seen callback batch published" entries emitted by emitSeenBatch.
+func seenBatchLogEntries(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log line: %v\nraw: %s", err, line)
+		}
+		if entry["msg"] == "seen callback batch published" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// TestEmitSeenBatch_LogsTxidsCappedAtConfig verifies that the SEEN batch
+// success log includes a "txids" array capped at Subtree.SeenTxidLogMax, with
+// "txids_truncated" set once the matched set exceeds the cap.
+func TestEmitSeenBatch_LogsTxidsCappedAtConfig(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg := &config.Config{Subtree: config.SubtreeConfig{SeenTxidLogMax: 3}}
+
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p := newTestProcessorWithCfg(t, regStore, &mockSeenCounter{}, cfg, logger)
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+		"tx2": {testSeenBatchCallbackURL},
+		"tx3": {testSeenBatchCallbackURL},
+		"tx4": {testSeenBatchCallbackURL},
+		"tx5": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-cap"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
+
+	entries := seenBatchLogEntries(t, &buf)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 seen-batch log entry, got %d", len(entries))
+	}
+	entry := entries[0]
+
+	if got := entry[logfields.KeyTxIDCount]; got != float64(5) {
+		t.Errorf("txid_count: expected 5, got %v", got)
+	}
+	txids, ok := entry[logfields.KeyTxIDs].([]any)
+	if !ok {
+		t.Fatalf("expected %s to be a JSON array, got %T (%v)", logfields.KeyTxIDs, entry[logfields.KeyTxIDs], entry[logfields.KeyTxIDs])
+	}
+	if len(txids) != 3 {
+		t.Errorf("expected txids capped at 3, got %d: %v", len(txids), txids)
+	}
+	if truncated, _ := entry[logfields.KeyTxIDsTruncated].(bool); !truncated {
+		t.Errorf("expected txids_truncated=true, got %v", entry[logfields.KeyTxIDsTruncated])
+	}
+	if entry[logfields.KeySubtreeHash] != "subtree-cap" {
+		t.Errorf("missing/wrong %s: %v", logfields.KeySubtreeHash, entry[logfields.KeySubtreeHash])
+	}
+	if entry[logfields.KeyCallbackURL] != testSeenBatchCallbackURL {
+		t.Errorf("missing/wrong %s: %v", logfields.KeyCallbackURL, entry[logfields.KeyCallbackURL])
+	}
+}
+
+// TestEmitSeenBatch_LogsAllTxidsWhenUnderCap verifies the txids array is not
+// marked truncated, and contains every matched txid, when the batch size is
+// within Subtree.SeenTxidLogMax.
+func TestEmitSeenBatch_LogsAllTxidsWhenUnderCap(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg := &config.Config{Subtree: config.SubtreeConfig{SeenTxidLogMax: 1000}}
+
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p := newTestProcessorWithCfg(t, regStore, &mockSeenCounter{}, cfg, logger)
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+		"tx2": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-under-cap"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
+
+	entries := seenBatchLogEntries(t, &buf)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 seen-batch log entry, got %d", len(entries))
+	}
+	entry := entries[0]
+
+	if got := entry[logfields.KeyTxIDCount]; got != float64(2) {
+		t.Errorf("txid_count: expected 2, got %v", got)
+	}
+	txids, ok := entry[logfields.KeyTxIDs].([]any)
+	if !ok || len(txids) != 2 {
+		t.Fatalf("expected 2 txids logged, got %v", entry[logfields.KeyTxIDs])
+	}
+	if truncated, _ := entry[logfields.KeyTxIDsTruncated].(bool); truncated {
+		t.Errorf("expected txids_truncated=false, got %v", entry[logfields.KeyTxIDsTruncated])
+	}
+}
+
+// TestEmitSeenBatch_CountsOnlyWhenLogMaxZero verifies that
+// Subtree.SeenTxidLogMax=0 omits the txids array entirely and logs only the count.
+func TestEmitSeenBatch_CountsOnlyWhenLogMaxZero(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg := &config.Config{Subtree: config.SubtreeConfig{SeenTxidLogMax: 0}}
+
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p := newTestProcessorWithCfg(t, regStore, &mockSeenCounter{}, cfg, logger)
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+		"tx2": {testSeenBatchCallbackURL},
+		"tx3": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-counts-only"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
+
+	entries := seenBatchLogEntries(t, &buf)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 seen-batch log entry, got %d", len(entries))
+	}
+	entry := entries[0]
+
+	if got := entry[logfields.KeyTxIDCount]; got != float64(3) {
+		t.Errorf("txid_count: expected 3, got %v", got)
+	}
+	if _, present := entry[logfields.KeyTxIDs]; present {
+		t.Errorf("expected no %s field in counts-only mode, got %v", logfields.KeyTxIDs, entry[logfields.KeyTxIDs])
+	}
+	if _, present := entry[logfields.KeyTxIDsTruncated]; present {
+		t.Errorf("expected no txids_truncated field in counts-only mode, got %v", entry[logfields.KeyTxIDsTruncated])
+	}
+}
+
+// TestEmitSeenBatch_NilCfgLogsCountsOnly verifies that a nil cfg (as used by
+// unit tests constructing Processor via struct literal without wiring
+// config.Load()) falls back to counts-only logging rather than panicking.
+func TestEmitSeenBatch_NilCfgLogsCountsOnly(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p := newTestProcessorWithCfg(t, regStore, &mockSeenCounter{}, nil, logger)
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-nil-cfg"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
+
+	entries := seenBatchLogEntries(t, &buf)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 seen-batch log entry, got %d", len(entries))
+	}
+	if _, present := entries[0][logfields.KeyTxIDs]; present {
+		t.Errorf("expected no %s field with nil cfg, got %v", logfields.KeyTxIDs, entries[0][logfields.KeyTxIDs])
+	}
+}
+
+// TestEmitSeenBatch_LogsAllTxidsAtExactCap pins the strict-greater-than
+// comparison in emitSeenBatch: a batch of exactly SeenTxidLogMax txids logs
+// all of them and is NOT marked truncated.
+func TestEmitSeenBatch_LogsAllTxidsAtExactCap(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg := &config.Config{Subtree: config.SubtreeConfig{SeenTxidLogMax: 3}}
+
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p := newTestProcessorWithCfg(t, regStore, &mockSeenCounter{}, cfg, logger)
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+		"tx2": {testSeenBatchCallbackURL},
+		"tx3": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-exact-cap"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
+
+	entries := seenBatchLogEntries(t, &buf)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 seen-batch log entry, got %d", len(entries))
+	}
+	entry := entries[0]
+
+	txids, ok := entry[logfields.KeyTxIDs].([]any)
+	if !ok || len(txids) != 3 {
+		t.Fatalf("expected all 3 txids logged at exact cap, got %v", entry[logfields.KeyTxIDs])
+	}
+	if truncated, _ := entry[logfields.KeyTxIDsTruncated].(bool); truncated {
+		t.Errorf("expected txids_truncated=false at exact cap, got %v", entry[logfields.KeyTxIDsTruncated])
+	}
+}
+
+// TestEmitSeenBatch_NoSuccessLogOnPublishFailure pins the property that the
+// "seen callback batch published" Info log fires only after a durable
+// publish: when PublishBatch fails, the batch is redriven by the caller and
+// no success log may be emitted for it.
+func TestEmitSeenBatch_NoSuccessLogOnPublishFailure(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg := &config.Config{Subtree: config.SubtreeConfig{SeenTxidLogMax: 1000}}
+
+	failing := &callbackFailingSyncProducer{failAll: true, failErr: errors.New("kafka broker down")}
+	p := &Processor{
+		cfg:               cfg,
+		registrationStore: &mockRegStore{registrations: map[string][]string{}},
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(failing, "callback-test", logger),
+	}
+	p.InitBase("subtree-test")
+	p.Logger = logger
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+		"tx2": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-pubfail"); err == nil {
+		t.Fatal("expected an error from emitBatchedSeenCallbacks with a failing producer")
+	}
+
+	if entries := seenBatchLogEntries(t, &buf); len(entries) != 0 {
+		t.Errorf("expected no seen-batch success log on publish failure, got %d: %v", len(entries), entries)
 	}
 }
 
@@ -1302,7 +1563,7 @@ func TestHandleTransientFailure_RoutesToDLQAtMaxAttempts(t *testing.T) {
 	beforeRetried := subtreeCount(metrics.OutcomeRetried)
 	beforeDLQ := subtreeCount(metrics.OutcomeDLQ)
 	for i := 0; i < maxAttempts; i++ {
-		if err := p.handleTransientFailure(subtreeMsg, "fetch", cause, time.Now()); err != nil {
+		if err := p.handleTransientFailure(context.Background(), subtreeMsg, "fetch", cause, time.Now()); err != nil {
 			t.Fatalf("iteration %d: unexpected error: %v", i, err)
 		}
 	}
@@ -1363,7 +1624,7 @@ func TestHandleTransientFailure_DefaultsMaxAttemptsWhenUnset(t *testing.T) {
 	p.Logger = logger
 
 	subtreeMsg := &kafka.SubtreeMessage{Hash: "h"}
-	if err := p.handleTransientFailure(subtreeMsg, "fetch", errors.New("x"), time.Now()); err != nil {
+	if err := p.handleTransientFailure(context.Background(), subtreeMsg, "fetch", errors.New("x"), time.Now()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1392,7 +1653,7 @@ type callbackFailingSyncProducer struct {
 	failErr  error
 }
 
-func (f *callbackFailingSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (f *callbackFailingSyncProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failAll {
@@ -1423,7 +1684,7 @@ type urlFailingSyncProducer struct {
 	failCount int
 }
 
-func (f *urlFailingSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (f *urlFailingSyncProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if value != nil {
@@ -1459,7 +1720,7 @@ func TestEmitBatchedSeenCallbacks_HappyPathReturnsNil(t *testing.T) {
 		testTx2: {"http://url-B/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-happy"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-happy"); err != nil {
 		t.Fatalf("expected nil error on happy path, got: %v", err)
 	}
 	if got := len(mockProd.getMessages()); got != 2 {
@@ -1486,7 +1747,7 @@ func TestEmitBatchedSeenCallbacks_PublishFailureReturnsError(t *testing.T) {
 		testTx2: {"http://url-B/cb"},
 	}
 
-	err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-fail")
+	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-fail")
 	if err == nil {
 		t.Fatalf("expected non-nil error when callback publish fails")
 	}
@@ -1521,7 +1782,7 @@ func TestEmitBatchedSeenCallbacks_PartialFailureStillAttemptsOtherURLs(t *testin
 		testTx2: {okURL},
 	}
 
-	err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-partial")
+	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-partial")
 	if err == nil {
 		t.Fatalf("expected non-nil error when one callback URL publish fails")
 	}
@@ -1804,7 +2065,7 @@ func TestEmitBatchedSeenCallbacks_IncrementFailureReturnsError(t *testing.T) {
 		testTx2: {"http://url-B/cb"},
 	}
 
-	err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-counter-fail")
+	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-counter-fail")
 	if err == nil {
 		t.Fatalf("expected non-nil error when seen-counter Increment fails")
 	}

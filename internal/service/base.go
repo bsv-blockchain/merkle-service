@@ -7,6 +7,8 @@ import (
 	"os/signal"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 )
 
 // BaseService provides common lifecycle logic for all services.
@@ -19,10 +21,16 @@ type BaseService struct {
 }
 
 // NewLogger creates a JSON slog.Logger at the given level writing to stdout.
+//
+// The JSON handler is wrapped in logfields.NewTraceHandler so every logger
+// derived from the entrypoint gains trace_id/span_id correlation on log
+// calls made through a *Context method (InfoContext, ErrorContext, ...) when
+// the call's context carries a valid OTEL span. This is a no-op wrapper when
+// telemetry is disabled or the context carries no span.
 func NewLogger(level slog.Level) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	return slog.New(logfields.NewTraceHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: level,
-	}))
+	})))
 }
 
 // InitBase sets up the logger and context for the service.

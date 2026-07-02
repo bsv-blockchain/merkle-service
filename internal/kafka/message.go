@@ -13,6 +13,12 @@ import (
 // field set mirrors exactly what handlers across the pipeline read
 // (block/subtree/callback): Value plus Topic/Partition/Offset for logging and
 // the callback-dedup key.
+//
+// Record headers (notably a W3C traceparent) are deliberately NOT exposed
+// here: trace context is extracted directly off the *kgo.Record by the
+// consumer (see dispatchRecord) before the handler runs, so business code
+// never needs them — and copying them onto every consumed Message would be
+// an unused per-record slice allocation.
 type Message struct {
 	Topic     string
 	Partition int32

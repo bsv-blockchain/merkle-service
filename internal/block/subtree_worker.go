@@ -11,6 +11,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
@@ -268,9 +269,9 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 
 	s.Logger.Debug(
 		"processing subtree work item",
-		"subtreeHash", workMsg.SubtreeHash,
-		"blockHash", workMsg.BlockHash,
-		"blockHeight", workMsg.BlockHeight,
+		logfields.SubtreeHash(workMsg.SubtreeHash),
+		logfields.BlockHash(workMsg.BlockHash),
+		logfields.BlockHeight(workMsg.BlockHeight),
 		"attemptCount", workMsg.AttemptCount,
 	)
 
@@ -294,7 +295,7 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 		// Transient processing failure: re-drive instead of silently dropping
 		// the STUMP. Counter is decremented only on DLQ (terminal) — for
 		// retries, the next successful attempt will decrement.
-		return s.handleTransientFailure(workMsg, err)
+		return s.handleTransientFailure(ctx, workMsg, err)
 	}
 
 	// Publish one STUMP callback per (callbackURL, subtree) combination.
@@ -304,8 +305,8 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 	// DLQ'd. Otherwise downstream consumers stall waiting for STUMPs that
 	// were dropped on the floor.
 	if result != nil && len(result.CallbackGroups) > 0 {
-		if pubErr := s.publishSubtreeCallbacks(workMsg, result); pubErr != nil {
-			return s.handleTransientFailure(workMsg, pubErr)
+		if pubErr := s.publishSubtreeCallbacks(ctx, workMsg, result); pubErr != nil {
+			return s.handleTransientFailure(ctx, workMsg, pubErr)
 		}
 		// Record this subtree's index into each matched URL's expected-STUMP set
 		// BEFORE decrementing the counter, so the set is complete when the last
@@ -319,7 +320,7 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 				urls = append(urls, callbackURL)
 			}
 			if recErr := s.expectedStumps.AddSubtreeIndex(workMsg.BlockHash, workMsg.SubtreeIndex, urls); recErr != nil {
-				return s.handleTransientFailure(workMsg, fmt.Errorf("recording expected-STUMP indices: %w", recErr))
+				return s.handleTransientFailure(ctx, workMsg, fmt.Errorf("recording expected-STUMP indices: %w", recErr))
 			}
 		}
 	}
@@ -329,8 +330,8 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 	// so the work item is redelivered and the decrement is re-attempted; we
 	// must not ack with a non-decremented counter, or BLOCK_PROCESSED will
 	// never fire for this block (F-013).
-	if err := s.decrementCounterAndMaybeEmit(workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken); err != nil {
-		return s.handleTransientFailure(workMsg, fmt.Errorf("decrementing subtree counter: %w", err))
+	if err := s.decrementCounterAndMaybeEmit(ctx, workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken); err != nil {
+		return s.handleTransientFailure(ctx, workMsg, fmt.Errorf("decrementing subtree counter: %w", err))
 	}
 	return nil
 }
@@ -349,16 +350,16 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 // re-attempt the DLQ publish; the negative-decrement re-emits BLOCK_PROCESSED
 // which is deduplicated by the receiver, while the DLQ publish either
 // eventually succeeds or surfaces as a sustained loud-error log.
-func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWorkMessage, cause error) error {
+func (s *SubtreeWorkerService) handleTransientFailure(ctx context.Context, workMsg *kafka.SubtreeWorkMessage, cause error) error {
 	nextAttempt := workMsg.AttemptCount + 1
 	maxAttempts := s.maxAttempts()
 
 	if nextAttempt >= maxAttempts {
 		s.Logger.Error(
 			"subtree work item exceeded max attempts, routing to DLQ",
-			"subtreeHash", workMsg.SubtreeHash,
-			"blockHash", workMsg.BlockHash,
-			"subtreeIndex", workMsg.SubtreeIndex,
+			logfields.SubtreeHash(workMsg.SubtreeHash),
+			logfields.BlockHash(workMsg.BlockHash),
+			logfields.SubtreeIndex(workMsg.SubtreeIndex),
 			"attemptCount", workMsg.AttemptCount,
 			"maxAttempts", maxAttempts,
 			"error", cause,
@@ -366,12 +367,12 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 		// Decrement FIRST so a counter-store hiccup aborts before we publish to
 		// the DLQ — otherwise every redelivery while the counter store is
 		// degraded would publish another DLQ duplicate.
-		if decErr := s.decrementCounterAndMaybeEmit(workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken); decErr != nil {
+		if decErr := s.decrementCounterAndMaybeEmit(ctx, workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken); decErr != nil {
 			s.Logger.Error(
 				"ALERT: subtree counter decrement failed on DLQ path; deferring DLQ publish until counter store recovers",
-				"subtreeHash", workMsg.SubtreeHash,
-				"blockHash", workMsg.BlockHash,
-				"subtreeIndex", workMsg.SubtreeIndex,
+				logfields.SubtreeHash(workMsg.SubtreeHash),
+				logfields.BlockHash(workMsg.BlockHash),
+				logfields.SubtreeIndex(workMsg.SubtreeIndex),
 				"error", decErr,
 			)
 			return fmt.Errorf("decrementing subtree counter on DLQ path for block %s: %w",
@@ -388,7 +389,8 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 		// PublishWithHashKey to keep the worker's subtree-hash keying uniform with
 		// the retry/fan-out paths (SHA256-derived). The DLQ is its own topic so
 		// this is cosmetic for co-location, but it avoids a confusing mixed scheme.
-		if pubErr := s.dlqProducer.PublishWithHashKey(workMsg.SubtreeHash, data); pubErr != nil {
+		// WithoutCancel: DLQ hand-off must survive a canceled consumer ctx.
+		if pubErr := s.dlqProducer.PublishWithHashKey(context.WithoutCancel(ctx), workMsg.SubtreeHash, data); pubErr != nil {
 			return fmt.Errorf("publishing subtree work message to DLQ: %w", pubErr)
 		}
 		return nil
@@ -396,9 +398,9 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 
 	s.Logger.Warn(
 		"subtree work item transient failure, re-publishing for retry",
-		"subtreeHash", workMsg.SubtreeHash,
-		"blockHash", workMsg.BlockHash,
-		"subtreeIndex", workMsg.SubtreeIndex,
+		logfields.SubtreeHash(workMsg.SubtreeHash),
+		logfields.BlockHash(workMsg.BlockHash),
+		logfields.SubtreeIndex(workMsg.SubtreeIndex),
 		"attemptCount", workMsg.AttemptCount,
 		"nextAttempt", nextAttempt,
 		"error", cause,
@@ -414,7 +416,9 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 	// broker and land the retry on a DIFFERENT partition than its original —
 	// harmless for these independent units, but it breaks same-subtree partition
 	// stability. Keep the keying consistent across fan-out and retry.
-	if pubErr := s.retryProducer.PublishWithHashKey(workMsg.SubtreeHash, data); pubErr != nil {
+	// WithoutCancel: this republish is a durable retry hand-off that must not
+	// be dropped by the originating consumer ctx being canceled mid-flight.
+	if pubErr := s.retryProducer.PublishWithHashKey(context.WithoutCancel(ctx), workMsg.SubtreeHash, data); pubErr != nil {
 		return fmt.Errorf("re-publishing subtree work message for retry: %w", pubErr)
 	}
 	// Intentionally do NOT decrement on retry — only success or DLQ counts.
@@ -446,7 +450,7 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 // overrideURL is non-empty, the counter is keyed by (blockHash|overrideURL)
 // so reprocess and live processing don't share state, and the
 // BLOCK_PROCESSED emission targets only that one URL/token.
-func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideURL, overrideToken string) error {
+func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(ctx context.Context, blockHash, overrideURL, overrideToken string) error {
 	if s.subtreeCounter == nil {
 		return nil
 	}
@@ -465,14 +469,14 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideU
 			// BLOCK_PROCESSED coordination is lost.
 			s.Logger.Error(
 				"ALERT: subtree counter missing (TTL expired); acking work item without retry — block must be reprocessed",
-				"blockHash", blockHash,
+				logfields.BlockHash(blockHash),
 				"counterKey", counterKey,
 			)
 			return nil
 		}
 		s.Logger.Error(
 			"failed to decrement subtree counter",
-			"blockHash", blockHash,
+			logfields.BlockHash(blockHash),
 			"counterKey", counterKey,
 			"error", err,
 		)
@@ -484,10 +488,10 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideU
 	// drive the counter negative; we still need to emit so the notification is
 	// not silently lost. Receiver-side dedup handles the duplicate.
 	if remaining <= 0 {
-		if emitErr := s.emitBlockProcessed(blockHash, overrideURL, overrideToken, blockData); emitErr != nil {
+		if emitErr := s.emitBlockProcessed(ctx, blockHash, overrideURL, overrideToken, blockData); emitErr != nil {
 			s.Logger.Error(
 				"failed to emit BLOCK_PROCESSED; work item will be redelivered",
-				"blockHash", blockHash,
+				logfields.BlockHash(blockHash),
 				"remaining", remaining,
 				"error", emitErr,
 			)
@@ -508,12 +512,12 @@ func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(blockHash, overrideU
 // encountered is returned to the caller so handleMessage can re-drive the
 // work item through handleTransientFailure rather than silently acking and
 // decrementing the counter — see F-012.
-func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWorkMessage, result *SubtreeResult) error {
+func (s *SubtreeWorkerService) publishSubtreeCallbacks(ctx context.Context, workMsg *kafka.SubtreeWorkMessage, result *SubtreeResult) error {
 	if s.stumpStore == nil {
 		s.Logger.Error(
 			"stump store not configured; cannot publish STUMP callbacks",
-			"blockHash", workMsg.BlockHash,
-			"subtreeIndex", workMsg.SubtreeIndex,
+			logfields.BlockHash(workMsg.BlockHash),
+			logfields.SubtreeIndex(workMsg.SubtreeIndex),
 		)
 		return fmt.Errorf("stump store not configured for block %s subtree %d",
 			workMsg.BlockHash, workMsg.SubtreeIndex)
@@ -525,9 +529,9 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 		// subtree's callbacks entirely rather than publishing broken messages.
 		s.Logger.Error(
 			"failed to store STUMP blob; skipping subtree callbacks",
-			"blockHash", workMsg.BlockHash,
-			"subtreeIndex", workMsg.SubtreeIndex,
-			"callbackURLs", len(result.CallbackGroups),
+			logfields.BlockHash(workMsg.BlockHash),
+			logfields.SubtreeIndex(workMsg.SubtreeIndex),
+			"callback_url_count", len(result.CallbackGroups),
 			"error", err,
 		)
 		return fmt.Errorf("storing STUMP blob for block %s subtree %d: %w",
@@ -556,7 +560,7 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 		data, encErr := msg.Encode()
 		if encErr != nil {
 			s.Logger.Error("failed to encode STUMP callback message",
-				"callbackURL", callbackURL, "error", encErr)
+				logfields.CallbackURL(callbackURL), "error", encErr)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("encoding STUMP callback for %s: %w", callbackURL, encErr)
 			}
@@ -564,7 +568,7 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 		}
 		entries = append(entries, kafka.HashBatchEntry(msg.PartitionKey(), data))
 	}
-	if pubErr := s.callbackProducer.PublishBatch(entries); pubErr != nil {
+	if pubErr := s.callbackProducer.PublishBatch(ctx, entries); pubErr != nil {
 		s.Logger.Error("failed to publish STUMP callback batch",
 			"count", len(entries), "error", pubErr)
 		if firstErr == nil {
@@ -591,14 +595,14 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 // On retry, the redelivered work item drives the counter past zero and
 // emit fires again; duplicate BLOCK_PROCESSED messages are deduplicated at
 // the callback delivery service (keyed by blockHash + callbackURL + type).
-func (s *SubtreeWorkerService) emitBlockProcessed(blockHash, overrideURL, overrideToken string, blockData *store.BlockProcessedData) error {
-	return emitBlockProcessedCallbacks(s.Logger, s.urlRegistry, s.expectedStumps, s.callbackProducer, blockHash, overrideURL, overrideToken, blockData)
+func (s *SubtreeWorkerService) emitBlockProcessed(ctx context.Context, blockHash, overrideURL, overrideToken string, blockData *store.BlockProcessedData) error {
+	return emitBlockProcessedCallbacks(ctx, s.Logger, s.urlRegistry, s.expectedStumps, s.callbackProducer, blockHash, overrideURL, overrideToken, blockData)
 }
 
 // callbackPublisher is the narrow surface emitBlockProcessedCallbacks needs.
 // Implemented by *kafka.Producer in production; mocked in tests.
 type callbackPublisher interface {
-	PublishBatch(entries []kafka.BatchEntry) error
+	PublishBatch(ctx context.Context, entries []kafka.BatchEntry) error
 }
 
 // emitBlockProcessedCallbacks publishes BLOCK_PROCESSED messages to every
@@ -625,6 +629,7 @@ type callbackPublisher interface {
 // at the callback delivery service (keyed by blockHash + callbackURL +
 // type).
 func emitBlockProcessedCallbacks(
+	ctx context.Context,
 	logger *slog.Logger,
 	urlRegistry store.CallbackURLRegistry,
 	expectedStumps store.ExpectedStumpStore,
@@ -682,7 +687,7 @@ func emitBlockProcessedCallbacks(
 			indices, idxErr := expectedStumps.GetSubtreeIndices(blockHash, entry.URL)
 			if idxErr != nil {
 				logger.Error("failed to read expected-STUMP indices for BLOCK_PROCESSED",
-					"blockHash", blockHash, "callbackURL", entry.URL, "error", idxErr)
+					logfields.BlockHash(blockHash), logfields.CallbackURL(entry.URL), "error", idxErr)
 				if firstErr == nil {
 					firstErr = fmt.Errorf("reading expected-STUMP indices for %s: %w", entry.URL, idxErr)
 				}
@@ -694,7 +699,7 @@ func emitBlockProcessedCallbacks(
 		if encErr != nil {
 			logger.Error(
 				"failed to encode BLOCK_PROCESSED message",
-				"callbackURL", entry.URL,
+				logfields.CallbackURL(entry.URL),
 				"error", encErr,
 			)
 			if firstErr == nil {
@@ -707,10 +712,10 @@ func emitBlockProcessedCallbacks(
 	// One batch publish for every URL (throughput review F-6). On error the
 	// caller re-drives via the counter/redelivery path and the delivery-side
 	// dedup (blockHash + callbackURL + type) absorbs any records that landed.
-	if pubErr := producer.PublishBatch(batch); pubErr != nil {
+	if pubErr := producer.PublishBatch(ctx, batch); pubErr != nil {
 		logger.Error(
 			"failed to publish BLOCK_PROCESSED batch",
-			"blockHash", blockHash,
+			logfields.BlockHash(blockHash),
 			"count", len(batch),
 			"error", pubErr,
 		)
@@ -722,8 +727,8 @@ func emitBlockProcessedCallbacks(
 	if firstErr == nil {
 		logger.Info(
 			"emitted BLOCK_PROCESSED callbacks",
-			"blockHash", blockHash,
-			"callbackURLs", len(entries),
+			logfields.BlockHash(blockHash),
+			"callback_url_count", len(entries),
 		)
 	}
 	return firstErr

@@ -28,7 +28,7 @@ type mockSyncProducer struct {
 	failErr  error // if set, Produce returns this error
 }
 
-func (m *mockSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (m *mockSyncProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failErr != nil {
@@ -556,7 +556,7 @@ type flakyProducer struct {
 	attempts          int
 }
 
-func (f *flakyProducer) Produce(_ string, _ []byte) (int32, int64, error) {
+func (f *flakyProducer) Produce(_ context.Context, _ string, _ []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempts++

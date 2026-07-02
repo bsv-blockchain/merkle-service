@@ -142,6 +142,17 @@ Override any config value via environment variables. Key settings for K8s:
 
 See `config.yaml` in the project root for the full list of configuration options.
 
+### OTel telemetry
+
+Every Deployment in this directory wires `HOST_IP` / `POD_NAME` (via the k8s
+downward API) and `OTEL_EXPORTER_OTLP_ENDPOINT=http://$(HOST_IP):4317`, with
+`TELEMETRY_ENABLED` defaulted to `"false"` — harmless when left off, and a
+working example of the wiring needed to turn it on. These manifests are
+illustrative examples, not the authoritative production deployment; see
+[`docs/observability.md`](../../docs/observability.md#deployment--enabling-telemetry)
+for the full config/env reference and the production rollout (owned by the
+`bsva-infra-flux` repo).
+
 ## Resource Tuning
 
 - **Subtree workers**: Each holds one STUMP (~271 KB) in memory during processing. The LRU cache adds up to `LRU_SIZE * 271 KB` memory usage. Default 1024 entries = ~270 MB.

@@ -90,7 +90,7 @@ func TestCallbackDelivery_SuccessfulCallback(t *testing.T) {
 		},
 	}
 
-	svc := callback.NewDeliveryService(cfg, nil, newTestStumpStore(), nil)
+	svc := callback.NewDeliveryService(cfg, nil, newTestStumpStore(), nil, slog.Default())
 	if err := svc.Init(nil); err != nil {
 		t.Skipf("Kafka not available; skipping: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestCallbackDelivery_SuccessfulCallback(t *testing.T) {
 		t.Fatalf("failed to encode CallbackTopicMessage: %v", err)
 	}
 
-	if err := producer.PublishWithHashKey(stumpsMsg.CallbackURL, encoded); err != nil {
+	if err := producer.PublishWithHashKey(context.Background(), stumpsMsg.CallbackURL, encoded); err != nil {
 		t.Fatalf("failed to publish stumps message: %v", err)
 	}
 
@@ -196,7 +196,7 @@ func TestCallbackDelivery_RetryOnFailure(t *testing.T) {
 		},
 	}
 
-	svc := callback.NewDeliveryService(cfg, nil, newTestStumpStore(), nil)
+	svc := callback.NewDeliveryService(cfg, nil, newTestStumpStore(), nil, slog.Default())
 	if err := svc.Init(nil); err != nil {
 		t.Skipf("Kafka not available; skipping: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestCallbackDelivery_RetryOnFailure(t *testing.T) {
 		t.Fatalf("failed to encode CallbackTopicMessage: %v", err)
 	}
 
-	if err := producer.PublishWithHashKey(stumpsMsg.CallbackURL, encoded); err != nil {
+	if err := producer.PublishWithHashKey(context.Background(), stumpsMsg.CallbackURL, encoded); err != nil {
 		t.Fatalf("failed to publish stumps message: %v", err)
 	}
 

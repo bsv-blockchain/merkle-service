@@ -19,7 +19,7 @@ type spyPublisher struct {
 	calls    int
 }
 
-func (s *spyPublisher) Produce(key string, value []byte) (int32, int64, error) {
+func (s *spyPublisher) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	s.calls++
 	if s.failAt > 0 && s.calls == s.failAt {
 		return 0, 0, errors.New("injected produce failure")
@@ -42,7 +42,7 @@ func TestPublishBatch_FallbackLoop(t *testing.T) {
 		{Key: "k1", Value: []byte("v1")},
 		{Key: "k2", Value: []byte("v2")},
 	}
-	if err := p.PublishBatch(entries); err != nil {
+	if err := p.PublishBatch(context.Background(), entries); err != nil {
 		t.Fatalf("PublishBatch: %v", err)
 	}
 	if len(spy.produced) != 3 {
@@ -64,7 +64,7 @@ func TestPublishBatch_FallbackContinuesOnError(t *testing.T) {
 	spy := &spyPublisher{failAt: 2}
 	p := NewTestProducer(spy, "fallback-err-test", discardLogger())
 
-	err := p.PublishBatch([]BatchEntry{
+	err := p.PublishBatch(context.Background(), []BatchEntry{
 		{Key: "k0", Value: []byte("v0")},
 		{Key: "k1", Value: []byte("v1")},
 		{Key: "k2", Value: []byte("v2")},
@@ -101,7 +101,7 @@ func TestPublishBatch_KgoRoundTrip(t *testing.T) {
 	for i := range entries {
 		entries[i] = HashBatchEntry(fmt.Sprintf("pk-%d", i), []byte(fmt.Sprintf("payload-%d", i)))
 	}
-	if pubErr := prod.PublishBatch(entries); pubErr != nil {
+	if pubErr := prod.PublishBatch(context.Background(), entries); pubErr != nil {
 		t.Fatalf("PublishBatch: %v", pubErr)
 	}
 

@@ -11,6 +11,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
@@ -185,9 +186,9 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 
 	p.Logger.Info(
 		"processing block announcement",
-		"hash", blockMsg.Hash,
-		"height", blockMsg.Height,
-		"dataHubUrl", blockMsg.DataHubURL,
+		logfields.BlockHash(blockMsg.Hash),
+		logfields.BlockHeight(blockMsg.Height),
+		logfields.DataHubURL(blockMsg.DataHubURL),
 		"reprocess", blockMsg.OverrideCallbackURL != "",
 	)
 
@@ -195,7 +196,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	// requests (BypassDedup) intentionally skip both the lookup and the later
 	// Add so a hash already seen via P2P can still be reprocessed on demand.
 	if !blockMsg.BypassDedup && p.dedupCache != nil && p.dedupCache.Contains(blockMsg.Hash) {
-		p.Logger.Debug("skipping duplicate block message", "hash", blockMsg.Hash)
+		p.Logger.Debug("skipping duplicate block message", logfields.BlockHash(blockMsg.Hash))
 		return nil
 	}
 
@@ -206,7 +207,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	// is stamped with that URL so workers don't inherit a known-bad peer.
 	meta, resolvedURL, err := p.fetchBlockMetadataWithFailover(ctx, blockMsg.Hash, blockMsg.DataHubURL)
 	if err != nil {
-		p.Logger.Error("failed to fetch block metadata", "hash", blockMsg.Hash, "error", err)
+		p.Logger.Error("failed to fetch block metadata", logfields.BlockHash(blockMsg.Hash), "error", err)
 		return fmt.Errorf("fetching block metadata %s: %w", blockMsg.Hash, err)
 	}
 
@@ -217,7 +218,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	if p.dataHubRegistry != nil && resolvedURL != "" {
 		if regErr := p.dataHubRegistry.Add(resolvedURL); regErr != nil {
 			p.Logger.Warn("failed to record DataHub URL in registry",
-				"url", resolvedURL, "error", regErr)
+				logfields.DataHubURL(resolvedURL), "error", regErr)
 		}
 	}
 
@@ -225,8 +226,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	subtreeHashes := meta.Subtrees
 	p.Logger.Info(
 		"block metadata fetched",
-		"hash", blockMsg.Hash,
-		"height", meta.Height,
+		logfields.BlockHash(blockMsg.Hash),
+		logfields.BlockHeight(meta.Height),
 		"subtreeCount", len(subtreeHashes),
 	)
 
@@ -247,6 +248,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		// can record it; there is no compound BUMP to build.
 		emptyBlockData := p.buildBlockProcessedData(ctx, blockMsg, meta, resolvedURL)
 		if err := emitBlockProcessedCallbacks(
+			ctx,
 			p.Logger,
 			p.urlRegistry,
 			nil, // coinbase-only block: no subtrees -> no STUMPs -> empty expected set
@@ -290,9 +292,9 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		if encErr != nil {
 			p.Logger.Error(
 				"failed to encode subtree work message",
-				"subtreeHash", stHash,
-				"blockHash", blockMsg.Hash,
-				"subtreeIndex", i,
+				logfields.SubtreeHash(stHash),
+				logfields.BlockHash(blockMsg.Hash),
+				logfields.SubtreeIndex(i),
 				"error", encErr,
 			)
 			return fmt.Errorf("encoding subtree work message for block %s subtree %s: %w", blockMsg.Hash, stHash, encErr)
@@ -321,7 +323,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		if err := p.subtreeCounter.Init(counterKey, len(encoded), blockData); err != nil {
 			p.Logger.Error(
 				"failed to init subtree counter",
-				"blockHash", blockMsg.Hash,
+				logfields.BlockHash(blockMsg.Hash),
 				"counterKey", counterKey,
 				"count", len(encoded),
 				"error", err,
@@ -346,10 +348,10 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	for i, ew := range encoded {
 		entries[i] = kafka.HashBatchEntry(ew.subtreeHash, ew.payload)
 	}
-	if err := p.subtreeWorkProducer.PublishBatch(entries); err != nil {
+	if err := p.subtreeWorkProducer.PublishBatch(ctx, entries); err != nil {
 		p.Logger.Error(
 			"failed to publish subtree work batch",
-			"blockHash", blockMsg.Hash,
+			logfields.BlockHash(blockMsg.Hash),
 			"total", len(encoded),
 			"error", err,
 		)
@@ -359,7 +361,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 
 	p.Logger.Info(
 		"dispatched subtree work items",
-		"blockHash", blockMsg.Hash,
+		logfields.BlockHash(blockMsg.Hash),
 		"subtreeCount", len(encoded),
 	)
 
@@ -415,7 +417,7 @@ func (p *Processor) fetchBlockMetadataWithFailover(
 		registered, regErr := p.dataHubRegistry.GetAll()
 		if regErr != nil {
 			p.Logger.Warn("failed to list DataHub registry for failover",
-				"hash", blockHash, "error", regErr)
+				logfields.BlockHash(blockHash), "error", regErr)
 		}
 		for _, u := range registered {
 			if u == "" {
@@ -434,7 +436,7 @@ func (p *Processor) fetchBlockMetadataWithFailover(
 	for _, a := range attempts {
 		if !a.forceTry && ph != nil && !ph.IsHealthy(a.url) {
 			p.Logger.Debug("skipping unhealthy DataHub peer for block fetch",
-				"hash", blockHash, "url", a.url)
+				logfields.BlockHash(blockHash), logfields.DataHubURL(a.url))
 			continue
 		}
 
@@ -445,7 +447,7 @@ func (p *Processor) fetchBlockMetadataWithFailover(
 			if a.url != announcedURL {
 				p.Logger.Info(
 					"block metadata served by failover DataHub",
-					"hash", blockHash,
+					logfields.BlockHash(blockHash),
 					"announcedUrl", announcedURL,
 					"resolvedUrl", a.url,
 				)
@@ -455,8 +457,8 @@ func (p *Processor) fetchBlockMetadataWithFailover(
 		lastErr = err
 		p.Logger.Debug(
 			"DataHub failover candidate failed",
-			"hash", blockHash,
-			"url", a.url,
+			logfields.BlockHash(blockHash),
+			logfields.DataHubURL(a.url),
 			"notFound", errors.Is(err, datahub.ErrNotFound),
 			"error", err,
 		)

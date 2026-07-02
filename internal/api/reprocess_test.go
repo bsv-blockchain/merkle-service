@@ -33,7 +33,7 @@ type recordingProducer struct {
 	values     [][]byte
 }
 
-func (r *recordingProducer) PublishWithHashKey(key string, value []byte) error {
+func (r *recordingProducer) PublishWithHashKey(_ context.Context, key string, value []byte) error {
 	if r.publishErr != nil {
 		return r.publishErr
 	}

@@ -26,6 +26,7 @@ type Config struct {
 	DataHub   DataHubConfig   `yaml:"datahub"   mapstructure:"datahub"`
 	Registry  RegistryConfig  `yaml:"registry"  mapstructure:"registry"`
 	Metrics   MetricsConfig   `yaml:"metrics"   mapstructure:"metrics"`
+	Telemetry TelemetryConfig `yaml:"telemetry" mapstructure:"telemetry"`
 }
 
 // MetricsConfig controls the Prometheus /metrics exporter. Each binary that
@@ -40,6 +41,50 @@ type MetricsConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
 	Port    int    `yaml:"port"    mapstructure:"port"`
 	Path    string `yaml:"path"    mapstructure:"path"`
+}
+
+// TelemetryConfig configures OpenTelemetry export of traces and metrics to
+// an external OTLP collector. Disabled by default: with Enabled=false,
+// telemetry.Init installs no providers and opens no network connections, so
+// runtime behavior matches a build with no OTEL support at all.
+//
+// There is intentionally NO log export here — stdout JSON (via
+// service.NewLogger) remains the only log path. OTLP log export is not
+// implemented.
+//
+// When Enabled, Endpoint may be left empty to fall back to the standard
+// OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_{TRACES,METRICS}_ENDPOINT
+// environment variables — that fallback is resolved inside telemetry.Init,
+// not here.
+type TelemetryConfig struct {
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// Endpoint is the host:port of the OTLP collector. May be left empty
+	// when Enabled=true — the exporter then falls back to the standard
+	// OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_{TRACES,METRICS}_ENDPOINT
+	// env vars.
+	Endpoint string `yaml:"endpoint" mapstructure:"endpoint"`
+	// Protocol selects the OTLP transport: "grpc" (default) or "http".
+	Protocol string `yaml:"protocol" mapstructure:"protocol"`
+	// Insecure skips TLS when dialing the collector (e.g. an in-cluster
+	// collector reachable without TLS).
+	Insecure bool `yaml:"insecure" mapstructure:"insecure"`
+	// ServiceName sets the resource's service.name attribute. Default
+	// "merkle-service".
+	ServiceName string `yaml:"serviceName" mapstructure:"servicename"`
+	// Namespace sets the resource's service.namespace attribute (e.g. the
+	// downstream solution's name). Omitted from the resource when empty.
+	Namespace string `yaml:"namespace" mapstructure:"namespace"`
+	// Traces enables the OTLP trace pipeline. Default true.
+	Traces bool `yaml:"traces" mapstructure:"traces"`
+	// Metrics enables the OTLP metric pipeline (Prometheus bridge, reading
+	// from metrics.Registry). Default true.
+	Metrics bool `yaml:"metrics" mapstructure:"metrics"`
+	// SampleRatio is the ratio (0.0-1.0) fed to a ParentBased(TraceIDRatioBased)
+	// sampler. Default 1.0 (sample everything).
+	SampleRatio float64 `yaml:"sampleRatio" mapstructure:"sampleratio"`
+	// ExportTimeoutMs bounds Shutdown's ForceFlush+Shutdown of every
+	// provider. Default 10000 (10s).
+	ExportTimeoutMs int `yaml:"exportTimeoutMs" mapstructure:"exporttimeoutms"`
 }
 
 // RegistryConfig holds policy for the txid -> callback URL registration store.
@@ -321,6 +366,12 @@ type SubtreeConfig struct {
 	// permanently-failing subtree (e.g. DataHub 404) stalled the partition
 	// forever because the consumer doesn't MarkMessage on handler error.
 	MaxAttempts int `yaml:"maxAttempts" mapstructure:"maxattempts"`
+	// SeenTxidLogMax caps how many matched txids are included (as logfields.TxIDs)
+	// on the Info log emitted for each SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES
+	// batch published to a callback URL. 0 disables the txids array entirely
+	// and logs only the count — useful when a batch can carry thousands of
+	// txids and the full list would dominate log volume.
+	SeenTxidLogMax int `yaml:"seenTxidLogMax" mapstructure:"seentxidlogmax"`
 }
 
 // BlockConfig holds block processing configuration.
@@ -520,6 +571,7 @@ func registerDefaults(v *viper.Viper) {
 	// (initial + 2 retries) gives us recovery from transient blips without
 	// turning into a self-inflicted DoS.
 	v.SetDefault("subtree.maxattempts", 3)
+	v.SetDefault("subtree.seentxidlogmax", 1000)
 
 	// Block
 	v.SetDefault("block.workerpoolsize", 16)
@@ -568,6 +620,22 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("metrics.enabled", true)
 	v.SetDefault("metrics.port", 9090)
 	v.SetDefault("metrics.path", "/metrics")
+
+	// Telemetry: off by default. See TelemetryConfig doc comment. Every
+	// field gets an explicit SetDefault — including the zero-valued ones —
+	// because viper's AutomaticEnv only recognizes TELEMETRY_* overrides for
+	// keys it already knows about; without these, TELEMETRY_ENDPOINT /
+	// TELEMETRY_NAMESPACE / TELEMETRY_INSECURE would silently be ignored.
+	v.SetDefault("telemetry.enabled", false)
+	v.SetDefault("telemetry.endpoint", "")
+	v.SetDefault("telemetry.protocol", "grpc")
+	v.SetDefault("telemetry.insecure", false)
+	v.SetDefault("telemetry.servicename", "merkle-service")
+	v.SetDefault("telemetry.namespace", "")
+	v.SetDefault("telemetry.traces", true)
+	v.SetDefault("telemetry.metrics", true)
+	v.SetDefault("telemetry.sampleratio", 1.0)
+	v.SetDefault("telemetry.exporttimeoutms", 10000)
 }
 
 // bindEnvVars explicitly binds environment variable names to Viper keys.
@@ -657,6 +725,7 @@ func bindEnvVars(v *viper.Viper) {
 		"subtree.cachemaxmb":     "SUBTREE_CACHE_MAX_MB",
 		"subtree.dedupcachesize": "SUBTREE_DEDUP_CACHE_SIZE",
 		"subtree.maxattempts":    "SUBTREE_MAX_ATTEMPTS",
+		"subtree.seentxidlogmax": "SUBTREE_SEEN_TXID_LOG_MAX",
 
 		// Block
 		"block.workerpoolsize":      "BLOCK_WORKER_POOL_SIZE",
@@ -696,6 +765,18 @@ func bindEnvVars(v *viper.Viper) {
 		"metrics.enabled": "METRICS_ENABLED",
 		"metrics.port":    "METRICS_PORT",
 		"metrics.path":    "METRICS_PATH",
+
+		// Telemetry
+		"telemetry.enabled":         "TELEMETRY_ENABLED",
+		"telemetry.endpoint":        "TELEMETRY_ENDPOINT",
+		"telemetry.protocol":        "TELEMETRY_PROTOCOL",
+		"telemetry.insecure":        "TELEMETRY_INSECURE",
+		"telemetry.servicename":     "TELEMETRY_SERVICE_NAME",
+		"telemetry.namespace":       "TELEMETRY_NAMESPACE",
+		"telemetry.traces":          "TELEMETRY_TRACES",
+		"telemetry.metrics":         "TELEMETRY_METRICS",
+		"telemetry.sampleratio":     "TELEMETRY_SAMPLE_RATIO",
+		"telemetry.exporttimeoutms": "TELEMETRY_EXPORT_TIMEOUT_MS",
 	}
 
 	for key, env := range bindings {
@@ -760,6 +841,32 @@ func Load() (*Config, error) {
 	// becomes a permanent record that the sweeper never reclaims.
 	if cfg.Aerospike.SubtreeCounterTTLSec <= 0 {
 		return nil, fmt.Errorf("invalid aerospike.subtreeCounterTTLSec %d: must be > 0", cfg.Aerospike.SubtreeCounterTTLSec)
+	}
+
+	// Telemetry validation. telemetry.endpoint is intentionally NOT required
+	// here: an empty value falls back to the standard
+	// OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_{TRACES,METRICS}_ENDPOINT
+	// env vars, resolved inside telemetry.Init (which errors if neither is set).
+	if cfg.Telemetry.Enabled {
+		switch cfg.Telemetry.Protocol {
+		case "grpc", "http":
+		default:
+			return nil, fmt.Errorf("invalid telemetry.protocol %q: must be %q or %q", cfg.Telemetry.Protocol, "grpc", "http")
+		}
+		if cfg.Telemetry.SampleRatio < 0 || cfg.Telemetry.SampleRatio > 1 {
+			return nil, fmt.Errorf("invalid telemetry.sampleratio %v: must be between 0 and 1", cfg.Telemetry.SampleRatio)
+		}
+		// Both the gRPC and HTTP exporters' WithEndpoint dial the value
+		// verbatim as host:port; a scheme prefix makes the dial fail silently
+		// in the background exporter goroutine (for HTTP the scheme is instead
+		// controlled by telemetry.insecure), so fail fast here for either
+		// protocol. Only the OTEL_EXPORTER_OTLP_ENDPOINT env var understands a
+		// scheme-prefixed URL.
+		if strings.HasPrefix(cfg.Telemetry.Endpoint, "http://") || strings.HasPrefix(cfg.Telemetry.Endpoint, "https://") {
+			return nil, fmt.Errorf("invalid telemetry.endpoint %q: must be host:port without a scheme "+
+				"(e.g. \"collector:4317\"); scheme-prefixed URLs are only understood by the OTEL_EXPORTER_OTLP_ENDPOINT env var",
+				cfg.Telemetry.Endpoint)
+		}
 	}
 
 	return &cfg, nil

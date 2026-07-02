@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -12,6 +13,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -64,19 +66,28 @@ type Processor struct {
 	dataHubClient     *datahub.Client
 }
 
-// NewProcessor creates a new subtree Processor.
+// NewProcessor creates a new subtree Processor. logger, when non-nil,
+// overrides the default logger InitBase would otherwise install — this is
+// what lets the configured LOG_LEVEL reach the subtree-fetcher instead of
+// silently falling back to InitBase's hardcoded Info logger.
 func NewProcessor(
 	cfg *config.Config,
 	registrationStore RegistrationGetter,
 	seenCounterStore SeenCounter,
 	subtreeStore store.SubtreeStore,
+	logger *slog.Logger,
 ) *Processor {
-	return &Processor{
+	p := &Processor{
 		cfg:               cfg,
 		registrationStore: registrationStore,
 		seenCounterStore:  seenCounterStore,
 		subtreeStore:      subtreeStore,
 	}
+	p.InitBase("subtree-fetcher")
+	if logger != nil {
+		p.Logger = logger
+	}
+	return p
 }
 
 // Init initializes the subtree processor, setting up the Kafka consumer, producer, and registration cache.
@@ -299,14 +310,14 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 
 	p.Logger.Debug(
 		"processing subtree announcement",
-		"hash", subtreeMsg.Hash,
-		"dataHubUrl", subtreeMsg.DataHubURL,
+		logfields.SubtreeHash(subtreeMsg.Hash),
+		logfields.DataHubURL(subtreeMsg.DataHubURL),
 		"attemptCount", subtreeMsg.AttemptCount,
 	)
 
 	// Check dedup cache — skip if already successfully processed.
 	if p.dedupCache != nil && p.dedupCache.Contains(subtreeMsg.Hash) {
-		p.Logger.Debug("skipping duplicate subtree message", "hash", subtreeMsg.Hash)
+		p.Logger.Debug("skipping duplicate subtree message", logfields.SubtreeHash(subtreeMsg.Hash))
 		metrics.ObserveSubtreeProcessing(metrics.OutcomeDedupHit, time.Since(start))
 		return nil
 	}
@@ -320,8 +331,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	if ph := p.dataHubClient.PeerHealth(); ph != nil && !ph.IsHealthy(subtreeMsg.DataHubURL) {
 		p.Logger.Debug(
 			"skipping subtree fetch: peer marked unhealthy",
-			"hash", subtreeMsg.Hash,
-			"dataHubUrl", subtreeMsg.DataHubURL,
+			logfields.SubtreeHash(subtreeMsg.Hash),
+			logfields.DataHubURL(subtreeMsg.DataHubURL),
 		)
 		metrics.ObserveSubtreeProcessing(metrics.OutcomeSkippedUnhealthy, time.Since(start))
 		return nil
@@ -339,15 +350,15 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		// from the same host to short-circuit at the IsHealthy gate above
 		// once the threshold is reached.
 		if errors.Is(err, datahub.ErrNotFound) {
-			return p.handlePermanentFailure(subtreeMsg, "fetching subtree from DataHub", err, start)
+			return p.handlePermanentFailure(ctx, subtreeMsg, "fetching subtree from DataHub", err, start)
 		}
-		return p.handleTransientFailure(subtreeMsg, "fetching subtree from DataHub", err, start)
+		return p.handleTransientFailure(ctx, subtreeMsg, "fetching subtree from DataHub", err, start)
 	}
 
 	// 3.3: Store raw binary data in the subtree blob store.
 	if p.cfg.Subtree.StorageMode == "realtime" {
 		if err = p.subtreeStore.StoreSubtree(subtreeMsg.Hash, rawData, 0); err != nil {
-			return p.handleTransientFailure(subtreeMsg, "storing subtree", err, start)
+			return p.handleTransientFailure(ctx, subtreeMsg, "storing subtree", err, start)
 		}
 	}
 
@@ -355,9 +366,9 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	// DataHub returns concatenated 32-byte hashes, not full go-subtree Serialize() format.
 	txids, err := datahub.ParseRawTxids(rawData)
 	if err != nil {
-		return p.handleTransientFailure(subtreeMsg, "parsing subtree txids", err, start)
+		return p.handleTransientFailure(ctx, subtreeMsg, "parsing subtree txids", err, start)
 	}
-	p.Logger.Debug("processing subtree txids", "length", len(txids), "hash", subtreeMsg.Hash)
+	p.Logger.Debug("processing subtree txids", "length", len(txids), logfields.SubtreeHash(subtreeMsg.Hash))
 	metrics.ObserveSubtreeCounts(len(txids), 0)
 
 	if len(txids) == 0 {
@@ -372,7 +383,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	// 4.2-4.4: Check registrations via cache and Aerospike.
 	registeredTxids, err := p.findRegisteredTxids(txids)
 	if err != nil {
-		return p.handleTransientFailure(subtreeMsg, "checking registrations", err, start)
+		return p.handleTransientFailure(ctx, subtreeMsg, "checking registrations", err, start)
 	}
 	metrics.ObserveSubtreeCounts(0, len(registeredTxids))
 
@@ -384,8 +395,8 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	// either retried or terminally DLQ'd. Otherwise downstream callback
 	// consumers permanently lose SEEN notifications during a Kafka
 	// callback-topic outage (F-057).
-	if err := p.emitBatchedSeenCallbacks(registeredTxids, subtreeMsg.Hash); err != nil {
-		return p.handleTransientFailure(subtreeMsg, "publishing batched SEEN callbacks", err, start)
+	if err := p.emitBatchedSeenCallbacks(ctx, registeredTxids, subtreeMsg.Hash); err != nil {
+		return p.handleTransientFailure(ctx, subtreeMsg, "publishing batched SEEN callbacks", err, start)
 	}
 
 	// Mark subtree as successfully processed for dedup.
@@ -403,7 +414,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 // it on subtree-dlq. Returns nil on successful hand-off so the consumer acks
 // the original offset; returns an error only when the producer itself is
 // broken (partition stall is preferable to silent loss in that case).
-func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, stage string, cause error, start time.Time) error {
+func (p *Processor) handleTransientFailure(ctx context.Context, subtreeMsg *kafka.SubtreeMessage, stage string, cause error, start time.Time) error {
 	nextAttempt := subtreeMsg.AttemptCount + 1
 	maxAttempts := p.cfg.Subtree.MaxAttempts
 	if maxAttempts <= 0 {
@@ -413,14 +424,14 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 	if nextAttempt >= maxAttempts {
 		p.Logger.Error(
 			"subtree message exceeded max attempts, routing to DLQ",
-			"hash", subtreeMsg.Hash,
+			logfields.SubtreeHash(subtreeMsg.Hash),
 			"stage", stage,
 			"attemptCount", subtreeMsg.AttemptCount,
 			"maxAttempts", maxAttempts,
 			"error", cause,
 		)
 		subtreeMsg.AttemptCount = nextAttempt
-		if err := p.publishToDLQ(subtreeMsg); err != nil {
+		if err := p.publishToDLQ(ctx, subtreeMsg); err != nil {
 			return err
 		}
 		metrics.ObserveSubtreeProcessing(metrics.OutcomeDLQ, time.Since(start))
@@ -429,7 +440,7 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 
 	p.Logger.Warn(
 		"subtree message transient failure, re-publishing for retry",
-		"hash", subtreeMsg.Hash,
+		logfields.SubtreeHash(subtreeMsg.Hash),
 		"stage", stage,
 		"attemptCount", subtreeMsg.AttemptCount,
 		"nextAttempt", nextAttempt,
@@ -440,7 +451,10 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 	if encErr != nil {
 		return fmt.Errorf("encoding subtree message for retry: %w", encErr)
 	}
-	if pubErr := p.retryProducer.Publish(subtreeMsg.Hash, data); pubErr != nil {
+	// WithoutCancel: this republish is a durable retry hand-off that must not
+	// be dropped by the originating consumer ctx being canceled mid-flight;
+	// only the trace context is preserved.
+	if pubErr := p.retryProducer.Publish(context.WithoutCancel(ctx), subtreeMsg.Hash, data); pubErr != nil {
 		return fmt.Errorf("re-publishing subtree message for retry: %w", pubErr)
 	}
 	metrics.ObserveSubtreeProcessing(metrics.OutcomeRetried, time.Since(start))
@@ -455,16 +469,16 @@ func (p *Processor) handleTransientFailure(subtreeMsg *kafka.SubtreeMessage, sta
 // AttemptCount=0 is distinguishable from a transient-exhausted entry.
 // Returns nil on successful hand-off so the consumer acks the original
 // offset.
-func (p *Processor) handlePermanentFailure(subtreeMsg *kafka.SubtreeMessage, stage string, cause error, start time.Time) error {
+func (p *Processor) handlePermanentFailure(ctx context.Context, subtreeMsg *kafka.SubtreeMessage, stage string, cause error, start time.Time) error {
 	p.Logger.Warn(
 		"subtree message permanent failure, routing to DLQ",
-		"hash", subtreeMsg.Hash,
+		logfields.SubtreeHash(subtreeMsg.Hash),
 		"stage", stage,
-		"dataHubUrl", subtreeMsg.DataHubURL,
+		logfields.DataHubURL(subtreeMsg.DataHubURL),
 		"attemptCount", subtreeMsg.AttemptCount,
 		"error", cause,
 	)
-	if err := p.publishToDLQ(subtreeMsg); err != nil {
+	if err := p.publishToDLQ(ctx, subtreeMsg); err != nil {
 		return err
 	}
 	metrics.ObserveSubtreeProcessing(metrics.OutcomePermanentFailure, time.Since(start))
@@ -477,12 +491,13 @@ func (p *Processor) handlePermanentFailure(subtreeMsg *kafka.SubtreeMessage, sta
 // handlePermanentFailure leaves it as-is). Increments messagesDLQ on
 // success. Returns an error only on encode or publish failure — the caller
 // must NOT ack the source message in that case.
-func (p *Processor) publishToDLQ(subtreeMsg *kafka.SubtreeMessage) error {
+func (p *Processor) publishToDLQ(ctx context.Context, subtreeMsg *kafka.SubtreeMessage) error {
 	data, encErr := subtreeMsg.Encode()
 	if encErr != nil {
 		return fmt.Errorf("encoding subtree message for DLQ: %w", encErr)
 	}
-	if pubErr := p.dlqProducer.Publish(subtreeMsg.Hash, data); pubErr != nil {
+	// WithoutCancel: DLQ hand-off must survive a canceled consumer ctx.
+	if pubErr := p.dlqProducer.Publish(context.WithoutCancel(ctx), subtreeMsg.Hash, data); pubErr != nil {
 		return fmt.Errorf("publishing subtree message to DLQ: %w", pubErr)
 	}
 	return nil
@@ -578,7 +593,7 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]store.Call
 // callbacks for the affected txids. Returning the error keeps the dedup
 // cache untouched (handleMessage gates that add on success) and routes the
 // work through handleTransientFailure for redelivery.
-func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.CallbackEntry, subtreeID string) error {
+func (p *Processor) emitBatchedSeenCallbacks(ctx context.Context, registeredTxids map[string][]store.CallbackEntry, subtreeID string) error {
 	if len(registeredTxids) == 0 {
 		return nil
 	}
@@ -608,7 +623,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 	// payload stays comfortably under Kafka brokers' default message.max.bytes
 	// (1MB). All chunks across all URLs go out in ONE batch publish
 	// (throughput review F-6) instead of one broker-acked RTT per chunk.
-	if err := p.emitSeenBatch(seenGroups, urlTokens, subtreeID, kafka.CallbackSeenOnNetwork, metrics.SeenKindOnNetwork); err != nil && firstErr == nil {
+	if err := p.emitSeenBatch(ctx, seenGroups, urlTokens, subtreeID, kafka.CallbackSeenOnNetwork, metrics.SeenKindOnNetwork); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -640,7 +655,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 		metrics.ObserveDB(p.backendLabel(), metrics.StoreSeenCounter, metrics.OpIncrement, incStart, incErr)
 		if incErr != nil {
 			p.Logger.Error("failed to batch-increment seen counters",
-				"subtreeID", subtreeID, "txids", len(txids), "succeeded", len(results), "error", incErr)
+				logfields.SubtreeHash(subtreeID), logfields.TxIDCount(len(txids)), "succeeded", len(results), "error", incErr)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("incrementing seen counters for subtree %s: %w", subtreeID, incErr)
 			}
@@ -656,7 +671,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 
 	// Emit one batched SEEN_MULTIPLE_NODES per callbackURL, chunked to fit
 	// broker limits, again as a single batch publish.
-	if err := p.emitSeenBatch(thresholdGroups, urlTokens, subtreeID, kafka.CallbackSeenMultipleNodes, metrics.SeenKindMultipleNodes); err != nil && firstErr == nil {
+	if err := p.emitSeenBatch(ctx, thresholdGroups, urlTokens, subtreeID, kafka.CallbackSeenMultipleNodes, metrics.SeenKindMultipleNodes); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -669,6 +684,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 // batch and is surfaced for redelivery — the delivery-side dedup absorbs any
 // records that landed.
 func (p *Processor) emitSeenBatch(
+	ctx context.Context,
 	groups map[string][]string,
 	urlTokens map[string]string,
 	subtreeID string,
@@ -682,6 +698,7 @@ func (p *Processor) emitSeenBatch(
 	var firstErr error
 	type pending struct {
 		callbackURL string
+		chunk       []string
 	}
 	var meta []pending
 	var entries []kafka.BatchEntry
@@ -699,22 +716,23 @@ func (p *Processor) emitSeenBatch(
 			data, err := msg.Encode()
 			if err != nil {
 				p.Logger.Error("failed to encode batched seen callback",
-					"type", cbType, "callbackURL", callbackURL, "error", err)
+					"type", cbType, logfields.CallbackURL(callbackURL), "error", err)
 				if firstErr == nil {
 					firstErr = fmt.Errorf("encoding %s for %s: %w", cbType, callbackURL, err)
 				}
 				continue
 			}
 			entries = append(entries, kafka.HashBatchEntry(msg.PartitionKey(), data))
-			meta = append(meta, pending{callbackURL: callbackURL})
+			meta = append(meta, pending{callbackURL: callbackURL, chunk: chunk})
 		}
 	}
 
-	if err := p.callbackProducer.PublishBatch(entries); err != nil {
+	pubErr := p.callbackProducer.PublishBatch(ctx, entries)
+	if pubErr != nil {
 		p.Logger.Error("failed to publish seen callback batch",
-			"type", cbType, "count", len(entries), "error", err)
+			"type", cbType, "count", len(entries), "error", pubErr)
 		if firstErr == nil {
-			firstErr = fmt.Errorf("publishing %s batch (%d messages): %w", cbType, len(entries), err)
+			firstErr = fmt.Errorf("publishing %s batch (%d messages): %w", cbType, len(entries), pubErr)
 		}
 	}
 
@@ -727,7 +745,45 @@ func (p *Processor) emitSeenBatch(
 		}
 	}
 
+	// Log matched txids only once the batch is durably published — a failed
+	// publish is surfaced above and redriven by the caller, so logging success
+	// here too would be misleading. One Info line per (callbackURL, chunk)
+	// keeps a SEEN_ON_NETWORK/SEEN_MULTIPLE_NODES txid searchable in Coralogix
+	// without having to reconstruct it from downstream callback delivery logs.
+	if pubErr == nil {
+		maxLog := p.seenTxidLogMax()
+		for _, m := range meta {
+			fields := []any{
+				logfields.SubtreeHash(subtreeID),
+				logfields.CallbackURL(m.callbackURL),
+				"type", string(cbType),
+				logfields.TxIDCount(len(m.chunk)),
+			}
+			truncated := false
+			if maxLog > 0 {
+				txids := m.chunk
+				if len(txids) > maxLog {
+					txids = txids[:maxLog]
+					truncated = true
+				}
+				fields = append(fields, logfields.TxIDs(txids), logfields.TxIDsTruncated(truncated))
+			}
+			p.Logger.Info("seen callback batch published", fields...)
+		}
+	}
+
 	return firstErr
+}
+
+// seenTxidLogMax returns the configured cap on how many matched txids are
+// included on the SEEN batch-published log (see emitSeenBatch). 0 means log
+// counts only. Falls back to 0 (counts-only) when cfg is nil, which unit
+// tests that construct Processor via struct literal rely on.
+func (p *Processor) seenTxidLogMax() int {
+	if p.cfg == nil {
+		return 0
+	}
+	return p.cfg.Subtree.SeenTxidLogMax
 }
 
 // backendLabel returns the store-backend label for DB metrics: "aerospike"

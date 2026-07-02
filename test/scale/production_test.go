@@ -168,7 +168,7 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 			MaxAttempts:    10,
 		},
 	}
-	fetcher := subtree.NewProcessor(fetcherCfg, regStore, seenCounter, subtreeStore)
+	fetcher := subtree.NewProcessor(fetcherCfg, regStore, seenCounter, subtreeStore, logger)
 	if err := fetcher.Init(nil); err != nil {
 		t.Fatalf("failed to init subtree fetcher: %v", err)
 	}
@@ -215,7 +215,7 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 		},
 	}
 	for i := 0; i < prodDeliveryInstances; i++ {
-		ds := callback.NewDeliveryService(deliveryCfg, nil, stumpStore, nil)
+		ds := callback.NewDeliveryService(deliveryCfg, nil, stumpStore, nil, logger)
 		if err := ds.Init(nil); err != nil {
 			t.Fatalf("failed to init delivery service %d: %v", i, err)
 		}
@@ -248,7 +248,7 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 		if encErr != nil {
 			t.Fatalf("encoding subtree announcement: %v", encErr)
 		}
-		if pubErr := subtreeProducer.PublishWithHashKey(st.Hash, data); pubErr != nil {
+		if pubErr := subtreeProducer.PublishWithHashKey(ctx, st.Hash, data); pubErr != nil {
 			t.Fatalf("publishing subtree announcement: %v", pubErr)
 		}
 	}

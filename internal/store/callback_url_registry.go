@@ -9,6 +9,8 @@ import (
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 	astypes "github.com/aerospike/aerospike-client-go/v8/types"
+
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 )
 
 const (
@@ -106,7 +108,7 @@ func (r *aerospikeCallbackURLRegistry) Add(callbackURL, callbackToken string) er
 			if r.logger != nil {
 				r.logger.Warn("callback URL registry TTL rejected, writing without TTL "+
 					"(configure Aerospike nsup-period to enable bounded growth)",
-					"url", callbackURL)
+					logfields.CallbackURL(callbackURL))
 			}
 			wp2 := r.client.WritePolicy(r.maxRetries, r.retryBaseMs)
 			wp2.RecordExistsAction = as.UPDATE

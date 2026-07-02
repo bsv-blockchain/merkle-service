@@ -9,6 +9,8 @@ import (
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 	astypes "github.com/aerospike/aerospike-client-go/v8/types"
+
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 )
 
 const (
@@ -96,7 +98,7 @@ func (s *aerospikeCallbackDedup) Record(txid, callbackURL, statusType string, tt
 		// If TTL is rejected (namespace lacks nsup-period), retry without TTL.
 		if err.Matches(astypes.FAIL_FORBIDDEN) && ttl > 0 {
 			s.logger.Warn("callback dedup TTL rejected, writing without TTL (configure Aerospike nsup-period to enable TTL)",
-				"txid", txid, "statusType", statusType)
+				logfields.TxID(txid), "statusType", statusType)
 			wp2 := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
 			if err2 := s.client.Client().Put(wp2, key, bins); err2 != nil {
 				return fmt.Errorf("failed to record dedup (without TTL): %w", err2)

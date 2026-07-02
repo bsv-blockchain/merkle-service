@@ -10,6 +10,10 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 )
@@ -533,7 +537,7 @@ func processBatch(
 		}
 
 		start := time.Now()
-		err := handler(ctx, recordToMessage(rec))
+		err := dispatchRecord(ctx, rec, handler)
 		outcome := metrics.OutcomeSuccess
 		if err != nil {
 			outcome = metrics.OutcomeHandlerError
@@ -558,6 +562,56 @@ func processBatch(
 		committable = append(committable, rec)
 	}
 	return committable, nil
+}
+
+// dispatchRecord extracts any inbound trace context carried by rec's Kafka
+// headers (a producer-injected traceparent — see injectTraceContext) and,
+// only when that context is valid, runs the handler inside a
+// SpanKindConsumer span named "<topic> process" (topic only — never an
+// offset/key — to keep span names low-cardinality), recording the handler's
+// error on the span before ending it.
+//
+// Zero-cost when disabled (mirrors the producer's injectTraceContext
+// IsValid guard): extractTraceContext short-circuits without touching the
+// propagator when the record carries no headers, and when telemetry is
+// disabled fleet-wide no producer injects a traceparent, so records arrive
+// header-less → the extracted SpanContext is invalid → no span is started
+// and the only per-record cost is the (pre-existing) *Message alloc. See
+// TestDispatchRecord_NoAllocBeyondHandlerOnNoContextPath.
+//
+// Semantics: a record with no inbound trace context cannot be correlated
+// with any trace, so it is intentionally NOT spanned — even when telemetry
+// is enabled (e.g. a record from an un-instrumented producer, or produced
+// before this shipped). When a producer DID inject context, the consumer
+// span continues that trace, and any Kafka produce or outbound HTTP call
+// the handler makes with msgCtx continues it further — which is what closes
+// the arcade->merkle->arcade trace across a hop through Kafka.
+func dispatchRecord(ctx context.Context, rec *kgo.Record, handler MessageHandler) error {
+	msgCtx := extractTraceContext(ctx, rec)
+	if !trace.SpanContextFromContext(msgCtx).IsValid() {
+		// No inbound trace context to correlate with: run the handler
+		// directly, no consumer span. This is the disabled/no-context hot
+		// path and must stay allocation-free beyond the handler itself.
+		return handler(msgCtx, recordToMessage(rec))
+	}
+
+	msgCtx, span := otel.Tracer(tracerName).Start(
+		msgCtx,
+		rec.Topic+" process",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			semconv.MessagingSystemKafka,
+			semconv.MessagingDestinationName(rec.Topic),
+		),
+	)
+	defer span.End()
+
+	err := handler(msgCtx, recordToMessage(rec))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
 
 func (c *Consumer) signalReady() {

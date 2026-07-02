@@ -33,6 +33,24 @@ spec:
             - configMapRef:
                 name: merkle-service-env
                 optional: true
+          # OTel telemetry wiring (reference only — the authoritative prod
+          # values, including flipping TELEMETRY_ENABLED to "true", are set
+          # by the bsva-infra-flux repo). HOST_IP/POD_NAME come from the k8s
+          # downward API since ConfigMap-sourced envFrom can't supply them.
+          # See docs/observability.md#deployment--enabling-telemetry.
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(HOST_IP):4317"
+            - name: TELEMETRY_ENABLED
+              value: "false"
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml

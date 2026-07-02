@@ -26,7 +26,7 @@ type failingSyncProducer struct {
 	calls    int
 }
 
-func (f *failingSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (f *failingSyncProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	idx := f.calls

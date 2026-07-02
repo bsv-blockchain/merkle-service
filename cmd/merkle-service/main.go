@@ -17,6 +17,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	_ "github.com/bsv-blockchain/merkle-service/internal/store/sql" // register SQL backend
 	"github.com/bsv-blockchain/merkle-service/internal/subtree"
+	"github.com/bsv-blockchain/merkle-service/internal/version"
 )
 
 func main() {
@@ -28,6 +29,13 @@ func main() {
 	logger := service.NewLogger(config.ParseLogLevel(cfg.LogLevel))
 
 	ctx := context.Background()
+
+	telemetryShutdown, err := service.InitTelemetry(ctx, cfg.Telemetry, "all-in-one", version.Version, metrics.Registry, logger)
+	if err != nil {
+		log.Fatal("failed to init telemetry: ", err)
+	}
+	defer func() { _ = telemetryShutdown(context.Background()) }()
+
 	registry, err := store.NewFromConfig(ctx, cfg, logger)
 	if err != nil {
 		log.Fatal("failed to build store registry: ", err)
@@ -76,10 +84,10 @@ func main() {
 		cfg.DataHub.AllowPrivateIPs,
 		logger,
 	)
-	subtreeFetcher := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree)
+	subtreeFetcher := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree, logger)
 	blockProcessor := block.NewProcessor(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.CallbackURLRegistry, registry.DataHubRegistry, registry.SubtreeCounter, logger)
 	subtreeWorker := block.NewSubtreeWorkerService(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.Stump, registry.CallbackURLRegistry, registry.SubtreeCounter, registry.ExpectedStump, logger)
-	callbackDelivery := callback.NewDeliveryService(cfg, registry.CallbackDedup, registry.Stump, registry.CallbackURLRegistry)
+	callbackDelivery := callback.NewDeliveryService(cfg, registry.CallbackDedup, registry.Stump, registry.CallbackURLRegistry, logger)
 
 	services := []service.Service{}
 	if cfg.Metrics.Enabled {

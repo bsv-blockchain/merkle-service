@@ -14,6 +14,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	_ "github.com/bsv-blockchain/merkle-service/internal/store/sql" // register SQL backend
+	"github.com/bsv-blockchain/merkle-service/internal/version"
 )
 
 // exit is overridable so tests can assert on the status code without
@@ -37,6 +38,12 @@ func run() error {
 	}
 
 	logger := service.NewLogger(config.ParseLogLevel(cfg.LogLevel))
+
+	telemetryShutdown, err := service.InitTelemetry(context.Background(), cfg.Telemetry, "p2p-client", version.Version, metrics.Registry, logger)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = telemetryShutdown(context.Background()) }()
 
 	// Create Kafka producers for subtree and block topics.
 	subtreeProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.SubtreeTopic, logger)

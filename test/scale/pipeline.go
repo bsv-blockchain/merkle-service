@@ -3,6 +3,7 @@
 package scale
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -25,7 +26,7 @@ func injectBlock(manifest *Manifest, blockTopic string, producer *kafka.Producer
 	if err != nil {
 		return fmt.Errorf("encoding block message: %w", err)
 	}
-	if err := producer.Publish(manifest.BlockHash, data); err != nil {
+	if err := producer.Publish(context.Background(), manifest.BlockHash, data); err != nil {
 		return fmt.Errorf("publishing block message: %w", err)
 	}
 	return nil

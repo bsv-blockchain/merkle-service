@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
@@ -96,7 +97,7 @@ func main() {
 		"starting debug dashboard",
 		"addr", addr,
 		"merkleAPI", *merkleAPI,
-		"callbackURL", callbackURL,
+		logfields.CallbackURL(callbackURL),
 		"aerospike", fmt.Sprintf("%s:%d/%s", cfg.Aerospike.Host, cfg.Aerospike.Port, cfg.Aerospike.Namespace),
 	)
 

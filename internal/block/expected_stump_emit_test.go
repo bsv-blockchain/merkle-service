@@ -1,6 +1,7 @@
 package block
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -35,7 +36,7 @@ func TestEmitBlockProcessed_AttachesExpectedIndices(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(mock, "callback-test", logger)
 
-	if err := s.emitBlockProcessed("blk-expected", "", "", nil); err != nil {
+	if err := s.emitBlockProcessed(context.Background(), "blk-expected", "", "", nil); err != nil {
 		t.Fatalf("emitBlockProcessed: %v", err)
 	}
 	if len(mock.messages) != 1 {

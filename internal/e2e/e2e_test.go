@@ -186,7 +186,7 @@ func startDeliveryService(t *testing.T, callbackTopic string) (*callback.Deliver
 	}
 
 	stumpStore := store.NewStumpStore(store.NewMemoryBlobStore(), 0, testLogger())
-	ds := callback.NewDeliveryService(cfg, nil, stumpStore, nil)
+	ds := callback.NewDeliveryService(cfg, nil, stumpStore, nil, testLogger())
 	if err := ds.Init(nil); err != nil {
 		t.Fatalf("failed to init delivery service: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestSeenOnNetworkCallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to encode stumps message: %v", err)
 	}
-	if err := callbackProducer.PublishWithHashKey(callbackURL, data); err != nil {
+	if err := callbackProducer.PublishWithHashKey(context.Background(), callbackURL, data); err != nil {
 		t.Fatalf("failed to publish stumps message: %v", err)
 	}
 
@@ -316,7 +316,7 @@ func TestMinedCallbackWithSTUMP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to encode callback message: %v", err)
 	}
-	if err := callbackProducer.PublishWithHashKey(callbackURL, data); err != nil {
+	if err := callbackProducer.PublishWithHashKey(context.Background(), callbackURL, data); err != nil {
 		t.Fatalf("failed to publish callback message: %v", err)
 	}
 
@@ -396,7 +396,7 @@ func TestMultipleCallbacks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to encode stumps message: %v", err)
 		}
-		if err := callbackProducer.PublishWithHashKey(cbURL, data); err != nil {
+		if err := callbackProducer.PublishWithHashKey(context.Background(), cbURL, data); err != nil {
 			t.Fatalf("failed to publish stumps message: %v", err)
 		}
 	}
@@ -488,7 +488,7 @@ func TestSeenMultipleNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to encode stumps message: %v", err)
 	}
-	if err := callbackProducer.PublishWithHashKey(callbackURL, data); err != nil {
+	if err := callbackProducer.PublishWithHashKey(context.Background(), callbackURL, data); err != nil {
 		t.Fatalf("failed to publish stumps message: %v", err)
 	}
 
