@@ -12,6 +12,8 @@ import (
 
 	p2p "github.com/bsv-blockchain/go-teranode-p2p-client"
 	teranode "github.com/bsv-blockchain/teranode/services/p2p"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
@@ -454,6 +456,14 @@ func (c *Client) processBlockMessages(ctx context.Context, ch <-chan teranode.Bl
 // ErrPublishExhausted). Encoding errors and transient publish errors are
 // logged and swallowed so the loop can continue on subsequent messages.
 func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeMessage) error {
+	// Root span: this announcement is the origin of its own trace (see
+	// startAnnouncementSpan). The hash is an ATTRIBUTE, never the span name,
+	// to keep cardinality bounded.
+	ctx, span := startAnnouncementSpan(ctx, "subtree announce",
+		attribute.String(logfields.KeySubtreeHash, msg.Hash),
+	)
+	defer span.End()
+
 	c.Logger.Debug(
 		"received subtree announcement",
 		logfields.SubtreeHash(msg.Hash),
@@ -477,7 +487,12 @@ func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeM
 		return nil
 	}
 
-	return c.publishWithRetry(ctx, c.subtreeProducer, msg.Hash, encoded, "subtree")
+	err = c.publishWithRetry(ctx, c.subtreeProducer, msg.Hash, encoded, "subtree")
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
 
 // handleBlockMessage maps a teranode BlockMessage to a Kafka BlockMessage and publishes it.
@@ -486,6 +501,14 @@ func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeM
 // ErrPublishExhausted). Encoding errors and transient publish errors are
 // logged and swallowed so the loop can continue on subsequent messages.
 func (c *Client) handleBlockMessage(ctx context.Context, msg teranode.BlockMessage) error {
+	// Root span: this announcement is the origin of its own trace (see
+	// startAnnouncementSpan). The hash is an ATTRIBUTE, never the span name,
+	// to keep cardinality bounded.
+	ctx, span := startAnnouncementSpan(ctx, "block announce",
+		attribute.String(logfields.KeyBlockHash, msg.Hash),
+	)
+	defer span.End()
+
 	// Info (not Debug): blocks are rare (~10min cadence) compared to subtree
 	// announcements, so a live-tail of block observations is useful in
 	// production without enabling DEBUG.
@@ -516,7 +539,12 @@ func (c *Client) handleBlockMessage(ctx context.Context, msg teranode.BlockMessa
 		return nil
 	}
 
-	return c.publishWithRetry(ctx, c.blockProducer, msg.Hash, encoded, "block")
+	err = c.publishWithRetry(ctx, c.blockProducer, msg.Hash, encoded, "block")
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
 
 // publishWithRetry attempts to publish a message to Kafka with exponential
@@ -536,7 +564,7 @@ func (c *Client) publishWithRetry(ctx context.Context, producer *kafka.Producer,
 	delay := baseRetryDelay
 
 	for attempt := 1; attempt <= maxPublishRetries; attempt++ {
-		err := producer.Publish(key, value)
+		err := producer.Publish(ctx, key, value)
 		if err == nil {
 			return nil
 		}

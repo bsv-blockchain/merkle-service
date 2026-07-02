@@ -39,7 +39,7 @@ type callbackFailingProducer struct {
 	failErr    error
 }
 
-func (f *callbackFailingProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (f *callbackFailingProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failAll {
@@ -284,7 +284,7 @@ func TestPublishSubtreeCallbacks_StumpStoreFailureReturnsError(t *testing.T) {
 		CallbackGroups: map[string][]string{"http://cb.example.test/a": {"tx1"}},
 	}
 
-	err := s.publishSubtreeCallbacks(wm, res)
+	err := s.publishSubtreeCallbacks(context.Background(), wm, res)
 	if err == nil {
 		t.Fatalf("expected error from publishSubtreeCallbacks when stump store fails")
 	}
@@ -314,7 +314,7 @@ func TestPublishSubtreeCallbacks_KafkaPublishFailureReturnsError(t *testing.T) {
 		},
 	}
 
-	err := s.publishSubtreeCallbacks(wm, res)
+	err := s.publishSubtreeCallbacks(context.Background(), wm, res)
 	if err == nil {
 		t.Fatalf("expected error from publishSubtreeCallbacks when Kafka publish fails")
 	}
@@ -340,7 +340,7 @@ func TestPublishSubtreeCallbacks_HappyPathReturnsNil(t *testing.T) {
 		},
 	}
 
-	if err := s.publishSubtreeCallbacks(wm, res); err != nil {
+	if err := s.publishSubtreeCallbacks(context.Background(), wm, res); err != nil {
 		t.Fatalf("expected nil error on happy path, got: %v", err)
 	}
 	if got := cbMock.sentCount(); got != 2 {
@@ -741,7 +741,7 @@ func TestEmitBlockProcessed_PublishFailureReturnsError(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	err := s.emitBlockProcessed("blk-emit-fail", "", "", nil)
+	err := s.emitBlockProcessed(context.Background(), "blk-emit-fail", "", "", nil)
 	if err == nil {
 		t.Fatalf("expected error from emitBlockProcessed when callback publish fails")
 	}
@@ -768,7 +768,7 @@ func TestEmitBlockProcessed_PartialFailureContinuesAndReturnsFirstError(t *testi
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	err := s.emitBlockProcessed("blk-partial", "", "", nil)
+	err := s.emitBlockProcessed(context.Background(), "blk-partial", "", "", nil)
 	if err == nil {
 		t.Fatalf("expected non-nil error when BLOCK_PROCESSED publishes fail")
 	}
@@ -796,7 +796,7 @@ func TestEmitBlockProcessed_HappyPath(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	if err := s.emitBlockProcessed("blk-happy", "", "", nil); err != nil {
+	if err := s.emitBlockProcessed(context.Background(), "blk-happy", "", "", nil); err != nil {
 		t.Fatalf("expected nil error on happy path, got: %v", err)
 	}
 	if got := cbMock.sentCountOfType(kafka.CallbackBlockProcessed); got != 2 {
@@ -823,7 +823,7 @@ func TestEmitBlockProcessed_CarriesBlockData(t *testing.T) {
 		SubtreeHashes: []string{"deadbeef", "feedface"},
 		CoinbaseBUMP:  "0102030405",
 	}
-	if err := s.emitBlockProcessed("blk-enriched", "", "", blockData); err != nil {
+	if err := s.emitBlockProcessed(context.Background(), "blk-enriched", "", "", blockData); err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
 
@@ -854,7 +854,7 @@ func TestEmitBlockProcessed_RegistryFailureReturnsError(t *testing.T) {
 	s.Logger = logger
 	s.callbackProducer = kafka.NewTestProducer(cbMock, "callback-test", logger)
 
-	if err := s.emitBlockProcessed("blk-registry-fail", "", "", nil); err == nil {
+	if err := s.emitBlockProcessed(context.Background(), "blk-registry-fail", "", "", nil); err == nil {
 		t.Fatalf("expected error when URL registry GetAll fails")
 	}
 	if got := cbMock.sentCount(); got != 0 {

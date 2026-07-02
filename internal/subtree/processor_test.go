@@ -2,6 +2,7 @@ package subtree
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -993,7 +994,7 @@ type mockSyncProducer struct {
 	messages []capturedMessage
 }
 
-func (m *mockSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (m *mockSyncProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, capturedMessage{Key: key, Value: value})
@@ -1045,7 +1046,7 @@ func TestBatchedSeenCallbacks_SingleCallbackURL(t *testing.T) {
 		"tx3":   {"http://arcade.example.com/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1085,7 +1086,7 @@ func TestBatchedSeenCallbacks_MultipleCallbackURLs(t *testing.T) {
 		"tx3":   {"http://url-A/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1124,7 +1125,7 @@ func TestBatchedSeenCallbacks_PropagatesCallbackToken(t *testing.T) {
 		testTx1: {url},
 		testTx2: {url},
 	}
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, map[string]string{url: token}), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, map[string]string{url: token}), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1143,7 +1144,7 @@ func TestBatchedSeenCallbacks_NoRegistered(t *testing.T) {
 	regStore := &mockRegStore{registrations: map[string][]string{}}
 	p, mockProd := newTestProcessor(t, regStore, &mockSeenCounter{})
 
-	if err := p.emitBatchedSeenCallbacks(map[string][]store.CallbackEntry{}, "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), map[string][]store.CallbackEntry{}, "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1164,7 +1165,7 @@ func TestBatchedSeenCallbacks_SeenMultipleNodesThreshold(t *testing.T) {
 		testTx2: {"http://arcade/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1205,7 +1206,7 @@ func TestBatchedSeenCallbacks_PartialThreshold(t *testing.T) {
 		testTx2: {"http://arcade/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1238,7 +1239,7 @@ func TestBatchedSeenCallbacks_ChunksLargeBatch(t *testing.T) {
 		registered[fmt.Sprintf("tx%05d", i)] = []string{"http://arcade/cb"}
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1332,7 +1333,7 @@ func TestEmitSeenBatch_LogsTxidsCappedAtConfig(t *testing.T) {
 		"tx4": {testSeenBatchCallbackURL},
 		"tx5": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-cap"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-cap"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1378,7 +1379,7 @@ func TestEmitSeenBatch_LogsAllTxidsWhenUnderCap(t *testing.T) {
 		"tx1": {testSeenBatchCallbackURL},
 		"tx2": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-under-cap"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-under-cap"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1415,7 +1416,7 @@ func TestEmitSeenBatch_CountsOnlyWhenLogMaxZero(t *testing.T) {
 		"tx2": {testSeenBatchCallbackURL},
 		"tx3": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-counts-only"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-counts-only"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1449,7 +1450,7 @@ func TestEmitSeenBatch_NilCfgLogsCountsOnly(t *testing.T) {
 	registered := map[string][]string{
 		"tx1": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-nil-cfg"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-nil-cfg"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1478,7 +1479,7 @@ func TestEmitSeenBatch_LogsAllTxidsAtExactCap(t *testing.T) {
 		"tx2": {testSeenBatchCallbackURL},
 		"tx3": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-exact-cap"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-exact-cap"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1520,7 +1521,7 @@ func TestEmitSeenBatch_NoSuccessLogOnPublishFailure(t *testing.T) {
 		"tx1": {testSeenBatchCallbackURL},
 		"tx2": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-pubfail"); err == nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-pubfail"); err == nil {
 		t.Fatal("expected an error from emitBatchedSeenCallbacks with a failing producer")
 	}
 
@@ -1562,7 +1563,7 @@ func TestHandleTransientFailure_RoutesToDLQAtMaxAttempts(t *testing.T) {
 	beforeRetried := subtreeCount(metrics.OutcomeRetried)
 	beforeDLQ := subtreeCount(metrics.OutcomeDLQ)
 	for i := 0; i < maxAttempts; i++ {
-		if err := p.handleTransientFailure(subtreeMsg, "fetch", cause, time.Now()); err != nil {
+		if err := p.handleTransientFailure(context.Background(), subtreeMsg, "fetch", cause, time.Now()); err != nil {
 			t.Fatalf("iteration %d: unexpected error: %v", i, err)
 		}
 	}
@@ -1623,7 +1624,7 @@ func TestHandleTransientFailure_DefaultsMaxAttemptsWhenUnset(t *testing.T) {
 	p.Logger = logger
 
 	subtreeMsg := &kafka.SubtreeMessage{Hash: "h"}
-	if err := p.handleTransientFailure(subtreeMsg, "fetch", errors.New("x"), time.Now()); err != nil {
+	if err := p.handleTransientFailure(context.Background(), subtreeMsg, "fetch", errors.New("x"), time.Now()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1652,7 +1653,7 @@ type callbackFailingSyncProducer struct {
 	failErr  error
 }
 
-func (f *callbackFailingSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (f *callbackFailingSyncProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failAll {
@@ -1683,7 +1684,7 @@ type urlFailingSyncProducer struct {
 	failCount int
 }
 
-func (f *urlFailingSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (f *urlFailingSyncProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if value != nil {
@@ -1719,7 +1720,7 @@ func TestEmitBatchedSeenCallbacks_HappyPathReturnsNil(t *testing.T) {
 		testTx2: {"http://url-B/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-happy"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-happy"); err != nil {
 		t.Fatalf("expected nil error on happy path, got: %v", err)
 	}
 	if got := len(mockProd.getMessages()); got != 2 {
@@ -1746,7 +1747,7 @@ func TestEmitBatchedSeenCallbacks_PublishFailureReturnsError(t *testing.T) {
 		testTx2: {"http://url-B/cb"},
 	}
 
-	err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-fail")
+	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-fail")
 	if err == nil {
 		t.Fatalf("expected non-nil error when callback publish fails")
 	}
@@ -1781,7 +1782,7 @@ func TestEmitBatchedSeenCallbacks_PartialFailureStillAttemptsOtherURLs(t *testin
 		testTx2: {okURL},
 	}
 
-	err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-partial")
+	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-partial")
 	if err == nil {
 		t.Fatalf("expected non-nil error when one callback URL publish fails")
 	}
@@ -2064,7 +2065,7 @@ func TestEmitBatchedSeenCallbacks_IncrementFailureReturnsError(t *testing.T) {
 		testTx2: {"http://url-B/cb"},
 	}
 
-	err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-counter-fail")
+	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-counter-fail")
 	if err == nil {
 		t.Fatalf("expected non-nil error when seen-counter Increment fails")
 	}

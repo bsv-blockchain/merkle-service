@@ -63,7 +63,7 @@ type Server struct {
 // handler needs. Defined as an interface so unit tests can substitute a
 // no-network producer without touching Sarama.
 type reprocessBlockProducer interface {
-	PublishWithHashKey(key string, value []byte) error
+	PublishWithHashKey(ctx context.Context, key string, value []byte) error
 }
 
 // ReprocessDeps bundles the dependencies the /reprocess endpoint needs that

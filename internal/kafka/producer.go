@@ -41,8 +41,13 @@ func clampBatchMaxBytes(requested int) int32 {
 // Publisher is the produce seam. The real implementation wraps a *kgo.Client;
 // it is exported so tests in other packages can inject a fake (see
 // NewTestProducer). Produce returns the assigned partition and offset.
+//
+// ctx is used both as the franz-go ProduceSync context (so a caller's
+// cancellation can abort the broker round-trip) and as the source of any
+// active OTEL span injected into the record's headers — see Producer.Publish
+// for the WithoutCancel guidance retry/DLQ callers must follow.
 type Publisher interface {
-	Produce(key string, value []byte) (partition int32, offset int64, err error)
+	Produce(ctx context.Context, key string, value []byte) (partition int32, offset int64, err error)
 	Close() error
 }
 
@@ -57,7 +62,7 @@ type BatchEntry struct {
 // type-asserts for it and falls back to per-record Produce otherwise, so test
 // fakes only ever need the 2-method Publisher interface.
 type batchPublisher interface {
-	ProduceBatch(entries []BatchEntry) error
+	ProduceBatch(ctx context.Context, entries []BatchEntry) error
 }
 
 // kgoPublisher is the production Publisher backed by a franz-go client.
@@ -71,7 +76,12 @@ type kgoPublisher struct {
 
 // Produce synchronously publishes a single record, mirroring the previous
 // sarama SyncProducer.SendMessage semantics.
-func (k *kgoPublisher) Produce(key string, value []byte) (int32, int64, error) {
+//
+// ctx is passed straight to franz's ProduceSync (so caller cancellation
+// aborts the broker round-trip) and, when it carries a valid OTEL span, its
+// trace context is injected into the record's Kafka headers before sending —
+// see injectTraceContext for the zero-cost-when-disabled guarantee.
+func (k *kgoPublisher) Produce(ctx context.Context, key string, value []byte) (int32, int64, error) {
 	rec := &kgo.Record{
 		Topic: k.topic,
 		Value: value, // raw []byte: franz takes no encoder (teranode #611)
@@ -84,8 +94,9 @@ func (k *kgoPublisher) Produce(key string, value []byte) (int32, int64, error) {
 	if key != "" {
 		rec.Key = []byte(key)
 	}
+	injectTraceContext(ctx, rec)
 
-	res := k.client.ProduceSync(context.Background(), rec)
+	res := k.client.ProduceSync(ctx, rec)
 	if err := res.FirstErr(); err != nil {
 		return 0, 0, err
 	}
@@ -104,7 +115,11 @@ func (k *kgoPublisher) Produce(key string, value []byte) (int32, int64, error) {
 // record failure is reported via the returned error; callers treat the batch
 // as retry-on-redelivery, which is safe because the downstream pipeline
 // dedups (idempotent handlers, AttemptCount retry/DLQ).
-func (k *kgoPublisher) ProduceBatch(entries []BatchEntry) error {
+//
+// The same ctx is used for every record in the batch — both as the
+// ProduceSync context and, when it carries a valid span, as the trace
+// context injected into every record's headers (see injectTraceContext).
+func (k *kgoPublisher) ProduceBatch(ctx context.Context, entries []BatchEntry) error {
 	recs := make([]*kgo.Record, len(entries))
 	for i, e := range entries {
 		rec := &kgo.Record{
@@ -115,9 +130,10 @@ func (k *kgoPublisher) ProduceBatch(entries []BatchEntry) error {
 		if e.Key != "" {
 			rec.Key = []byte(e.Key)
 		}
+		injectTraceContext(ctx, rec)
 		recs[i] = rec
 	}
-	return k.client.ProduceSync(context.Background(), recs...).FirstErr()
+	return k.client.ProduceSync(ctx, recs...).FirstErr()
 }
 
 // Close flushes buffered records on a detached, bounded context (teranode #683
@@ -193,9 +209,16 @@ func NewProducer(brokers []string, topic string, logger *slog.Logger) (*Producer
 }
 
 // Publish sends a message to the topic with the given partition key.
-func (p *Producer) Publish(key string, value []byte) error {
+//
+// ctx is threaded to the underlying franz-go ProduceSync call and, when it
+// carries a valid OTEL span, propagated into the record's Kafka headers.
+// Callers publishing a retry/DLQ hand-off that MUST survive the originating
+// request/consumer context being canceled should pass
+// context.WithoutCancel(ctx) — this keeps the trace context while dropping
+// cancellation, so a canceled caller can't drop a durable hand-off.
+func (p *Producer) Publish(ctx context.Context, key string, value []byte) error {
 	start := time.Now()
-	partition, offset, err := p.pub.Produce(key, value)
+	partition, offset, err := p.pub.Produce(ctx, key, value)
 	metrics.ObserveKafkaProduce(p.topic, len(value), time.Since(start), err)
 	if err != nil {
 		return fmt.Errorf("failed to publish to %s: %w", p.topic, err)
@@ -210,8 +233,10 @@ func (p *Producer) Publish(key string, value []byte) error {
 // HashPartitionKey, so a record published this way lands on the same partition
 // as one fanned out via HashBatchEntry for the same key (the property the
 // subtree-work retry path and the callback emit/retry paths rely on).
-func (p *Producer) PublishWithHashKey(key string, value []byte) error {
-	return p.Publish(HashPartitionKey(key), value)
+//
+// See Publish for the ctx/WithoutCancel contract.
+func (p *Producer) PublishWithHashKey(ctx context.Context, key string, value []byte) error {
+	return p.Publish(ctx, HashPartitionKey(key), value)
 }
 
 // PublishBatch sends every entry in one synchronous call when the underlying
@@ -224,7 +249,10 @@ func (p *Producer) PublishWithHashKey(key string, value []byte) error {
 // for the PublishWithHashKey equivalent. An error means one or more records
 // may not be durable — callers must NOT ack the triggering Kafka message, so
 // the whole (idempotent) batch is re-published on redelivery.
-func (p *Producer) PublishBatch(entries []BatchEntry) error {
+//
+// See Publish for the ctx/WithoutCancel contract; the same ctx is applied to
+// every record in the batch.
+func (p *Producer) PublishBatch(ctx context.Context, entries []BatchEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -237,7 +265,7 @@ func (p *Producer) PublishBatch(entries []BatchEntry) error {
 		// first error so the caller redelivers the (idempotent) batch.
 		var firstErr error
 		for _, e := range entries {
-			if err := p.Publish(e.Key, e.Value); err != nil && firstErr == nil {
+			if err := p.Publish(ctx, e.Key, e.Value); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
@@ -245,7 +273,7 @@ func (p *Producer) PublishBatch(entries []BatchEntry) error {
 	}
 
 	start := time.Now()
-	err := bp.ProduceBatch(entries)
+	err := bp.ProduceBatch(ctx, entries)
 	// Amortize the batch duration across entries so per-message produce
 	// latency metrics stay comparable with the serial path.
 	per := time.Since(start) / time.Duration(len(entries))

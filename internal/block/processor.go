@@ -248,6 +248,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		// can record it; there is no compound BUMP to build.
 		emptyBlockData := p.buildBlockProcessedData(ctx, blockMsg, meta, resolvedURL)
 		if err := emitBlockProcessedCallbacks(
+			ctx,
 			p.Logger,
 			p.urlRegistry,
 			nil, // coinbase-only block: no subtrees -> no STUMPs -> empty expected set
@@ -347,7 +348,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	for i, ew := range encoded {
 		entries[i] = kafka.HashBatchEntry(ew.subtreeHash, ew.payload)
 	}
-	if err := p.subtreeWorkProducer.PublishBatch(entries); err != nil {
+	if err := p.subtreeWorkProducer.PublishBatch(ctx, entries); err != nil {
 		p.Logger.Error(
 			"failed to publish subtree work batch",
 			logfields.BlockHash(blockMsg.Hash),

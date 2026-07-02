@@ -40,7 +40,7 @@ type mockSyncProducer struct {
 	sendErr  error
 }
 
-func (m *mockSyncProducer) Produce(key string, value []byte) (partition int32, offset int64, err error) {
+func (m *mockSyncProducer) Produce(_ context.Context, key string, value []byte) (partition int32, offset int64, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failNext > 0 {

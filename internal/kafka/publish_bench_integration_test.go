@@ -59,7 +59,7 @@ func BenchmarkPublishFanout(b *testing.B) {
 	payload := make([]byte, 512) // typical claim-checked work-message size
 	// Warm-up publish: forces topic auto-creation + metadata so neither
 	// variant pays the one-time cost inside the timed loop.
-	if err := prod.Publish("warmup", payload); err != nil {
+	if err := prod.Publish(context.Background(), "warmup", payload); err != nil {
 		b.Skipf("warm-up publish failed (broker not ready?): %v", err)
 	}
 
@@ -73,7 +73,7 @@ func BenchmarkPublishFanout(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				for _, e := range entries {
-					if err := prod.Publish(e.Key, e.Value); err != nil {
+					if err := prod.Publish(context.Background(), e.Key, e.Value); err != nil {
 						b.Fatalf("Publish: %v", err)
 					}
 				}
@@ -83,7 +83,7 @@ func BenchmarkPublishFanout(b *testing.B) {
 		b.Run(fmt.Sprintf("batch/records=%d", size), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				if err := prod.PublishBatch(entries); err != nil {
+				if err := prod.PublishBatch(context.Background(), entries); err != nil {
 					b.Fatalf("PublishBatch: %v", err)
 				}
 			}

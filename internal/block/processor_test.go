@@ -1,6 +1,7 @@
 package block
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -20,7 +21,7 @@ type mockSyncProducer struct {
 	messages []capturedMessage
 }
 
-func (m *mockSyncProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (m *mockSyncProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	m.messages = append(m.messages, capturedMessage{Key: key, Value: value})
 	return 0, int64(len(m.messages)), nil
 }
@@ -113,7 +114,7 @@ func TestSubtreeWorkMessage_Published(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode failed: %v", err)
 		}
-		if err := workProducer.PublishWithHashKey(stHash, data); err != nil {
+		if err := workProducer.PublishWithHashKey(context.Background(), stHash, data); err != nil {
 			t.Fatalf("publish failed: %v", err)
 		}
 	}

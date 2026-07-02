@@ -248,7 +248,7 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 		if encErr != nil {
 			t.Fatalf("encoding subtree announcement: %v", encErr)
 		}
-		if pubErr := subtreeProducer.PublishWithHashKey(st.Hash, data); pubErr != nil {
+		if pubErr := subtreeProducer.PublishWithHashKey(ctx, st.Hash, data); pubErr != nil {
 			t.Fatalf("publishing subtree announcement: %v", pubErr)
 		}
 	}

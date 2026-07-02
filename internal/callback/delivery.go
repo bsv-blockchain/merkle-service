@@ -385,7 +385,7 @@ func (d *DeliveryService) handleMessage(ctx context.Context, msg *kafka.Message)
 				case <-ctx.Done():
 					return ctx.Err()
 				}
-				return d.republishForRetry(cbMsg, "future-dated retry not yet due")
+				return d.republishForRetry(ctx, cbMsg, "future-dated retry not yet due")
 			}
 		}
 	}
@@ -427,7 +427,7 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 				// to fall through to the retry path so the next attempt
 				// re-checks dedup once the store recovers.
 				d.Logger.Error("dedup check failed, scheduling retry", "error", err, "dedupKey", dedupKey, logfields.CallbackURL(cbMsg.CallbackURL))
-				return d.scheduleRetryOrDLQ(cbMsg, fmt.Errorf("dedup check: %w", err))
+				return d.scheduleRetryOrDLQ(ctx, cbMsg, fmt.Errorf("dedup check: %w", err))
 			}
 			if exists {
 				// Log at info so silent suppressions are observable in
@@ -492,14 +492,14 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 		logfields.SubtreeIndex(cbMsg.SubtreeIndex),
 		"error", deliverErr,
 	)
-	return d.scheduleRetryOrDLQ(cbMsg, deliverErr)
+	return d.scheduleRetryOrDLQ(ctx, cbMsg, deliverErr)
 }
 
 // scheduleRetryOrDLQ decides whether a failed message should be republished
 // for retry or routed to the DLQ, then performs the durable side-effect. It
 // returns nil iff the durable side-effect succeeded; otherwise the caller
 // must propagate the error up so the Kafka offset is not committed.
-func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, cause error) error {
+func (d *DeliveryService) scheduleRetryOrDLQ(ctx context.Context, cbMsg *kafka.CallbackTopicMessage, cause error) error {
 	// Permanent failures (e.g. STUMP blob expired) skip the retry budget and
 	// go straight to the DLQ — retrying cannot recover them.
 	if isPermanentDeliveryError(cause) {
@@ -513,7 +513,7 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 			"reason", "permanent",
 			"cause", cause,
 		)
-		if err := d.publishToDLQDurably(cbMsg); err != nil {
+		if err := d.publishToDLQDurably(ctx, cbMsg); err != nil {
 			return err
 		}
 		d.recordCallbackURLFailure(cbMsg.CallbackURL)
@@ -531,7 +531,7 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 			logfields.SubtreeIndex(cbMsg.SubtreeIndex),
 			"cause", cause,
 		)
-		if err := d.publishToDLQDurably(cbMsg); err != nil {
+		if err := d.publishToDLQDurably(ctx, cbMsg); err != nil {
 			return err
 		}
 		d.recordCallbackURLFailure(cbMsg.CallbackURL)
@@ -556,7 +556,7 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 		"cause", cause,
 	)
 
-	return d.republishForRetry(cbMsg, "retry after delivery failure")
+	return d.republishForRetry(ctx, cbMsg, "retry after delivery failure")
 }
 
 // recordCallbackURLFailure trips the per-URL circuit breaker after a callback
@@ -594,12 +594,15 @@ func (d *DeliveryService) recordCallbackURLFailure(callbackURL string) {
 // Returning nil means the publish was acknowledged by Kafka and the source
 // message can now be safely ack'd. A non-nil return means the publish failed
 // and the caller must NOT mark the offset.
-func (d *DeliveryService) republishForRetry(cbMsg *kafka.CallbackTopicMessage, reason string) error {
+func (d *DeliveryService) republishForRetry(ctx context.Context, cbMsg *kafka.CallbackTopicMessage, reason string) error {
 	data, err := cbMsg.Encode()
 	if err != nil {
 		return fmt.Errorf("encode callback message for retry republish (%s): %w", reason, err)
 	}
-	if err := d.retryProducer.PublishWithHashKey(cbMsg.PartitionKey(), data); err != nil {
+	// WithoutCancel: this republish is a durable retry hand-off that must not
+	// be dropped by the originating consumer ctx being canceled mid-flight;
+	// only the trace context is preserved.
+	if err := d.retryProducer.PublishWithHashKey(context.WithoutCancel(ctx), cbMsg.PartitionKey(), data); err != nil {
 		d.Logger.Error(
 			"retry republish failed, leaving Kafka offset uncommitted",
 			logfields.CallbackURL(cbMsg.CallbackURL),
@@ -619,14 +622,14 @@ func (d *DeliveryService) republishForRetry(cbMsg *kafka.CallbackTopicMessage, r
 // surfacing the failure so the Kafka offset is not committed when the DLQ
 // itself is unreachable — that way the message is reconsidered on the next
 // session instead of being silently dropped.
-func (d *DeliveryService) publishToDLQDurably(cbMsg *kafka.CallbackTopicMessage) error {
+func (d *DeliveryService) publishToDLQDurably(ctx context.Context, cbMsg *kafka.CallbackTopicMessage) error {
 	delays := []time.Duration{0, 500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
 	var lastErr error
 	for i, delay := range delays {
 		if delay > 0 {
 			time.Sleep(delay)
 		}
-		if err := d.publishToDLQ(cbMsg); err != nil {
+		if err := d.publishToDLQ(ctx, cbMsg); err != nil {
 			lastErr = err
 			d.Logger.Warn(
 				"DLQ publish attempt failed",
@@ -952,13 +955,14 @@ func newDeliveryHTTPClient(cfg config.CallbackConfig) *http.Client {
 }
 
 // publishToDLQ publishes a permanently failed message to the dead-letter queue topic.
-func (d *DeliveryService) publishToDLQ(msg *kafka.CallbackTopicMessage) error {
+func (d *DeliveryService) publishToDLQ(ctx context.Context, msg *kafka.CallbackTopicMessage) error {
 	data, err := msg.Encode()
 	if err != nil {
 		return fmt.Errorf("failed to encode callback message for DLQ: %w", err)
 	}
 
-	if err := d.dlqProducer.PublishWithHashKey(msg.PartitionKey(), data); err != nil {
+	// WithoutCancel: DLQ hand-off must survive a canceled consumer ctx.
+	if err := d.dlqProducer.PublishWithHashKey(context.WithoutCancel(ctx), msg.PartitionKey(), data); err != nil {
 		return fmt.Errorf("failed to publish to DLQ: %w", err)
 	}
 

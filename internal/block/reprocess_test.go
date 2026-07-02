@@ -192,7 +192,7 @@ func TestEmitBlockProcessed_OverrideSkipsRegistry(t *testing.T) {
 
 	const overrideURL = "https://arcade.example/cb"
 	const overrideToken = "tok-override"
-	if err := s.emitBlockProcessed("blk-override", overrideURL, overrideToken, nil); err != nil {
+	if err := s.emitBlockProcessed(context.Background(), "blk-override", overrideURL, overrideToken, nil); err != nil {
 		t.Fatalf("emitBlockProcessed: %v", err)
 	}
 	if got := len(mock.captured); got != 1 {
@@ -207,7 +207,7 @@ type blockingProducer struct {
 	captured []capturedMessage
 }
 
-func (b *blockingProducer) Produce(key string, value []byte) (int32, int64, error) {
+func (b *blockingProducer) Produce(_ context.Context, key string, value []byte) (int32, int64, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.captured = append(b.captured, capturedMessage{Key: key, Value: value})
@@ -231,7 +231,7 @@ func TestEmitBlockProcessed_OverridePayload(t *testing.T) {
 
 	const overrideURL = "https://arcade.example/cb"
 	const overrideToken = "tok-override"
-	if err := s.emitBlockProcessed("blk-override", overrideURL, overrideToken, nil); err != nil {
+	if err := s.emitBlockProcessed(context.Background(), "blk-override", overrideURL, overrideToken, nil); err != nil {
 		t.Fatalf("emitBlockProcessed: %v", err)
 	}
 	if got := len(mock.captured); got != 1 {

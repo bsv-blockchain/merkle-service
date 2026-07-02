@@ -350,7 +350,7 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	// Partition key includes the override URL so a /reprocess never collides
 	// with a live announcement of the same block on the same partition.
 	partitionKey := req.BlockHash + "|" + req.CallbackURL
-	if err := s.blockProducer.PublishWithHashKey(partitionKey, encoded); err != nil {
+	if err := s.blockProducer.PublishWithHashKey(r.Context(), partitionKey, encoded); err != nil {
 		s.Logger.Error("failed to publish reprocess block message",
 			logfields.BlockHash(req.BlockHash), "error", err)
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to enqueue reprocess"})

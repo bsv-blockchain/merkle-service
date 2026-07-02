@@ -10,6 +10,10 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 )
@@ -533,7 +537,7 @@ func processBatch(
 		}
 
 		start := time.Now()
-		err := handler(ctx, recordToMessage(rec))
+		err := dispatchRecord(ctx, rec, handler)
 		outcome := metrics.OutcomeSuccess
 		if err != nil {
 			outcome = metrics.OutcomeHandlerError
@@ -558,6 +562,55 @@ func processBatch(
 		committable = append(committable, rec)
 	}
 	return committable, nil
+}
+
+// dispatchRecord extracts any inbound trace context carried by rec's Kafka
+// headers (a producer-injected traceparent — see injectTraceContext), starts
+// a consumer span for the handler invocation, and records the handler's
+// outcome on the span before ending it. With telemetry disabled, the global
+// TracerProvider is the no-op implementation, so Start/End/RecordError are
+// inert — no real span is created and no extra allocation beyond the interface
+// calls.
+//
+// The trace this span belongs to is either the one carried by the record
+// (when the producer had an active span — e.g. the inbound /watch request
+// that ultimately triggered this message) or a fresh one otherwise; either
+// way, handlers invoked with msgCtx and any Kafka produce or outbound HTTP
+// call they make downstream will continue it, which is what closes the
+// arcade->merkle->arcade trace across a hop through Kafka.
+func dispatchRecord(ctx context.Context, rec *kgo.Record, handler MessageHandler) error {
+	msgCtx, span := startConsumerSpan(ctx, rec)
+	defer span.End()
+
+	err := handler(msgCtx, recordToMessage(rec))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
+}
+
+// startConsumerSpan extracts rec's trace context onto baseCtx and starts a
+// SpanKindConsumer span named "<topic> process" (topic only — never an
+// offset/key — to keep span names low-cardinality), tagged with the standard
+// messaging semconv attributes.
+func startConsumerSpan(baseCtx context.Context, rec *kgo.Record) (context.Context, trace.Span) {
+	extracted := extractTraceContext(baseCtx, rec)
+	// This is a start-span factory: the span is returned for the caller to
+	// end (dispatchRecord does `defer span.End()`), not ended in this
+	// function, so spancheck's per-function End-call check is a false
+	// positive here.
+	//nolint:spancheck // span.End() is the caller's responsibility; see above
+	spanCtx, span := otel.Tracer(tracerName).Start(
+		extracted,
+		rec.Topic+" process",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			semconv.MessagingSystemKafka,
+			semconv.MessagingDestinationName(rec.Topic),
+		),
+	)
+	return spanCtx, span //nolint:spancheck // span.End() is the caller's responsibility; see above
 }
 
 func (c *Consumer) signalReady() {
