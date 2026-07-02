@@ -729,7 +729,7 @@ func TestProcessDelivery_DedupSkipsDuplicate(t *testing.T) {
 // operators can grep by callback_url and immediately see when a
 // subscriber's deliveries are being silently suppressed. Includes the
 // structured fields needed for diagnosis: block_hash, callback_url,
-// type, subtreeIndex, dedupKey.
+// type, subtree_index, dedupKey.
 func TestProcessDelivery_DedupSkipLogsInfo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

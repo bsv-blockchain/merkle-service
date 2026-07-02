@@ -1342,7 +1342,7 @@ func TestEmitSeenBatch_LogsTxidsCappedAtConfig(t *testing.T) {
 	}
 	entry := entries[0]
 
-	if got := entry["txid_count"]; got != float64(5) {
+	if got := entry[logfields.KeyTxIDCount]; got != float64(5) {
 		t.Errorf("txid_count: expected 5, got %v", got)
 	}
 	txids, ok := entry[logfields.KeyTxIDs].([]any)
@@ -1352,8 +1352,8 @@ func TestEmitSeenBatch_LogsTxidsCappedAtConfig(t *testing.T) {
 	if len(txids) != 3 {
 		t.Errorf("expected txids capped at 3, got %d: %v", len(txids), txids)
 	}
-	if truncated, _ := entry["txids_truncated"].(bool); !truncated {
-		t.Errorf("expected txids_truncated=true, got %v", entry["txids_truncated"])
+	if truncated, _ := entry[logfields.KeyTxIDsTruncated].(bool); !truncated {
+		t.Errorf("expected txids_truncated=true, got %v", entry[logfields.KeyTxIDsTruncated])
 	}
 	if entry[logfields.KeySubtreeHash] != "subtree-cap" {
 		t.Errorf("missing/wrong %s: %v", logfields.KeySubtreeHash, entry[logfields.KeySubtreeHash])
@@ -1388,15 +1388,15 @@ func TestEmitSeenBatch_LogsAllTxidsWhenUnderCap(t *testing.T) {
 	}
 	entry := entries[0]
 
-	if got := entry["txid_count"]; got != float64(2) {
+	if got := entry[logfields.KeyTxIDCount]; got != float64(2) {
 		t.Errorf("txid_count: expected 2, got %v", got)
 	}
 	txids, ok := entry[logfields.KeyTxIDs].([]any)
 	if !ok || len(txids) != 2 {
 		t.Fatalf("expected 2 txids logged, got %v", entry[logfields.KeyTxIDs])
 	}
-	if truncated, _ := entry["txids_truncated"].(bool); truncated {
-		t.Errorf("expected txids_truncated=false, got %v", entry["txids_truncated"])
+	if truncated, _ := entry[logfields.KeyTxIDsTruncated].(bool); truncated {
+		t.Errorf("expected txids_truncated=false, got %v", entry[logfields.KeyTxIDsTruncated])
 	}
 }
 
@@ -1425,14 +1425,14 @@ func TestEmitSeenBatch_CountsOnlyWhenLogMaxZero(t *testing.T) {
 	}
 	entry := entries[0]
 
-	if got := entry["txid_count"]; got != float64(3) {
+	if got := entry[logfields.KeyTxIDCount]; got != float64(3) {
 		t.Errorf("txid_count: expected 3, got %v", got)
 	}
 	if _, present := entry[logfields.KeyTxIDs]; present {
 		t.Errorf("expected no %s field in counts-only mode, got %v", logfields.KeyTxIDs, entry[logfields.KeyTxIDs])
 	}
-	if _, present := entry["txids_truncated"]; present {
-		t.Errorf("expected no txids_truncated field in counts-only mode, got %v", entry["txids_truncated"])
+	if _, present := entry[logfields.KeyTxIDsTruncated]; present {
+		t.Errorf("expected no txids_truncated field in counts-only mode, got %v", entry[logfields.KeyTxIDsTruncated])
 	}
 }
 
@@ -1459,6 +1459,73 @@ func TestEmitSeenBatch_NilCfgLogsCountsOnly(t *testing.T) {
 	}
 	if _, present := entries[0][logfields.KeyTxIDs]; present {
 		t.Errorf("expected no %s field with nil cfg, got %v", logfields.KeyTxIDs, entries[0][logfields.KeyTxIDs])
+	}
+}
+
+// TestEmitSeenBatch_LogsAllTxidsAtExactCap pins the strict-greater-than
+// comparison in emitSeenBatch: a batch of exactly SeenTxidLogMax txids logs
+// all of them and is NOT marked truncated.
+func TestEmitSeenBatch_LogsAllTxidsAtExactCap(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg := &config.Config{Subtree: config.SubtreeConfig{SeenTxidLogMax: 3}}
+
+	regStore := &mockRegStore{registrations: map[string][]string{}}
+	p := newTestProcessorWithCfg(t, regStore, &mockSeenCounter{}, cfg, logger)
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+		"tx2": {testSeenBatchCallbackURL},
+		"tx3": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-exact-cap"); err != nil {
+		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
+	}
+
+	entries := seenBatchLogEntries(t, &buf)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 seen-batch log entry, got %d", len(entries))
+	}
+	entry := entries[0]
+
+	txids, ok := entry[logfields.KeyTxIDs].([]any)
+	if !ok || len(txids) != 3 {
+		t.Fatalf("expected all 3 txids logged at exact cap, got %v", entry[logfields.KeyTxIDs])
+	}
+	if truncated, _ := entry[logfields.KeyTxIDsTruncated].(bool); truncated {
+		t.Errorf("expected txids_truncated=false at exact cap, got %v", entry[logfields.KeyTxIDsTruncated])
+	}
+}
+
+// TestEmitSeenBatch_NoSuccessLogOnPublishFailure pins the property that the
+// "seen callback batch published" Info log fires only after a durable
+// publish: when PublishBatch fails, the batch is redriven by the caller and
+// no success log may be emitted for it.
+func TestEmitSeenBatch_NoSuccessLogOnPublishFailure(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg := &config.Config{Subtree: config.SubtreeConfig{SeenTxidLogMax: 1000}}
+
+	failing := &callbackFailingSyncProducer{failAll: true, failErr: errors.New("kafka broker down")}
+	p := &Processor{
+		cfg:               cfg,
+		registrationStore: &mockRegStore{registrations: map[string][]string{}},
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(failing, "callback-test", logger),
+	}
+	p.InitBase("subtree-test")
+	p.Logger = logger
+
+	registered := map[string][]string{
+		"tx1": {testSeenBatchCallbackURL},
+		"tx2": {testSeenBatchCallbackURL},
+	}
+	if err := p.emitBatchedSeenCallbacks(toEntries(registered, nil), "subtree-pubfail"); err == nil {
+		t.Fatal("expected an error from emitBatchedSeenCallbacks with a failing producer")
+	}
+
+	if entries := seenBatchLogEntries(t, &buf); len(entries) != 0 {
+		t.Errorf("expected no seen-batch success log on publish failure, got %d: %v", len(entries), entries)
 	}
 }
 

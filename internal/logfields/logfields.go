@@ -14,16 +14,23 @@ import "log/slog"
 // that can't use the typed constructor (e.g. building a map) still spell the
 // key consistently, and so the accompanying test can enumerate them.
 const (
-	KeyTxID         = "txid"
-	KeyTxIDs        = "txids"
-	KeyBlockHash    = "block_hash"
-	KeyBlockHeight  = "block_height"
-	KeySubtreeHash  = "subtree_hash"
-	KeySubtreeIndex = "subtree_index"
-	KeyCallbackURL  = "callback_url"
-	KeyDataHubURL   = "datahub_url"
-	KeyPeerID       = "peer_id"
-	KeyRequestID    = "request_id"
+	KeyTxID = "txid"
+	// KeyTxIDs is a LIST of txids. A txid COUNT must use KeyTxIDCount instead:
+	// mixing an int and an array under the same key path breaks
+	// Coralogix/Elasticsearch field mapping.
+	KeyTxIDs     = "txids"
+	KeyTxIDCount = "txid_count"
+	// KeyTxIDsTruncated marks a KeyTxIDs list that was capped (see
+	// subtree.seenTxidLogMax) rather than complete.
+	KeyTxIDsTruncated = "txids_truncated"
+	KeyBlockHash      = "block_hash"
+	KeyBlockHeight    = "block_height"
+	KeySubtreeHash    = "subtree_hash"
+	KeySubtreeIndex   = "subtree_index"
+	KeyCallbackURL    = "callback_url"
+	KeyDataHubURL     = "datahub_url"
+	KeyPeerID         = "peer_id"
+	KeyRequestID      = "request_id"
 
 	// KeyTraceID and KeySpanID are reserved for the tracing work that lands
 	// alongside this canon (see the otel-coralogix branch). No constructor
@@ -38,6 +45,13 @@ func TxID(v string) slog.Attr { return slog.String(KeyTxID, v) }
 
 // TxIDs returns the canonical attribute for a list of transaction ids.
 func TxIDs(v []string) slog.Attr { return slog.Any(KeyTxIDs, v) }
+
+// TxIDCount returns the canonical attribute for a count of transaction ids.
+func TxIDCount(v int) slog.Attr { return slog.Int(KeyTxIDCount, v) }
+
+// TxIDsTruncated returns the canonical attribute marking whether a TxIDs
+// list was capped (see subtree.seenTxidLogMax) rather than complete.
+func TxIDsTruncated(v bool) slog.Attr { return slog.Bool(KeyTxIDsTruncated, v) }
 
 // BlockHash returns the canonical attribute for a block hash.
 func BlockHash(v string) slog.Attr { return slog.String(KeyBlockHash, v) }
@@ -55,7 +69,8 @@ func SubtreeIndex(v int) slog.Attr { return slog.Int(KeySubtreeIndex, v) }
 // CallbackURL returns the canonical attribute for an arcade callback URL.
 func CallbackURL(v string) slog.Attr { return slog.String(KeyCallbackURL, v) }
 
-// DataHubURL returns the canonical attribute for a Teranode DataHub base URL.
+// DataHubURL returns the canonical attribute for a Teranode DataHub URL —
+// either a peer's base URL or a full request URL derived from it.
 func DataHubURL(v string) slog.Attr { return slog.String(KeyDataHubURL, v) }
 
 // PeerID returns the canonical attribute for a P2P peer identifier.

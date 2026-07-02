@@ -651,7 +651,7 @@ func (p *Processor) emitBatchedSeenCallbacks(registeredTxids map[string][]store.
 		metrics.ObserveDB(p.backendLabel(), metrics.StoreSeenCounter, metrics.OpIncrement, incStart, incErr)
 		if incErr != nil {
 			p.Logger.Error("failed to batch-increment seen counters",
-				logfields.SubtreeHash(subtreeID), "txid_count", len(txids), "succeeded", len(results), "error", incErr)
+				logfields.SubtreeHash(subtreeID), logfields.TxIDCount(len(txids)), "succeeded", len(results), "error", incErr)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("incrementing seen counters for subtree %s: %w", subtreeID, incErr)
 			}
@@ -752,7 +752,7 @@ func (p *Processor) emitSeenBatch(
 				logfields.SubtreeHash(subtreeID),
 				logfields.CallbackURL(m.callbackURL),
 				"type", string(cbType),
-				"txid_count", len(m.chunk),
+				logfields.TxIDCount(len(m.chunk)),
 			}
 			truncated := false
 			if maxLog > 0 {
@@ -761,7 +761,7 @@ func (p *Processor) emitSeenBatch(
 					txids = txids[:maxLog]
 					truncated = true
 				}
-				fields = append(fields, logfields.TxIDs(txids), "txids_truncated", truncated)
+				fields = append(fields, logfields.TxIDs(txids), logfields.TxIDsTruncated(truncated))
 			}
 			p.Logger.Info("seen callback batch published", fields...)
 		}

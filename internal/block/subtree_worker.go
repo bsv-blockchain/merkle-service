@@ -528,7 +528,7 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 			"failed to store STUMP blob; skipping subtree callbacks",
 			logfields.BlockHash(workMsg.BlockHash),
 			logfields.SubtreeIndex(workMsg.SubtreeIndex),
-			"callbackURLs", len(result.CallbackGroups),
+			"callback_url_count", len(result.CallbackGroups),
 			"error", err,
 		)
 		return fmt.Errorf("storing STUMP blob for block %s subtree %d: %w",
@@ -724,7 +724,7 @@ func emitBlockProcessedCallbacks(
 		logger.Info(
 			"emitted BLOCK_PROCESSED callbacks",
 			logfields.BlockHash(blockHash),
-			"callbackURLs", len(entries),
+			"callback_url_count", len(entries),
 		)
 	}
 	return firstErr

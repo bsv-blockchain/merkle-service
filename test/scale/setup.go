@@ -9,6 +9,7 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 
+	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
@@ -55,7 +56,7 @@ func preloadRegistrations(manifest *Manifest, txids [][]byte, regStore store.Reg
 				completed++
 				if completed%10 == 0 {
 					txidsPerInstance := arcade.TxidEnd - arcade.TxidStart
-					logger.Info("pre-loaded registrations", "arcadeInstances", completed, "txid_count", completed*txidsPerInstance)
+					logger.Info("pre-loaded registrations", "arcadeInstances", completed, logfields.TxIDCount(completed*txidsPerInstance))
 				}
 				mu.Unlock()
 			}
