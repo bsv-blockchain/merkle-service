@@ -484,6 +484,8 @@ func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeM
 			logfields.SubtreeHash(msg.Hash),
 			"error", err,
 		)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil
 	}
 
@@ -536,6 +538,8 @@ func (c *Client) handleBlockMessage(ctx context.Context, msg teranode.BlockMessa
 			logfields.BlockHash(msg.Hash),
 			"error", err,
 		)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil
 	}
 

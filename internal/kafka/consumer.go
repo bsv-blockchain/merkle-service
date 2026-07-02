@@ -565,21 +565,45 @@ func processBatch(
 }
 
 // dispatchRecord extracts any inbound trace context carried by rec's Kafka
-// headers (a producer-injected traceparent — see injectTraceContext), starts
-// a consumer span for the handler invocation, and records the handler's
-// outcome on the span before ending it. With telemetry disabled, the global
-// TracerProvider is the no-op implementation, so Start/End/RecordError are
-// inert — no real span is created and no extra allocation beyond the interface
-// calls.
+// headers (a producer-injected traceparent — see injectTraceContext) and,
+// only when that context is valid, runs the handler inside a
+// SpanKindConsumer span named "<topic> process" (topic only — never an
+// offset/key — to keep span names low-cardinality), recording the handler's
+// error on the span before ending it.
 //
-// The trace this span belongs to is either the one carried by the record
-// (when the producer had an active span — e.g. the inbound /watch request
-// that ultimately triggered this message) or a fresh one otherwise; either
-// way, handlers invoked with msgCtx and any Kafka produce or outbound HTTP
-// call they make downstream will continue it, which is what closes the
-// arcade->merkle->arcade trace across a hop through Kafka.
+// Zero-cost when disabled (mirrors the producer's injectTraceContext
+// IsValid guard): extractTraceContext short-circuits without touching the
+// propagator when the record carries no headers, and when telemetry is
+// disabled fleet-wide no producer injects a traceparent, so records arrive
+// header-less → the extracted SpanContext is invalid → no span is started
+// and the only per-record cost is the (pre-existing) *Message alloc. See
+// TestDispatchRecord_NoAllocBeyondHandlerOnNoContextPath.
+//
+// Semantics: a record with no inbound trace context cannot be correlated
+// with any trace, so it is intentionally NOT spanned — even when telemetry
+// is enabled (e.g. a record from an un-instrumented producer, or produced
+// before this shipped). When a producer DID inject context, the consumer
+// span continues that trace, and any Kafka produce or outbound HTTP call
+// the handler makes with msgCtx continues it further — which is what closes
+// the arcade->merkle->arcade trace across a hop through Kafka.
 func dispatchRecord(ctx context.Context, rec *kgo.Record, handler MessageHandler) error {
-	msgCtx, span := startConsumerSpan(ctx, rec)
+	msgCtx := extractTraceContext(ctx, rec)
+	if !trace.SpanContextFromContext(msgCtx).IsValid() {
+		// No inbound trace context to correlate with: run the handler
+		// directly, no consumer span. This is the disabled/no-context hot
+		// path and must stay allocation-free beyond the handler itself.
+		return handler(msgCtx, recordToMessage(rec))
+	}
+
+	msgCtx, span := otel.Tracer(tracerName).Start(
+		msgCtx,
+		rec.Topic+" process",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			semconv.MessagingSystemKafka,
+			semconv.MessagingDestinationName(rec.Topic),
+		),
+	)
 	defer span.End()
 
 	err := handler(msgCtx, recordToMessage(rec))
@@ -588,29 +612,6 @@ func dispatchRecord(ctx context.Context, rec *kgo.Record, handler MessageHandler
 		span.SetStatus(codes.Error, err.Error())
 	}
 	return err
-}
-
-// startConsumerSpan extracts rec's trace context onto baseCtx and starts a
-// SpanKindConsumer span named "<topic> process" (topic only — never an
-// offset/key — to keep span names low-cardinality), tagged with the standard
-// messaging semconv attributes.
-func startConsumerSpan(baseCtx context.Context, rec *kgo.Record) (context.Context, trace.Span) {
-	extracted := extractTraceContext(baseCtx, rec)
-	// This is a start-span factory: the span is returned for the caller to
-	// end (dispatchRecord does `defer span.End()`), not ended in this
-	// function, so spancheck's per-function End-call check is a false
-	// positive here.
-	//nolint:spancheck // span.End() is the caller's responsibility; see above
-	spanCtx, span := otel.Tracer(tracerName).Start(
-		extracted,
-		rec.Topic+" process",
-		trace.WithSpanKind(trace.SpanKindConsumer),
-		trace.WithAttributes(
-			semconv.MessagingSystemKafka,
-			semconv.MessagingDestinationName(rec.Topic),
-		),
-	)
-	return spanCtx, span //nolint:spancheck // span.End() is the caller's responsibility; see above
 }
 
 func (c *Consumer) signalReady() {

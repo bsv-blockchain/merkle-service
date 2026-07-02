@@ -924,7 +924,7 @@ func maxIdleConnsPerHostOrDefault(v int) int {
 // The SSRF-guarded transport is wrapped with otelhttp.NewTransport so every
 // callback POST carries a client span and a traceparent header derived from
 // deliverCallback's request context — this is what lets the trace begun on
-// Kafka consume (see internal/kafka's consumer span, once wired) ride all
+// Kafka consume (internal/kafka's consumer span in dispatchRecord) ride all
 // the way back into arcade's callback handler. With telemetry disabled this
 // uses the global no-op TracerProvider, so the wrap is inert.
 func newDeliveryHTTPClient(cfg config.CallbackConfig) *http.Client {
