@@ -445,3 +445,89 @@ registry:
   # behavior — strongly discouraged in production; see F-050).
   # Env: REGISTRY_MAX_CALLBACKS_PER_TXID
   maxCallbacksPerTxID: 10
+
+# ---------------------------------------------------------------------------
+# Metrics — Prometheus /metrics exporter
+# ---------------------------------------------------------------------------
+# Each binary that runs services (api-server, block-processor,
+# callback-delivery, subtree-fetcher, subtree-worker, p2p-client,
+# all-in-one) starts a dedicated metrics HTTP server on port. In all-in-one
+# mode a single server is shared across the in-process services via the
+# package-level metrics.Registry. Operators running multiple sub-binaries on
+# the same host MUST override port per-binary to avoid bind conflicts.
+metrics:
+  # Enable the Prometheus /metrics HTTP endpoint.
+  # Env: METRICS_ENABLED
+  enabled: true
+
+  # HTTP listen port for the metrics endpoint.
+  # Env: METRICS_PORT
+  port: 9090
+
+  # URL path the metrics endpoint is served on.
+  # Env: METRICS_PATH
+  path: /metrics
+
+# ---------------------------------------------------------------------------
+# Telemetry — OpenTelemetry export to an external OTLP collector
+# ---------------------------------------------------------------------------
+# Traces + metrics only (no logs — stdout JSON, per logLevel above, remains
+# the only log path; OTLP log export is not implemented). Metrics are bridged
+# from the same private Prometheus registry the /metrics endpoint above
+# serves, so both exporters stay in sync without duplicating instrumentation.
+#
+# Disabled by default: with enabled=false, no OTEL providers are created and
+# no network connections are opened, so runtime behaviour is identical to a
+# build with no OTEL support at all.
+#
+# endpoint may be left blank when enabled=true: the exporters then fall back
+# to the standard OTEL_EXPORTER_OTLP_ENDPOINT (or the more specific
+# OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_METRICS_ENDPOINT)
+# environment variables, e.g. for a node-local collector reached via the
+# Kubernetes downward API host IP:
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://$(HOST_IP):4317
+# telemetry:
+#   # Env: TELEMETRY_ENABLED
+#   enabled: false
+#
+#   # host:port of the OTLP collector. May be left empty (see above). Must
+#   # be host:port WITHOUT a scheme for both protocols (a scheme-prefixed URL
+#   # is only understood by OTEL_EXPORTER_OTLP_ENDPOINT); for http, TLS is
+#   # controlled by the insecure flag below, not by an http:// vs https://
+#   # prefix.
+#   # Env: TELEMETRY_ENDPOINT
+#   endpoint: ""
+#
+#   # "grpc" (default, typically port 4317) or "http" (typically port 4318).
+#   # Env: TELEMETRY_PROTOCOL
+#   protocol: grpc
+#
+#   # Skip TLS when dialing the collector (e.g. an in-cluster/local collector
+#   # reachable without TLS).
+#   # Env: TELEMETRY_INSECURE
+#   insecure: false
+#
+#   # service.name resource attribute. OTEL_SERVICE_NAME, if set, wins.
+#   # Env: TELEMETRY_SERVICE_NAME
+#   serviceName: merkle-service
+#
+#   # service.namespace resource attribute (e.g. the downstream solution's
+#   # name). Omitted from the resource when empty.
+#   # Env: TELEMETRY_NAMESPACE
+#   namespace: ""
+#
+#   # Enable the OTLP trace pipeline.
+#   # Env: TELEMETRY_TRACES
+#   traces: true
+#
+#   # Enable the OTLP metric pipeline (Prometheus bridge).
+#   # Env: TELEMETRY_METRICS
+#   metrics: true
+#
+#   # ParentBased(TraceIDRatioBased) sampler ratio, 0.0-1.0.
+#   # Env: TELEMETRY_SAMPLE_RATIO
+#   sampleRatio: 1.0
+#
+#   # Bounds the final ForceFlush+Shutdown of every provider at process exit.
+#   # Env: TELEMETRY_EXPORT_TIMEOUT_MS
+#   exportTimeoutMs: 10000

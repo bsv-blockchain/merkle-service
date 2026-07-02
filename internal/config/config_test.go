@@ -6,6 +6,19 @@ import (
 	"testing"
 )
 
+// Env var name constants for the telemetry env-binding/validation table
+// tests below. Pulled out as constants (rather than repeated literals)
+// because TestLoad_TelemetryValidation's table drives both env vars across
+// many cases, which would otherwise trip the goconst linter.
+const (
+	envTelemetryEnabled  = "TELEMETRY_ENABLED"
+	envTelemetryProtocol = "TELEMETRY_PROTOCOL"
+	// envTrue is the string value set for boolean env vars in the telemetry
+	// validation table; pulled out so the repeated literal doesn't trip the
+	// goconst linter.
+	envTrue = "true"
+)
+
 // clearConfigEnv unsets all environment variables that affect config loading,
 // so tests start from a clean slate.
 func clearConfigEnv(t *testing.T) {
@@ -29,6 +42,10 @@ func clearConfigEnv(t *testing.T) {
 		"CALLBACK_MAX_RETRIES", "CALLBACK_BACKOFF_BASE_SEC",
 		"CALLBACK_TIMEOUT_SEC", "CALLBACK_SEEN_THRESHOLD",
 		"BLOB_STORE_URL",
+		envTelemetryEnabled, "TELEMETRY_ENDPOINT", envTelemetryProtocol,
+		"TELEMETRY_INSECURE", "TELEMETRY_SERVICE_NAME", "TELEMETRY_NAMESPACE",
+		"TELEMETRY_TRACES", "TELEMETRY_METRICS", "TELEMETRY_SAMPLE_RATIO",
+		"TELEMETRY_EXPORT_TIMEOUT_MS",
 	}
 	for _, v := range envVars {
 		_ = os.Unsetenv(v)
@@ -386,6 +403,188 @@ func TestLoad_LogLevelEnvOverride(t *testing.T) {
 
 	if cfg.LogLevel != "debug" {
 		t.Errorf("LogLevel: expected %q, got %q", "debug", cfg.LogLevel)
+	}
+}
+
+func TestLoad_TelemetryDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if cfg.Telemetry.Enabled {
+		t.Error("Telemetry.Enabled: expected false")
+	}
+	if cfg.Telemetry.Endpoint != "" {
+		t.Errorf("Telemetry.Endpoint: expected empty, got %q", cfg.Telemetry.Endpoint)
+	}
+	if cfg.Telemetry.Protocol != "grpc" {
+		t.Errorf("Telemetry.Protocol: expected %q, got %q", "grpc", cfg.Telemetry.Protocol)
+	}
+	if cfg.Telemetry.Insecure {
+		t.Error("Telemetry.Insecure: expected false")
+	}
+	if cfg.Telemetry.ServiceName != "merkle-service" {
+		t.Errorf("Telemetry.ServiceName: expected %q, got %q", "merkle-service", cfg.Telemetry.ServiceName)
+	}
+	if cfg.Telemetry.Namespace != "" {
+		t.Errorf("Telemetry.Namespace: expected empty, got %q", cfg.Telemetry.Namespace)
+	}
+	if !cfg.Telemetry.Traces {
+		t.Error("Telemetry.Traces: expected true")
+	}
+	if !cfg.Telemetry.Metrics {
+		t.Error("Telemetry.Metrics: expected true")
+	}
+	if cfg.Telemetry.SampleRatio != 1.0 {
+		t.Errorf("Telemetry.SampleRatio: expected 1.0, got %v", cfg.Telemetry.SampleRatio)
+	}
+	if cfg.Telemetry.ExportTimeoutMs != 10000 {
+		t.Errorf("Telemetry.ExportTimeoutMs: expected 10000, got %d", cfg.Telemetry.ExportTimeoutMs)
+	}
+}
+
+// TestLoad_TelemetryEnvBinding proves the bindEnvVars map wires every
+// TELEMETRY_* environment variable to its viper key — a typo'd or missing
+// binding entry would silently leave the env var ignored.
+func TestLoad_TelemetryEnvBinding(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	t.Setenv(envTelemetryEnabled, "true")
+	t.Setenv("TELEMETRY_ENDPOINT", "collector:4317")
+	t.Setenv(envTelemetryProtocol, "http")
+	t.Setenv("TELEMETRY_INSECURE", "true")
+	t.Setenv("TELEMETRY_SERVICE_NAME", "custom-service")
+	t.Setenv("TELEMETRY_NAMESPACE", "custom-namespace")
+	t.Setenv("TELEMETRY_TRACES", "false")
+	t.Setenv("TELEMETRY_METRICS", "false")
+	t.Setenv("TELEMETRY_SAMPLE_RATIO", "0.5")
+	t.Setenv("TELEMETRY_EXPORT_TIMEOUT_MS", "2500")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if !cfg.Telemetry.Enabled {
+		t.Error("Telemetry.Enabled: expected true via TELEMETRY_ENABLED")
+	}
+	if cfg.Telemetry.Endpoint != "collector:4317" {
+		t.Errorf("Telemetry.Endpoint: expected %q, got %q", "collector:4317", cfg.Telemetry.Endpoint)
+	}
+	if cfg.Telemetry.Protocol != "http" {
+		t.Errorf("Telemetry.Protocol: expected %q, got %q", "http", cfg.Telemetry.Protocol)
+	}
+	if !cfg.Telemetry.Insecure {
+		t.Error("Telemetry.Insecure: expected true via TELEMETRY_INSECURE")
+	}
+	if cfg.Telemetry.ServiceName != "custom-service" {
+		t.Errorf("Telemetry.ServiceName: expected %q, got %q", "custom-service", cfg.Telemetry.ServiceName)
+	}
+	if cfg.Telemetry.Namespace != "custom-namespace" {
+		t.Errorf("Telemetry.Namespace: expected %q, got %q", "custom-namespace", cfg.Telemetry.Namespace)
+	}
+	if cfg.Telemetry.Traces {
+		t.Error("Telemetry.Traces: expected false via TELEMETRY_TRACES")
+	}
+	if cfg.Telemetry.Metrics {
+		t.Error("Telemetry.Metrics: expected false via TELEMETRY_METRICS")
+	}
+	if cfg.Telemetry.SampleRatio != 0.5 {
+		t.Errorf("Telemetry.SampleRatio: expected 0.5, got %v", cfg.Telemetry.SampleRatio)
+	}
+	if cfg.Telemetry.ExportTimeoutMs != 2500 {
+		t.Errorf("Telemetry.ExportTimeoutMs: expected 2500, got %d", cfg.Telemetry.ExportTimeoutMs)
+	}
+}
+
+func TestLoad_TelemetryValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		env       map[string]string
+		wantError bool
+	}{
+		{
+			name:      "disabled skips validation entirely",
+			env:       map[string]string{envTelemetryEnabled: "false", envTelemetryProtocol: "bogus"},
+			wantError: false,
+		},
+		{
+			name:      "enabled with valid grpc config",
+			env:       map[string]string{envTelemetryEnabled: envTrue, envTelemetryProtocol: "grpc"},
+			wantError: false,
+		},
+		{
+			name:      "enabled with valid http config",
+			env:       map[string]string{envTelemetryEnabled: envTrue, envTelemetryProtocol: "http"},
+			wantError: false,
+		},
+		{
+			name:      "enabled with empty endpoint is allowed (env fallback resolved in Init)",
+			env:       map[string]string{envTelemetryEnabled: envTrue, envTelemetryProtocol: "grpc", "TELEMETRY_ENDPOINT": ""},
+			wantError: false,
+		},
+		{
+			name:      "invalid protocol",
+			env:       map[string]string{envTelemetryEnabled: envTrue, envTelemetryProtocol: "webtransport"},
+			wantError: true,
+		},
+		{
+			name:      "sample ratio below 0",
+			env:       map[string]string{envTelemetryEnabled: envTrue, "TELEMETRY_SAMPLE_RATIO": "-0.1"},
+			wantError: true,
+		},
+		{
+			name:      "sample ratio above 1",
+			env:       map[string]string{envTelemetryEnabled: envTrue, "TELEMETRY_SAMPLE_RATIO": "1.1"},
+			wantError: true,
+		},
+		{
+			name:      "grpc protocol rejects http:// scheme endpoint",
+			env:       map[string]string{envTelemetryEnabled: envTrue, envTelemetryProtocol: "grpc", "TELEMETRY_ENDPOINT": "http://collector:4317"},
+			wantError: true,
+		},
+		{
+			name:      "grpc protocol rejects https:// scheme endpoint",
+			env:       map[string]string{envTelemetryEnabled: envTrue, envTelemetryProtocol: "grpc", "TELEMETRY_ENDPOINT": "https://collector:4317"},
+			wantError: true,
+		},
+		{
+			name:      "http protocol allows a bare host:port endpoint",
+			env:       map[string]string{envTelemetryEnabled: envTrue, envTelemetryProtocol: "http", "TELEMETRY_ENDPOINT": "collector:4318"},
+			wantError: false,
+		},
+		{
+			name:      "http protocol rejects http:// scheme endpoint",
+			env:       map[string]string{envTelemetryEnabled: envTrue, envTelemetryProtocol: "http", "TELEMETRY_ENDPOINT": "http://collector:4318"},
+			wantError: true,
+		},
+		{
+			name:      "http protocol rejects https:// scheme endpoint",
+			env:       map[string]string{envTelemetryEnabled: envTrue, envTelemetryProtocol: "http", "TELEMETRY_ENDPOINT": "https://collector:4318"},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+
+			_, err := Load()
+			if tt.wantError && err == nil {
+				t.Fatal("expected Load() to return an error, got nil")
+			}
+			if !tt.wantError && err != nil {
+				t.Fatalf("expected Load() to succeed, got error: %v", err)
+			}
+		})
 	}
 }
 

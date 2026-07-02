@@ -10,6 +10,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	_ "github.com/bsv-blockchain/merkle-service/internal/store/sql" // register SQL backend
+	"github.com/bsv-blockchain/merkle-service/internal/version"
 )
 
 func main() {
@@ -21,6 +22,13 @@ func main() {
 	logger := service.NewLogger(config.ParseLogLevel(cfg.LogLevel))
 
 	ctx := context.Background()
+
+	telemetryShutdown, err := service.InitTelemetry(ctx, cfg.Telemetry, "subtree-worker", version.Version, metrics.Registry, logger)
+	if err != nil {
+		log.Fatal("failed to init telemetry: ", err)
+	}
+	defer func() { _ = telemetryShutdown(context.Background()) }()
+
 	registry, err := store.NewFromConfig(ctx, cfg, logger)
 	if err != nil {
 		log.Fatal("failed to build store registry: ", err)
