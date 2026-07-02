@@ -403,7 +403,7 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 		logfields.TxID(cbMsg.TxID),
 		"type", cbMsg.Type,
 		"retryCount", cbMsg.RetryCount,
-		"subtreeIndex", cbMsg.SubtreeIndex,
+		logfields.SubtreeIndex(cbMsg.SubtreeIndex),
 	)
 
 	// Check callback dedup — skip if already delivered.
@@ -442,7 +442,7 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 					logfields.CallbackURL(cbMsg.CallbackURL),
 					"type", cbMsg.Type,
 					logfields.BlockHash(cbMsg.BlockHash),
-					"subtreeIndex", cbMsg.SubtreeIndex,
+					logfields.SubtreeIndex(cbMsg.SubtreeIndex),
 				)
 				metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDedupHit).Inc()
 				return nil
@@ -477,7 +477,7 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 			logfields.CallbackURL(cbMsg.CallbackURL),
 			logfields.TxID(cbMsg.TxID),
 			"type", cbMsg.Type,
-			"subtreeIndex", cbMsg.SubtreeIndex,
+			logfields.SubtreeIndex(cbMsg.SubtreeIndex),
 		)
 		return nil
 	}
@@ -488,7 +488,7 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 		logfields.TxID(cbMsg.TxID),
 		"type", cbMsg.Type,
 		"retryCount", cbMsg.RetryCount,
-		"subtreeIndex", cbMsg.SubtreeIndex,
+		logfields.SubtreeIndex(cbMsg.SubtreeIndex),
 		"error", deliverErr,
 	)
 	return d.scheduleRetryOrDLQ(cbMsg, deliverErr)
@@ -508,7 +508,7 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 			logfields.TxID(cbMsg.TxID),
 			"type", cbMsg.Type,
 			"retryCount", cbMsg.RetryCount,
-			"subtreeIndex", cbMsg.SubtreeIndex,
+			logfields.SubtreeIndex(cbMsg.SubtreeIndex),
 			"reason", "permanent",
 			"cause", cause,
 		)
@@ -527,7 +527,7 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 			logfields.TxID(cbMsg.TxID),
 			"type", cbMsg.Type,
 			"retryCount", cbMsg.RetryCount,
-			"subtreeIndex", cbMsg.SubtreeIndex,
+			logfields.SubtreeIndex(cbMsg.SubtreeIndex),
 			"cause", cause,
 		)
 		if err := d.publishToDLQDurably(cbMsg); err != nil {
@@ -551,7 +551,7 @@ func (d *DeliveryService) scheduleRetryOrDLQ(cbMsg *kafka.CallbackTopicMessage, 
 		"retryCount", cbMsg.RetryCount,
 		"nextRetryAt", cbMsg.NextRetryAt,
 		"backoffSec", backoffSec,
-		"subtreeIndex", cbMsg.SubtreeIndex,
+		logfields.SubtreeIndex(cbMsg.SubtreeIndex),
 		"cause", cause,
 	)
 
@@ -772,7 +772,7 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 			"idempotencyKey", idempotencyKey,
 			"type", msg.Type,
 			logfields.TxID(msg.TxID),
-			"subtreeIndex", msg.SubtreeIndex,
+			logfields.SubtreeIndex(msg.SubtreeIndex),
 			"error", err,
 		)
 		metrics.ObserveCallbackDelivery(msg.CallbackURL, 0, len(body), time.Since(start), err)
@@ -801,7 +801,7 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 		"idempotencyKey", idempotencyKey,
 		"type", msg.Type,
 		logfields.TxID(msg.TxID),
-		"subtreeIndex", msg.SubtreeIndex,
+		logfields.SubtreeIndex(msg.SubtreeIndex),
 	)
 
 	snippet := bodyBytes

@@ -54,7 +54,7 @@ lint-store-imports:
 # are wire formats, not log fields, and must NOT be renamed to match the
 # log-field canon.
 lint-logfields:
-	@if grep -rnE '"(blockHash|subtreeHash|subtreeID|callbackUrl|callbackURL|blockHeight|peerID|peerId|requestId|dataHubUrl)"' internal/ cmd/ tools/ --include='*.go' \
+	@if grep -rnE '"(blockHash|subtreeHash|subtreeID|subtreeIndex|callbackUrl|callbackURL|blockHeight|peerID|peerId|requestId|dataHubUrl)"' internal/ cmd/ tools/ --include='*.go' \
 		| grep -v '_test\.go' \
 		| grep -v 'json:' | grep -v 'yaml:' | grep -v 'mapstructure:' | grep -v 'FormValue'; then \
 		echo "ERROR: found a banned pre-canon log-field key literal — use internal/logfields constructors instead"; \

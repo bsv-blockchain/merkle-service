@@ -359,7 +359,7 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 			"subtree work item exceeded max attempts, routing to DLQ",
 			logfields.SubtreeHash(workMsg.SubtreeHash),
 			logfields.BlockHash(workMsg.BlockHash),
-			"subtreeIndex", workMsg.SubtreeIndex,
+			logfields.SubtreeIndex(workMsg.SubtreeIndex),
 			"attemptCount", workMsg.AttemptCount,
 			"maxAttempts", maxAttempts,
 			"error", cause,
@@ -372,7 +372,7 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 				"ALERT: subtree counter decrement failed on DLQ path; deferring DLQ publish until counter store recovers",
 				logfields.SubtreeHash(workMsg.SubtreeHash),
 				logfields.BlockHash(workMsg.BlockHash),
-				"subtreeIndex", workMsg.SubtreeIndex,
+				logfields.SubtreeIndex(workMsg.SubtreeIndex),
 				"error", decErr,
 			)
 			return fmt.Errorf("decrementing subtree counter on DLQ path for block %s: %w",
@@ -399,7 +399,7 @@ func (s *SubtreeWorkerService) handleTransientFailure(workMsg *kafka.SubtreeWork
 		"subtree work item transient failure, re-publishing for retry",
 		logfields.SubtreeHash(workMsg.SubtreeHash),
 		logfields.BlockHash(workMsg.BlockHash),
-		"subtreeIndex", workMsg.SubtreeIndex,
+		logfields.SubtreeIndex(workMsg.SubtreeIndex),
 		"attemptCount", workMsg.AttemptCount,
 		"nextAttempt", nextAttempt,
 		"error", cause,
@@ -514,7 +514,7 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 		s.Logger.Error(
 			"stump store not configured; cannot publish STUMP callbacks",
 			logfields.BlockHash(workMsg.BlockHash),
-			"subtreeIndex", workMsg.SubtreeIndex,
+			logfields.SubtreeIndex(workMsg.SubtreeIndex),
 		)
 		return fmt.Errorf("stump store not configured for block %s subtree %d",
 			workMsg.BlockHash, workMsg.SubtreeIndex)
@@ -527,7 +527,7 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(workMsg *kafka.SubtreeWor
 		s.Logger.Error(
 			"failed to store STUMP blob; skipping subtree callbacks",
 			logfields.BlockHash(workMsg.BlockHash),
-			"subtreeIndex", workMsg.SubtreeIndex,
+			logfields.SubtreeIndex(workMsg.SubtreeIndex),
 			"callbackURLs", len(result.CallbackGroups),
 			"error", err,
 		)

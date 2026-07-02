@@ -209,7 +209,7 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		urls = append(urls, e.URL)
 	}
 
-	s.Logger.Debug("registration lookup", logfields.TxID(txid), "callbackUrlCount", len(urls))
+	s.Logger.Debug("registration lookup", logfields.TxID(txid), "callback_url_count", len(urls))
 
 	writeJSON(w, http.StatusOK, LookupResponse{
 		TxID:         txid,
