@@ -7,16 +7,16 @@ require (
 	github.com/bsv-blockchain/go-bt/v2 v2.6.7
 	github.com/bsv-blockchain/go-sdk v1.2.24
 	github.com/bsv-blockchain/go-subtree v1.4.4
-	github.com/bsv-blockchain/go-teranode-p2p-client v0.2.7
+	github.com/bsv-blockchain/go-teranode-p2p-client v0.2.8
 	github.com/bsv-blockchain/teranode v0.16.0-beta-2
 	github.com/cespare/xxhash/v2 v2.3.0
-	github.com/go-chi/chi/v5 v5.3.0
+	github.com/go-chi/chi/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/viper v1.21.0
 	github.com/testcontainers/testcontainers-go v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
-	github.com/twmb/franz-go v1.21.4
+	github.com/twmb/franz-go v1.21.5
 	github.com/twmb/franz-go/pkg/kadm v1.18.0
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20260615024848-f17c00130060
 	go.opentelemetry.io/contrib/bridges/prometheus v0.69.0
@@ -41,7 +41,6 @@ require (
 	filippo.io/keygen v1.0.0 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/DATA-DOG/go-sqlmock v1.5.2 // indirect
-	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.42.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.13 // indirect
@@ -66,14 +65,12 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bsv-blockchain/aerospike-client-go/v8 v8.7.1-bsv4 // indirect
 	github.com/bsv-blockchain/go-batcher/v2 v2.0.5 // indirect
-	github.com/bsv-blockchain/go-bc v1.1.7 // indirect
 	github.com/bsv-blockchain/go-chaincfg v1.5.10 // indirect
 	github.com/bsv-blockchain/go-lockfree-queue v1.2.0 // indirect
 	github.com/bsv-blockchain/go-p2p-message-bus v0.1.21 // indirect
 	github.com/bsv-blockchain/go-safe-conversion v1.2.0 // indirect
 	github.com/bsv-blockchain/go-tx-map v1.4.1 // indirect
 	github.com/bsv-blockchain/go-wire v1.2.10 // indirect
-	github.com/bsv-blockchain/testcontainers-aerospike-go v0.4.2 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
@@ -122,7 +119,6 @@ require (
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
 	github.com/google/gnostic-models v0.7.1 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
-	github.com/google/pprof v0.0.0-20260604005048-7023385849c0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus v1.1.0 // indirect
@@ -201,8 +197,6 @@ require (
 	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/onsi/ginkgo/v2 v2.28.1 // indirect
-	github.com/onsi/gomega v1.39.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/ordishs/gocore v1.0.81 // indirect
