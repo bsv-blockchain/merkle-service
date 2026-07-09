@@ -31,6 +31,8 @@ const (
 	OutcomeMiss             = "miss"
 	OutcomeEmpty            = "empty"
 	OutcomeHandlerError     = "handler_error"
+	OutcomeRejectedURL      = "rejected_url"
+	OutcomePublished        = "published"
 )
 
 // Unknown is the fallback label value when an input cannot be classified

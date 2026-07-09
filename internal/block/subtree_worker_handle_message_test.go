@@ -1027,3 +1027,39 @@ func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsErr
 		t.Errorf("expected counter Decrement called once on DLQ path, got %d", got)
 	}
 }
+
+// TestHandleMessage_InvalidDataHubURL_DLQOnFirstAttempt verifies the
+// permanent-failure classification: a work item whose DataHub URL fails
+// SSRF validation (a peer announcing an unfetchable address) routes to the
+// DLQ branch on its FIRST attempt — no retry budget burned, counter still
+// decremented exactly once so BLOCK_PROCESSED can fire. Uses a bad-scheme
+// URL so validation fails syntactically with no DNS dependency.
+func TestHandleMessage_InvalidDataHubURL_DLQOnFirstAttempt(t *testing.T) {
+	cbMock := &callbackFailingProducer{}
+	retryMock := &callbackFailingProducer{}
+	dlqMock := &callbackFailingProducer{}
+
+	counter := newCountingSubtreeCounter()
+	_ = counter.Init("block-invalid-url", 1, nil)
+	counter.initCalls = 0
+
+	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, &stubStumpStore{}, counter, 5)
+	// Production wiring: the worker's client validates URLs via the SSRF guard.
+	svc.dataHubClient = datahub.NewClientWithSSRFGuard(5, 0, 0, 0, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// Subtree NOT in the blob store → fetch path → SSRF validation fails.
+	value := makeWorkMessageBytes(t, "block-invalid-url", "aa11", "ftp://asset:8090/api/v1", 0)
+	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
+		t.Fatalf("handleMessage: expected nil after DLQ hand-off, got: %v", err)
+	}
+
+	if got := retryMock.sentCount(); got != 0 {
+		t.Errorf("invalid URL must not retry; expected 0 retry publishes, got %d", got)
+	}
+	if got := dlqMock.sentCount(); got != 1 {
+		t.Errorf("expected exactly 1 DLQ publish on first attempt, got %d", got)
+	}
+	if got := counter.decrementCount(); got != 1 {
+		t.Errorf("expected counter Decrement exactly once, got %d", got)
+	}
+}

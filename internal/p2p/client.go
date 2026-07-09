@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/logfields"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -73,6 +75,19 @@ type Client struct {
 	// nodeStatusReceived counts every node_status message handled, exposed
 	// via Health.Details so operators can see discovery is alive.
 	nodeStatusReceived atomic.Int64
+
+	// lookupIP resolves hostnames for announcement DataHub URL validation.
+	// nil means net.LookupIP (production); tests inject a stub so hermetic
+	// hostnames don't hit real DNS.
+	lookupIP func(host string) ([]net.IP, error)
+
+	// validatedDataHubURLs caches announcement DataHub URLs that passed
+	// SSRF/DNS validation, value = expiry UnixNano. Subtree announcements
+	// arrive continuously, so without this every announcement would pay a
+	// synchronous DNS lookup. Only successes are cached; rejections re-run
+	// so a peer that fixes its DNS is accepted as soon as it resolves.
+	// Mirrors validatedURLs in the datahub HTTP client.
+	validatedDataHubURLs sync.Map
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -450,6 +465,45 @@ func (c *Client) processBlockMessages(ctx context.Context, ch <-chan teranode.Bl
 	}
 }
 
+// announcementURLValidationTTL bounds how long a successful SSRF/DNS
+// validation of an announcement DataHub URL is trusted before being
+// re-checked. Matches the datahub HTTP client's validation TTL posture.
+const announcementURLValidationTTL = 5 * time.Minute
+
+// validAnnouncementDataHubURL reports whether an announcement's DataHub URL
+// passes the same SSRF/DNS validation the discovery path applies
+// (handleNodeStatusMessage) and the fetchers re-apply at fetch time. A bad
+// URL here — typically a peer advertising its cluster-internal service name
+// like http://asset:8090 — is deterministic: every downstream fetch fails,
+// burning the retry budget straight into the DLQ (and the alert on it) for
+// BOTH the SEEN and STUMP pipelines. Rejecting at intake keeps the
+// announcement out of Kafka entirely.
+//
+// Successful validations are cached for announcementURLValidationTTL;
+// rejections always re-run so a peer that fixes its config is accepted on
+// its next announcement.
+func (c *Client) validAnnouncementDataHubURL(kind, peerID, rawURL string) bool {
+	if exp, ok := c.validatedDataHubURLs.Load(rawURL); ok {
+		if time.Now().UnixNano() < exp.(int64) {
+			return true
+		}
+		c.validatedDataHubURLs.Delete(rawURL)
+	}
+	if err := ssrfguard.ValidateURL(rawURL, c.allowPrivateIPs, c.lookupIP); err != nil {
+		metrics.P2PAnnouncementsTotal.WithLabelValues(kind, metrics.OutcomeRejectedURL).Inc()
+		c.Logger.Warn(
+			"rejected announcement with invalid datahub url",
+			"kind", kind,
+			logfields.PeerID(peerID),
+			logfields.DataHubURL(rawURL),
+			"error", err,
+		)
+		return false
+	}
+	c.validatedDataHubURLs.Store(rawURL, time.Now().Add(announcementURLValidationTTL).UnixNano())
+	return true
+}
+
 // handleSubtreeMessage maps a teranode SubtreeMessage to a Kafka SubtreeMessage and publishes it.
 //
 // Returns a non-nil error only for terminal/fatal conditions (currently
@@ -459,7 +513,8 @@ func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeM
 	// Root span: this announcement is the origin of its own trace (see
 	// startAnnouncementSpan). The hash is an ATTRIBUTE, never the span name,
 	// to keep cardinality bounded.
-	ctx, span := startAnnouncementSpan(ctx, "subtree announce",
+	ctx, span := startAnnouncementSpan(
+		ctx, "subtree announce",
 		attribute.String(logfields.KeySubtreeHash, msg.Hash),
 	)
 	defer span.End()
@@ -469,6 +524,16 @@ func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeM
 		logfields.SubtreeHash(msg.Hash),
 		logfields.DataHubURL(msg.DataHubURL),
 	)
+
+	// Subtrees ARE dropped on validation failure: the announced URL is
+	// authoritative for the subtree fetcher (no failover), so every fetch
+	// of this message is doomed — it would burn the retry budget straight
+	// into the DLQ. Other peers announce the same subtree independently,
+	// so a healthy copy still arrives.
+	if !c.validAnnouncementDataHubURL(metrics.AnnouncementKindSubtree, msg.PeerID, msg.DataHubURL) {
+		return nil
+	}
+	metrics.P2PAnnouncementsTotal.WithLabelValues(metrics.AnnouncementKindSubtree, metrics.OutcomePublished).Inc()
 
 	kafkaMsg := kafka.SubtreeMessage{
 		Hash:       msg.Hash,
@@ -506,7 +571,8 @@ func (c *Client) handleBlockMessage(ctx context.Context, msg teranode.BlockMessa
 	// Root span: this announcement is the origin of its own trace (see
 	// startAnnouncementSpan). The hash is an ATTRIBUTE, never the span name,
 	// to keep cardinality bounded.
-	ctx, span := startAnnouncementSpan(ctx, "block announce",
+	ctx, span := startAnnouncementSpan(
+		ctx, "block announce",
 		attribute.String(logfields.KeyBlockHash, msg.Hash),
 	)
 	defer span.End()
@@ -520,6 +586,15 @@ func (c *Client) handleBlockMessage(ctx context.Context, msg teranode.BlockMessa
 		logfields.BlockHeight(msg.Height),
 		logfields.DataHubURL(msg.DataHubURL),
 	)
+
+	// Blocks are validated but NEVER dropped: the block processor fails
+	// over across the DataHub registry (fetchBlockMetadataWithFailover), so
+	// a block announced with an unusable URL is still recoverable from a
+	// healthy peer. Dropping it here could lose the block entirely if no
+	// other peer re-announces. The WARN + rejected_url count still surface
+	// the misbehaving peer.
+	c.validAnnouncementDataHubURL(metrics.AnnouncementKindBlock, msg.PeerID, msg.DataHubURL)
+	metrics.P2PAnnouncementsTotal.WithLabelValues(metrics.AnnouncementKindBlock, metrics.OutcomePublished).Inc()
 
 	kafkaMsg := kafka.BlockMessage{
 		Hash:       msg.Hash,
