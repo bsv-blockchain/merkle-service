@@ -368,7 +368,7 @@ func TestHandleMessage_CallbackPublishFailure_RetriesAndDoesNotDecrement(t *test
 	defer server.Close()
 
 	const blockHash = "block-cb-fail"
-	const subtreeHash = "subtree-cb-fail"
+	subtreeHash := contentAddressOf(t, subtreePayload)
 
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
@@ -420,7 +420,7 @@ func TestHandleMessage_CallbackPublishFailure_AtMaxAttempts_DLQAndDecrement(t *t
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, maxAttempts)
 
 	// AttemptCount = maxAttempts - 1 → next attempt is terminal → DLQ.
-	value := makeWorkMessageBytes(t, "block-dlq", "subtree-dlq", server.URL, maxAttempts-1)
+	value := makeWorkMessageBytes(t, "block-dlq", contentAddressOf(t, subtreePayload), server.URL, maxAttempts-1)
 	err := svc.handleMessage(context.Background(), &kafka.Message{Value: value})
 	if err != nil {
 		t.Fatalf("handleMessage at max attempts: expected nil error after DLQ publish, got: %v", err)
@@ -459,7 +459,7 @@ func TestHandleMessage_HappyPath_DecrementsExactlyOnce(t *testing.T) {
 
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
-	value := makeWorkMessageBytes(t, "block-happy", "subtree-happy", server.URL, 0)
+	value := makeWorkMessageBytes(t, "block-happy", contentAddressOf(t, subtreePayload), server.URL, 0)
 	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage happy path: expected nil error, got: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestHandleMessage_CounterNotFound_AcksWithoutRetry(t *testing.T) {
 
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
-	value := makeWorkMessageBytes(t, "block-gone", "subtree-gone", server.URL, 0)
+	value := makeWorkMessageBytes(t, "block-gone", contentAddressOf(t, subtreePayload), server.URL, 0)
 	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage with missing counter: expected nil error (ack), got: %v", err)
 	}
@@ -531,7 +531,7 @@ func TestHandleMessage_StumpStoreFailure_RetriesAndDoesNotDecrement(t *testing.T
 
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
-	value := makeWorkMessageBytes(t, "block-blob-fail", "subtree-blob-fail", server.URL, 0)
+	value := makeWorkMessageBytes(t, "block-blob-fail", contentAddressOf(t, subtreePayload), server.URL, 0)
 	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage stump-store failure: expected nil error (retry path), got: %v", err)
 	}
@@ -574,7 +574,7 @@ func TestHandleMessage_DecrementFailureOnSuccessPath_RetriesAndPreservesCount(t 
 
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 
-	value := makeWorkMessageBytes(t, blockHash, "subtree-dec-fail", server.URL, 0)
+	value := makeWorkMessageBytes(t, blockHash, contentAddressOf(t, subtreePayload), server.URL, 0)
 	err := svc.handleMessage(context.Background(), &kafka.Message{Value: value})
 	if err != nil {
 		// Below max attempts, handleTransientFailure re-publishes for retry
@@ -633,7 +633,7 @@ func TestHandleMessage_DecrementFailureOnDLQPath_ReturnsError(t *testing.T) {
 	const maxAttempts = 3
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, maxAttempts)
 
-	value := makeWorkMessageBytes(t, blockHash, "subtree-dlq-dec-fail", server.URL, maxAttempts-1)
+	value := makeWorkMessageBytes(t, blockHash, contentAddressOf(t, subtreePayload), server.URL, maxAttempts-1)
 	err := svc.handleMessage(context.Background(), &kafka.Message{Value: value})
 	if err == nil {
 		t.Fatalf("expected non-nil error when Decrement fails on DLQ path so consumer redelivers, got nil")
@@ -684,7 +684,7 @@ func TestHandleMessage_HappyPath_DecrementToZeroEmitsBlockProcessed(t *testing.T
 	// Wire up urlRegistry so emitBlockProcessed has somewhere to publish.
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
-	value := makeWorkMessageBytes(t, blockHash, "subtree-zero-emit", server.URL, 0)
+	value := makeWorkMessageBytes(t, blockHash, contentAddressOf(t, subtreePayload), server.URL, 0)
 	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage happy path: expected nil error, got: %v", err)
 	}
@@ -893,7 +893,7 @@ func TestHandleMessage_BlockProcessedEmitFailure_RetriesAndDoesNotAck(t *testing
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
-	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-fail", server.URL, 0)
+	value := makeWorkMessageBytes(t, blockHash, contentAddressOf(t, subtreePayload), server.URL, 0)
 	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		// Below max attempts, handleTransientFailure re-publishes for retry
 		// and returns nil — the work item was redirected through the retry
@@ -951,7 +951,7 @@ func TestHandleMessage_BlockProcessedEmitRetry_ReEmitsOnRedelivery(t *testing.T)
 	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, stumpStore, counter, 5)
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
-	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-retry", server.URL, 1)
+	value := makeWorkMessageBytes(t, blockHash, contentAddressOf(t, subtreePayload), server.URL, 1)
 	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
 		t.Fatalf("handleMessage on redelivery: expected nil, got: %v", err)
 	}
@@ -1008,7 +1008,7 @@ func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsErr
 	svc.urlRegistry = &fakeURLRegistry{urls: []string{"http://cb.example.test/hook"}}
 
 	// AttemptCount = maxAttempts - 1 → next attempt is terminal → DLQ.
-	value := makeWorkMessageBytes(t, blockHash, "subtree-emit-dlq", server.URL, maxAttempts-1)
+	value := makeWorkMessageBytes(t, blockHash, contentAddressOf(t, subtreePayload), server.URL, maxAttempts-1)
 	err := svc.handleMessage(context.Background(), &kafka.Message{Value: value})
 	if err == nil {
 		t.Fatalf("expected non-nil error so consumer redelivers when emit fails on DLQ path, got nil")
@@ -1025,5 +1025,41 @@ func TestHandleMessage_BlockProcessedEmitFailure_AtMaxAttempts_DLQPathReturnsErr
 	// exactly once.
 	if got := counter.decrementCount(); got != 1 {
 		t.Errorf("expected counter Decrement called once on DLQ path, got %d", got)
+	}
+}
+
+// TestHandleMessage_InvalidDataHubURL_DLQOnFirstAttempt verifies the
+// permanent-failure classification: a work item whose DataHub URL fails
+// SSRF validation (a peer announcing an unfetchable address) routes to the
+// DLQ branch on its FIRST attempt — no retry budget burned, counter still
+// decremented exactly once so BLOCK_PROCESSED can fire. Uses a bad-scheme
+// URL so validation fails syntactically with no DNS dependency.
+func TestHandleMessage_InvalidDataHubURL_DLQOnFirstAttempt(t *testing.T) {
+	cbMock := &callbackFailingProducer{}
+	retryMock := &callbackFailingProducer{}
+	dlqMock := &callbackFailingProducer{}
+
+	counter := newCountingSubtreeCounter()
+	_ = counter.Init("block-invalid-url", 1, nil)
+	counter.initCalls = 0
+
+	svc := newWorkerForHandleMessage(t, cbMock, retryMock, dlqMock, &stubStumpStore{}, counter, 5)
+	// Production wiring: the worker's client validates URLs via the SSRF guard.
+	svc.dataHubClient = datahub.NewClientWithSSRFGuard(5, 0, 0, 0, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// Subtree NOT in the blob store → fetch path → SSRF validation fails.
+	value := makeWorkMessageBytes(t, "block-invalid-url", "aa11", "ftp://asset:8090/api/v1", 0)
+	if err := svc.handleMessage(context.Background(), &kafka.Message{Value: value}); err != nil {
+		t.Fatalf("handleMessage: expected nil after DLQ hand-off, got: %v", err)
+	}
+
+	if got := retryMock.sentCount(); got != 0 {
+		t.Errorf("invalid URL must not retry; expected 0 retry publishes, got %d", got)
+	}
+	if got := dlqMock.sentCount(); got != 1 {
+		t.Errorf("expected exactly 1 DLQ publish on first attempt, got %d", got)
+	}
+	if got := counter.decrementCount(); got != 1 {
+		t.Errorf("expected counter Decrement exactly once, got %d", got)
 	}
 }

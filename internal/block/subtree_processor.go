@@ -92,6 +92,12 @@ func ProcessBlockSubtree(
 		if err != nil {
 			return nil, fmt.Errorf("fetching subtree %s from DataHub: %w", subtreeHash, err)
 		}
+		// Content-address guard: STUMPs built from wrong leaves produce
+		// proofs the canonical chain rejects. Surface a mismatch as a fetch
+		// error so the normal retry/DLQ path handles it.
+		if vErr := verifySubtreeContentAddress(rawData, subtreeHash); vErr != nil {
+			return nil, fmt.Errorf("verifying subtree %s from DataHub: %w", subtreeHash, vErr)
+		}
 		// Store for potential future use.
 		if storeErr := subtreeStore.StoreSubtree(subtreeHash, rawData, blockHeight); storeErr != nil {
 			logger.Warn("failed to store fetched subtree", logfields.SubtreeHash(subtreeHash), "error", storeErr)

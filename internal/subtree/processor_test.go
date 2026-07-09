@@ -2477,3 +2477,113 @@ func TestHandleMessage_TransientErrorStillRetries(t *testing.T) {
 		t.Errorf("expected dlq delta=0, got %d", got)
 	}
 }
+
+// TestHandleMessage_InvalidDataHubURLGoesStraightToDLQ mirrors the 404
+// permanent-failure regression: an SSRF/DNS-invalid DataHub URL (a peer
+// announcing an address we can never fetch, e.g. its cluster-internal
+// service name) must NOT burn the retry budget into outcome="dlq" — it
+// routes straight to the DLQ topic as permanent_failure. Uses a bad-scheme
+// URL so validation fails syntactically with no DNS dependency.
+func TestHandleMessage_InvalidDataHubURLGoesStraightToDLQ(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	retryMock := &mockSyncProducer{}
+	dlqMock := &mockSyncProducer{}
+
+	p := &Processor{
+		cfg: &config.Config{
+			Subtree: config.SubtreeConfig{MaxAttempts: 5, StorageMode: "stream"},
+		},
+		registrationStore: &mockRegStore{},
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(&mockSyncProducer{}, "callback-test", logger),
+		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		dataHubClient:     datahub.NewClientWithSSRFGuard(5, 0, 0, 0, false, logger),
+	}
+	p.InitBase("subtree-invalid-url-permanent-test")
+	p.Logger = logger
+
+	subtreeMsg := &kafka.SubtreeMessage{
+		Hash:         "subtree-invalid-url",
+		DataHubURL:   "ftp://asset:8090/api/v1", // bad scheme -> ssrfguard.ErrInvalidURL, no DNS
+		AttemptCount: 0,
+	}
+	value, encErr := subtreeMsg.Encode()
+	if encErr != nil {
+		t.Fatalf("encode subtree msg: %v", encErr)
+	}
+
+	beforePermanent := subtreeCount(metrics.OutcomePermanentFailure)
+	beforeDLQ := subtreeCount(metrics.OutcomeDLQ)
+	if err := p.handleMessage(t.Context(), &kafka.Message{Value: value}); err != nil {
+		t.Fatalf("handleMessage: expected nil (permanent → DLQ returns nil), got: %v", err)
+	}
+
+	if got := len(retryMock.getMessages()); got != 0 {
+		t.Errorf("invalid URL must not retry; expected 0 retry publishes, got %d", got)
+	}
+	if got := len(dlqMock.getMessages()); got != 1 {
+		t.Fatalf("expected exactly 1 DLQ publish, got %d", got)
+	}
+	if got := subtreeCount(metrics.OutcomePermanentFailure) - beforePermanent; got != 1 {
+		t.Errorf("expected permanent_failure delta=1, got %d", got)
+	}
+	if got := subtreeCount(metrics.OutcomeDLQ) - beforeDLQ; got != 0 {
+		t.Errorf("expected dlq delta=0 (must not count toward the DLQ alert), got %d", got)
+	}
+}
+
+// TestHandleMessage_ZeroTxidSubtreeIsProcessedNotDLQ pins the semantics the
+// on-call asked about when the DLQ alert first fired: a subtree with zero
+// txids (and by extension a block whose subtrees carry no registered
+// transactions) acks as outcome="processed" — it can never reach the DLQ
+// or the alert on it.
+func TestHandleMessage_ZeroTxidSubtreeIsProcessedNotDLQ(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// DataHub serves an EMPTY subtree payload: zero 32-byte hashes.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	retryMock := &mockSyncProducer{}
+	dlqMock := &mockSyncProducer{}
+
+	p := &Processor{
+		cfg: &config.Config{
+			Subtree: config.SubtreeConfig{MaxAttempts: 5, StorageMode: "stream"},
+		},
+		registrationStore: &mockRegStore{},
+		seenCounterStore:  &mockSeenCounter{},
+		callbackProducer:  kafka.NewTestProducer(&mockSyncProducer{}, "callback-test", logger),
+		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		dataHubClient:     datahub.NewClient(5, 0, logger),
+	}
+	p.InitBase("subtree-zero-txid-test")
+	p.Logger = logger
+
+	subtreeMsg := &kafka.SubtreeMessage{Hash: "subtree-empty", DataHubURL: server.URL}
+	value, encErr := subtreeMsg.Encode()
+	if encErr != nil {
+		t.Fatalf("encode subtree msg: %v", encErr)
+	}
+
+	beforeProcessed := subtreeCount(metrics.OutcomeProcessed)
+	beforeDLQ := subtreeCount(metrics.OutcomeDLQ)
+	if err := p.handleMessage(t.Context(), &kafka.Message{Value: value}); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+
+	if got := subtreeCount(metrics.OutcomeProcessed) - beforeProcessed; got != 1 {
+		t.Errorf("expected processed delta=1, got %d", got)
+	}
+	if got := subtreeCount(metrics.OutcomeDLQ) - beforeDLQ; got != 0 {
+		t.Errorf("zero-txid subtree must never DLQ; got delta %d", got)
+	}
+	if got := len(retryMock.getMessages()) + len(dlqMock.getMessages()); got != 0 {
+		t.Errorf("expected no retry/DLQ publishes, got %d", got)
+	}
+}

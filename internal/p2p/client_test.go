@@ -3,16 +3,21 @@ package p2p
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	teranode "github.com/bsv-blockchain/teranode/services/p2p"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 )
 
 // capturedMessage records a published key/value for assertion in tests.
@@ -70,6 +75,11 @@ func newTestClient(t *testing.T) (*Client, *mockSyncProducer, *mockSyncProducer)
 		false, // allowPrivateIPs
 		logger,
 	)
+	// Hermetic DNS: announcement DataHub URL validation resolves hostnames;
+	// map every test hostname to a public address so no test touches real DNS.
+	client.lookupIP = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
 
 	return client, mockSubtreeProducer, mockBlockProducer
 }
@@ -462,8 +472,11 @@ func TestHandleSubtreeMessage_PropagatesTerminalError(t *testing.T) {
 	producer := kafka.NewTestProducer(mockProducer, "subtree", logger)
 
 	client := NewClient(config.P2PConfig{}, producer, producer, nil, false, logger)
+	client.lookupIP = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
 
-	err := client.handleSubtreeMessage(context.Background(), teranode.SubtreeMessage{Hash: "h"})
+	err := client.handleSubtreeMessage(context.Background(), teranode.SubtreeMessage{Hash: "h", DataHubURL: "https://dh.example/api"})
 	if !errors.Is(err, ErrPublishExhausted) {
 		t.Fatalf("expected ErrPublishExhausted, got %v", err)
 	}
@@ -568,3 +581,109 @@ func (f *flakyProducer) Produce(_ context.Context, _ string, _ []byte) (int32, i
 }
 
 func (f *flakyProducer) Close() error { return nil }
+
+// --- announcement DataHub URL validation tests ---
+
+// unresolvableLookup simulates DNS failure for every host — the shape of a
+// peer announcing its cluster-internal service name (http://asset:8090).
+func unresolvableLookup(host string) ([]net.IP, error) {
+	return nil, fmt.Errorf("lookup %s: no such host", host)
+}
+
+// TestHandleSubtreeMessage_RejectsUnresolvableDataHubURL verifies the intake
+// guard: a subtree announcement whose DataHub URL cannot resolve is dropped
+// before Kafka — downstream fetches are doomed and used to burn straight
+// into the DLQ (and the alert on it).
+func TestHandleSubtreeMessage_RejectsUnresolvableDataHubURL(t *testing.T) {
+	client, mockProducer, _ := newTestClient(t)
+	client.lookupIP = unresolvableLookup
+
+	before := testutil.ToFloat64(metrics.P2PAnnouncementsTotal.WithLabelValues(metrics.AnnouncementKindSubtree, metrics.OutcomeRejectedURL))
+
+	msg := teranode.SubtreeMessage{
+		Hash:       "subtree-bad-peer",
+		DataHubURL: "http://asset:8090/api/v1",
+		PeerID:     "peer-bad",
+	}
+	if err := client.handleSubtreeMessage(context.Background(), msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := mockProducer.getMessages(); len(got) != 0 {
+		t.Fatalf("expected announcement dropped, got %d published", len(got))
+	}
+	after := testutil.ToFloat64(metrics.P2PAnnouncementsTotal.WithLabelValues(metrics.AnnouncementKindSubtree, metrics.OutcomeRejectedURL))
+	if after-before != 1 {
+		t.Errorf("rejected_url counter delta = %v, want 1", after-before)
+	}
+}
+
+// TestHandleBlockMessage_PublishesDespiteInvalidDataHubURL verifies blocks
+// are validated but never dropped: the block processor fails over across the
+// DataHub registry, so the block is still recoverable from a healthy peer.
+func TestHandleBlockMessage_PublishesDespiteInvalidDataHubURL(t *testing.T) {
+	client, _, mockProducer := newTestClient(t)
+	client.lookupIP = unresolvableLookup
+
+	before := testutil.ToFloat64(metrics.P2PAnnouncementsTotal.WithLabelValues(metrics.AnnouncementKindBlock, metrics.OutcomeRejectedURL))
+
+	msg := teranode.BlockMessage{
+		Hash:       "block-bad-peer",
+		Height:     7,
+		DataHubURL: "http://asset:8090/api/v1",
+	}
+	if err := client.handleBlockMessage(context.Background(), msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := mockProducer.getMessages(); len(got) != 1 {
+		t.Fatalf("expected block published despite invalid URL, got %d", len(got))
+	}
+	after := testutil.ToFloat64(metrics.P2PAnnouncementsTotal.WithLabelValues(metrics.AnnouncementKindBlock, metrics.OutcomeRejectedURL))
+	if after-before != 1 {
+		t.Errorf("rejected_url counter delta = %v, want 1 (validated even though published)", after-before)
+	}
+}
+
+// TestValidAnnouncementDataHubURL_CachesSuccess verifies a passing URL is
+// not re-resolved within the TTL — subtree announcements arrive continuously
+// and must not pay a DNS lookup each time.
+func TestValidAnnouncementDataHubURL_CachesSuccess(t *testing.T) {
+	client, _, _ := newTestClient(t)
+	calls := 0
+	client.lookupIP = func(string) ([]net.IP, error) {
+		calls++
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+
+	for i := 0; i < 3; i++ {
+		if !client.validAnnouncementDataHubURL(metrics.AnnouncementKindSubtree, "peer", "https://dh.example/api") {
+			t.Fatalf("iteration %d: expected valid", i)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("DNS lookups = %d, want 1 (cached after first success)", calls)
+	}
+}
+
+// TestValidAnnouncementDataHubURL_RejectionNotCached verifies rejections
+// re-run validation, so a peer that fixes its DNS is accepted on its next
+// announcement rather than being remembered as bad.
+func TestValidAnnouncementDataHubURL_RejectionNotCached(t *testing.T) {
+	client, _, _ := newTestClient(t)
+	healthy := false
+	client.lookupIP = func(host string) ([]net.IP, error) {
+		if healthy {
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		}
+		return nil, fmt.Errorf("lookup %s: no such host", host)
+	}
+
+	if client.validAnnouncementDataHubURL(metrics.AnnouncementKindSubtree, "peer", "https://dh.example/api") {
+		t.Fatal("expected rejection while unresolvable")
+	}
+	healthy = true
+	if !client.validAnnouncementDataHubURL(metrics.AnnouncementKindSubtree, "peer", "https://dh.example/api") {
+		t.Fatal("expected acceptance after DNS recovers")
+	}
+}
