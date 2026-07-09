@@ -1,6 +1,7 @@
 package block
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	subtreepkg "github.com/bsv-blockchain/go-subtree"
 
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
@@ -224,6 +227,7 @@ func TestFetchSubtreeRawWithFailover_PrunedPreferredPeer(t *testing.T) {
 
 	want := make([]byte, 64) // two 32-byte nodes
 	want[0], want[32] = 0x01, 0x02
+	subtreeHash := contentAddressOf(t, want)
 	var goodHit bool
 	good := subtreeOnlyServer(want, &goodHit)
 	defer good.Close()
@@ -232,7 +236,7 @@ func TestFetchSubtreeRawWithFailover_PrunedPreferredPeer(t *testing.T) {
 	p := buildProcessorWithRegistry(t, &failingSyncProducer{failAt: -1}, reg)
 
 	raw, resolved, err := p.fetchSubtreeRawWithFailover(
-		context.Background(), "blk-pruned", testSubtreeHash, pruned.URL)
+		context.Background(), "blk-pruned", subtreeHash, pruned.URL)
 	if err != nil {
 		t.Fatalf("expected failover to the registry peer, got error: %v", err)
 	}
@@ -252,6 +256,7 @@ func TestFetchSubtreeRawWithFailover_PrunedPreferredPeer(t *testing.T) {
 func TestFetchSubtreeRawWithFailover_PreferredServes(t *testing.T) {
 	want := make([]byte, 32)
 	want[0] = 0xAB
+	subtreeHash := contentAddressOf(t, want)
 	good := subtreeOnlyServer(want, nil)
 	defer good.Close()
 
@@ -266,7 +271,7 @@ func TestFetchSubtreeRawWithFailover_PreferredServes(t *testing.T) {
 	p := buildProcessorWithRegistry(t, &failingSyncProducer{failAt: -1}, reg)
 
 	raw, resolved, err := p.fetchSubtreeRawWithFailover(
-		context.Background(), "blk", testSubtreeHash, good.URL)
+		context.Background(), "blk", subtreeHash, good.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -300,5 +305,58 @@ func TestFetchSubtreeRawWithFailover_AllPeersMissing(t *testing.T) {
 	}
 	if !errors.Is(err, datahub.ErrNotFound) {
 		t.Errorf("error should wrap datahub.ErrNotFound, got: %v", err)
+	}
+}
+
+// contentAddressOf computes the content address (placeholder-based subtree
+// root) of raw DataHub subtree bytes — what a block binary would name them as.
+func contentAddressOf(t *testing.T, raw []byte) string {
+	t.Helper()
+	nodes, err := datahub.ParseRawNodes(raw)
+	if err != nil {
+		t.Fatalf("parse raw nodes: %v", err)
+	}
+	root := (&subtreepkg.Subtree{Nodes: nodes}).RootHash()
+	if root == nil {
+		t.Fatal("nil root")
+		return "" // unreachable after Fatal; guards the deref below
+	}
+	return root.String()
+}
+
+// TestFetchSubtreeRawWithFailover_ContentMismatchFailsOver verifies the
+// content-address guard: a peer that serves parseable-but-WRONG subtree bytes
+// (truncated, reordered, or substituted) is treated like a failed fetch and
+// the loop continues to a peer serving the authentic leaves.
+func TestFetchSubtreeRawWithFailover_ContentMismatchFailsOver(t *testing.T) {
+	correct := make([]byte, 64)
+	correct[0], correct[32] = 0x01, 0x02
+	subtreeHash := contentAddressOf(t, correct)
+
+	wrong := make([]byte, 64)
+	wrong[0], wrong[32] = 0xEE, 0xFF // parseable, different content
+	liar := subtreeOnlyServer(wrong, nil)
+	defer liar.Close()
+
+	var goodHit bool
+	good := subtreeOnlyServer(correct, &goodHit)
+	defer good.Close()
+
+	reg := &stubDataHubRegistry{urls: []string{good.URL}}
+	p := buildProcessorWithRegistry(t, &failingSyncProducer{failAt: -1}, reg)
+
+	raw, resolved, err := p.fetchSubtreeRawWithFailover(
+		context.Background(), "blk-liar", subtreeHash, liar.URL)
+	if err != nil {
+		t.Fatalf("expected failover past the lying peer, got: %v", err)
+	}
+	if resolved != good.URL {
+		t.Errorf("resolved = %q, want honest peer %q", resolved, good.URL)
+	}
+	if !bytes.Equal(raw, correct) {
+		t.Error("returned bytes are not the authentic leaves")
+	}
+	if !goodHit {
+		t.Error("honest peer was never queried")
 	}
 }
