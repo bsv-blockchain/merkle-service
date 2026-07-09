@@ -347,3 +347,254 @@ func TestBuildBlockProcessedData_MetaHeaderPreferred(t *testing.T) {
 		t.Fatalf("MerkleRoot = %q, want meta-derived %q", data.MerkleRoot, metaRoot.String())
 	}
 }
+
+// teranodeStyleHeaderRoot computes the block merkle root the way teranode
+// does (model.Block CheckMerkleRoot): corrected subtree-0 root (real coinbase
+// at leaf 0), all middle roots as-is, and the FINAL root lifted to the first
+// subtree's height when its subtree is shorter.
+func teranodeStyleHeaderRoot(t *testing.T, subtreeNodes [][]subtreepkg.Node, cbTxID chainhash.Hash) chainhash.Hash {
+	t.Helper()
+	n := len(subtreeNodes)
+	tops := make([]subtreepkg.Node, n)
+	for i, nodes := range subtreeNodes {
+		if i == 0 {
+			real := append([]subtreepkg.Node(nil), nodes...)
+			real[0] = subtreepkg.Node{Hash: cbTxID}
+			tops[0] = subtreepkg.Node{Hash: rootOf(t, real)}
+			continue
+		}
+		root := rootOf(t, nodes)
+		if i == n-1 {
+			// lift to the first subtree's height
+			h0, hLast := 0, 0
+			for 1<<h0 < len(subtreeNodes[0]) {
+				h0++
+			}
+			for 1<<hLast < len(nodes) {
+				hLast++
+			}
+			lift := h0 - hLast
+			for l := 0; l < lift; l++ {
+				buf := append(append([]byte{}, root[:]...), root[:]...)
+				copy(root[:], chainhash.DoubleHashB(buf))
+			}
+		}
+		tops[i] = subtreepkg.Node{Hash: root}
+	}
+	if n == 1 {
+		return tops[0].Hash
+	}
+	return rootOf(t, tops)
+}
+
+// TestBuildCoinbaseBUMP_LiftedFinalSubtree_FoldsToHeaderRoot is the
+// regression test for the mainnet 954978–956998 proof-corruption bug: blocks
+// whose FINAL subtree is shorter than half the first subtree's capacity have
+// their final root height-lifted by teranode before top-tree composition.
+// The production path (liftedSubtreeRoots + buildCoinbaseSiblings +
+// CoinbaseRootFromSiblings) must reproduce the canonical header root for
+// these shapes — the pre-fix code did not (all-equal-size shapes only).
+func TestBuildCoinbaseBUMP_LiftedFinalSubtree_FoldsToHeaderRoot(t *testing.T) {
+	cases := []struct {
+		name   string
+		shapes []int // leaves per subtree; first must be a power of two
+	}{
+		{"2subtrees_lift1", []int{8, 3}},         // h3 vs h2 → lift 1
+		{"2subtrees_lift2", []int{8, 2}},         // h3 vs h1 → lift 2
+		{"2subtrees_lift3", []int{8, 1}},         // h3 vs h0 → lift 3
+		{"4subtrees_lift2", []int{8, 8, 8, 2}},   // mirrors block 955117 (…ed8668a5)
+		{"2subtrees_mainnet", []int{32, 13}},     // mirrors block 954978 (…2cd6) shape ratio
+		{"final_above_half_nolift", []int{8, 5}}, // h3 vs h3 → no lift; must still pass
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cb := testHash(999_999)
+			subtreeNodes := make([][]subtreepkg.Node, len(tc.shapes))
+			total := uint64(0)
+			for i, leaves := range tc.shapes {
+				nodes := make([]subtreepkg.Node, leaves)
+				for j := 0; j < leaves; j++ {
+					nodes[j] = subtreepkg.Node{Hash: testHash(uint64(i*10_000 + j + 1))}
+				}
+				if i == 0 {
+					nodes[0] = subtreepkg.Node{Hash: testHash(0)} // placeholder
+				}
+				subtreeNodes[i] = nodes
+				total += uint64(leaves) //nolint:gosec // test shapes are tiny positive constants
+			}
+			headerRoot := teranodeStyleHeaderRoot(t, subtreeNodes, cb)
+
+			roots := make([]chainhash.Hash, len(subtreeNodes))
+			for i := range subtreeNodes {
+				roots[i] = rootOf(t, subtreeNodes[i])
+			}
+
+			// PRODUCTION path: lift, then siblings, then fold.
+			topRoots, err := liftedSubtreeRoots(roots, len(subtreeNodes[0]), total)
+			if err != nil {
+				t.Fatalf("liftedSubtreeRoots: %v", err)
+			}
+			siblings, err := buildCoinbaseSiblings(subtreeNodes[0], topRoots)
+			if err != nil {
+				t.Fatalf("buildCoinbaseSiblings: %v", err)
+			}
+			computed := stump.CoinbaseRootFromSiblings(cb[:], siblings)
+			if !bytes.Equal(computed, headerRoot[:]) {
+				gotHash, _ := chainhash.NewHash(computed)
+				t.Fatalf("folded root = %s, want canonical header root %s", gotHash, headerRoot)
+			}
+
+			// The encoded BUMP must parse with go-sdk and compute the same root.
+			encoded := stump.EncodeCoinbaseBUMP(123, cb[:], siblings)
+			mp, err := sdktx.NewMerklePathFromBinary(encoded)
+			if err != nil {
+				t.Fatalf("go-sdk parse: %v", err)
+			}
+			sdkCb, _ := sdkchainhash.NewHash(cb[:])
+			gotRoot, err := mp.ComputeRoot(sdkCb)
+			if err != nil {
+				t.Fatalf("go-sdk ComputeRoot: %v", err)
+			}
+			if !bytes.Equal(gotRoot[:], headerRoot[:]) {
+				t.Fatalf("go-sdk computed root = %s, want %s", gotRoot, &headerRoot)
+			}
+
+			// And WITHOUT the lift the old behavior must fail for lift>0 shapes
+			// (guards against the test silently passing for trivial reasons).
+			h0, hLast := 0, 0
+			for 1<<h0 < tc.shapes[0] {
+				h0++
+			}
+			for 1<<hLast < tc.shapes[len(tc.shapes)-1] {
+				hLast++
+			}
+			if h0 > hLast && len(tc.shapes) > 1 {
+				rawSiblings, err := buildCoinbaseSiblings(subtreeNodes[0], roots)
+				if err != nil {
+					t.Fatalf("buildCoinbaseSiblings(raw): %v", err)
+				}
+				if bytes.Equal(stump.CoinbaseRootFromSiblings(cb[:], rawSiblings), headerRoot[:]) {
+					t.Fatal("un-lifted fold unexpectedly matched — test shape does not exercise the lift")
+				}
+			}
+		})
+	}
+}
+
+// TestLiftedSubtreeRoots_Guards locks the failure modes: inconsistent shapes
+// must error (not silently produce wrong roots).
+func TestLiftedSubtreeRoots_Guards(t *testing.T) {
+	r := []chainhash.Hash{testHash(1), testHash(2)}
+	if _, err := liftedSubtreeRoots(r, 6, 9); err == nil {
+		t.Error("non-power-of-two first subtree must error")
+	}
+	if _, err := liftedSubtreeRoots(r, 8, 8); err == nil {
+		t.Error("txCount implying empty final subtree must error")
+	}
+	if _, err := liftedSubtreeRoots(r, 8, 99); err == nil {
+		t.Error("txCount implying oversized final subtree must error")
+	}
+	single := []chainhash.Hash{testHash(1)}
+	if out, err := liftedSubtreeRoots(single, 7, 7); err != nil || len(out) != 1 {
+		t.Errorf("single subtree must pass through unchanged: %v", err)
+	}
+}
+
+// buildTailFixture builds a single-subtree block scenario with a VALID
+// ready-made coinbase BUMP (what teranode ships in the block binary tail).
+func buildTailFixture(t *testing.T, height uint32) (meta *datahub.BlockMetadata, headerHex string, tailHex string) {
+	t.Helper()
+	coinbaseRaw, err := hex.DecodeString(genesisCoinbaseHex)
+	if err != nil {
+		t.Fatalf("decode coinbase: %v", err)
+	}
+	cbTxID := chainhash.DoubleHashB(coinbaseRaw)
+
+	nodes := []subtreepkg.Node{
+		{Hash: testHash(0)}, // placeholder
+		{Hash: testHash(1)},
+		{Hash: testHash(2)},
+		{Hash: testHash(3)},
+	}
+	placeholderRoot := rootOf(t, nodes)
+
+	real := append([]subtreepkg.Node(nil), nodes...)
+	var cbh chainhash.Hash
+	copy(cbh[:], cbTxID)
+	real[0] = subtreepkg.Node{Hash: cbh}
+	headerRoot := rootOf(t, real) // single subtree: corrected root IS the header root
+
+	siblings, err := buildCoinbaseSiblings(nodes, []chainhash.Hash{placeholderRoot})
+	if err != nil {
+		t.Fatalf("siblings: %v", err)
+	}
+	tail := stump.EncodeCoinbaseBUMP(uint64(height), cbTxID, siblings)
+
+	meta = &datahub.BlockMetadata{
+		Height:          height,
+		Subtrees:        []string{placeholderRoot.String()},
+		CoinbaseTxHex:   genesisCoinbaseHex,
+		CoinbaseBUMPHex: hex.EncodeToString(tail),
+	}
+	return meta, buildTestHeaderHex(headerRoot), hex.EncodeToString(tail)
+}
+
+// TestBuildBlockProcessedData_PrefersValidUpstreamCoinbaseBUMP: when the
+// block binary carries a valid ready-made coinbase BUMP, it is used verbatim
+// and NO subtree fetch happens — this is what keeps blocks recoverable after
+// every peer has pruned their subtree data. The processor is constructed
+// WITHOUT a datahub client: any fetch attempt would panic the test.
+func TestBuildBlockProcessedData_PrefersValidUpstreamCoinbaseBUMP(t *testing.T) {
+	p := newBlockDataTestProcessor(t) // no dataHubClient wired
+
+	meta, headerHex, tailHex := buildTailFixture(t, 954978)
+	meta.HeaderHex = headerHex
+	blockMsg := &kafka.BlockMessage{Hash: "tail-block"}
+
+	data := p.buildBlockProcessedData(context.Background(), blockMsg, meta, "http://unused")
+	if data.CoinbaseBUMP != tailHex {
+		t.Fatalf("expected the upstream coinbase BUMP to be used verbatim")
+	}
+	if data.MerkleRoot == "" {
+		t.Fatal("merkle root must still be populated")
+	}
+}
+
+// TestBuildBlockProcessedData_FallsBackWhenUpstreamBUMPInvalid: an upstream
+// BUMP that fails validation (here: wrong block height) must not be trusted —
+// the builder falls back to local reconstruction and still produces a valid
+// coinbase BUMP.
+func TestBuildBlockProcessedData_FallsBackWhenUpstreamBUMPInvalid(t *testing.T) {
+	p := newBlockDataTestProcessor(t)
+
+	meta, headerHex, tailHex := buildTailFixture(t, 954978)
+	meta.HeaderHex = headerHex
+	meta.Height = 954979 // tail encodes 954978 → height mismatch → invalid
+
+	// Reconstruction path needs subtree 0 from the datahub.
+	var subtreeRaw []byte
+	nodes := []subtreepkg.Node{{Hash: testHash(0)}, {Hash: testHash(1)}, {Hash: testHash(2)}, {Hash: testHash(3)}}
+	for _, n := range nodes {
+		subtreeRaw = append(subtreeRaw, n.Hash[:]...)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/subtree/") {
+			_, _ = w.Write(subtreeRaw)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	p.dataHubClient = datahub.NewClient(5, 0, p.Logger)
+	meta.TransactionCount = 4
+
+	blockMsg := &kafka.BlockMessage{Hash: "tail-block-bad"}
+	data := p.buildBlockProcessedData(context.Background(), blockMsg, meta, server.URL)
+	if data.CoinbaseBUMP == "" {
+		t.Fatal("expected reconstruction fallback to produce a coinbase BUMP")
+	}
+	if data.CoinbaseBUMP == tailHex {
+		t.Fatal("invalid upstream BUMP must not be used verbatim")
+	}
+}

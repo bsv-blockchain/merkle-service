@@ -444,6 +444,17 @@ func (p *Processor) fetchSubtreeRawWithFailover(
 		raw, err := p.dataHubClient.FetchSubtreeRaw(probeCtx, a.url, subtreeHash)
 		cancel()
 		if err == nil {
+			// Content-address guard: served leaves must fold to the subtree
+			// hash they were requested by. A peer serving truncated or
+			// otherwise wrong bytes is treated like a failed fetch so the
+			// loop continues to the next peer instead of poisoning proofs.
+			if vErr := verifySubtreeContentAddress(raw, subtreeHash); vErr != nil {
+				lastErr = vErr
+				p.Logger.Warn("DataHub served subtree failing content-address verification; trying next peer",
+					logfields.BlockHash(blockHash), logfields.SubtreeHash(subtreeHash),
+					logfields.DataHubURL(a.url), "error", vErr)
+				continue
+			}
 			if a.url != preferredURL {
 				p.Logger.Info("subtree served by failover DataHub",
 					logfields.BlockHash(blockHash), logfields.SubtreeHash(subtreeHash),

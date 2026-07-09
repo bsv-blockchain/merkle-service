@@ -79,6 +79,9 @@ func TestProcessBlockSubtree_FilterURL_ScopesToRequester(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRawTxids: %v", err)
 	}
+	// The DataHub fetch verifies content-addressing, so the requested
+	// subtree hash must be the served leaves' root.
+	subtreeHash := contentAddressOf(t, rawBytes)
 	const urlA = "https://arcade-a.example/cb"
 	const urlB = "https://arcade-b.example/cb"
 	regStore := &reprocessRegStore{byTxID: map[string][]store.CallbackEntry{
@@ -91,7 +94,7 @@ func TestProcessBlockSubtree_FilterURL_ScopesToRequester(t *testing.T) {
 
 	result, err := ProcessBlockSubtree(
 		context.Background(),
-		"st-fix", 1, "blk-fix", server.URL,
+		subtreeHash, 1, "blk-fix", server.URL,
 		datahub.NewClient(5, 0, testLogger()),
 		subtreeStore,
 		regStore,
@@ -132,6 +135,7 @@ func TestProcessBlockSubtree_FilterURL_NoMatch(t *testing.T) {
 	}))
 	defer server.Close()
 	txids, _ := datahub.ParseRawTxids(rawBytes)
+	subtreeHash := contentAddressOf(t, rawBytes)
 	regStore := &reprocessRegStore{byTxID: map[string][]store.CallbackEntry{
 		txids[0]: {{URL: "https://other.example/cb"}},
 	}}
@@ -141,7 +145,7 @@ func TestProcessBlockSubtree_FilterURL_NoMatch(t *testing.T) {
 
 	result, err := ProcessBlockSubtree(
 		context.Background(),
-		"st-fix", 1, "blk-fix", server.URL,
+		subtreeHash, 1, "blk-fix", server.URL,
 		datahub.NewClient(5, 0, testLogger()),
 		subtreeStore,
 		regStore,

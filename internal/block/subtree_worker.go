@@ -14,6 +14,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
+	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
@@ -374,9 +375,22 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 	return nil
 }
 
+// isPermanentFetchErr reports whether a work-item failure is deterministic
+// for its DataHub URL — the announcing peer advertised an address that
+// fails SSRF/DNS validation (e.g. its cluster-internal service name,
+// http://asset:8090), so retrying the same URL can never succeed. These
+// route straight to the DLQ branch instead of burning the retry budget
+// (and stalling the per-block counter toward its TTL). Intake-side
+// validation in the p2p client drops such announcements before Kafka now;
+// this guards messages already in the topic and any future intake gap.
+func isPermanentFetchErr(err error) bool {
+	return errors.Is(err, ssrfguard.ErrInvalidURL) || errors.Is(err, ssrfguard.ErrBlockedAddress)
+}
+
 // handleTransientFailure either re-publishes the work item to subtree-work for
-// retry or, once max attempts is reached, parks it on subtree-work-dlq and
-// decrements the counter so BLOCK_PROCESSED can still fire (with a missing
+// retry or, once max attempts is reached OR the failure is permanent for the
+// work item's DataHub URL (isPermanentFetchErr), parks it on subtree-work-dlq
+// and decrements the counter so BLOCK_PROCESSED can still fire (with a missing
 // STUMP that arcade will surface as a BUMP build error rather than silent loss).
 //
 // On the DLQ branch the counter is decremented BEFORE the DLQ publish. If the
@@ -392,7 +406,7 @@ func (s *SubtreeWorkerService) handleTransientFailure(ctx context.Context, workM
 	nextAttempt := workMsg.AttemptCount + 1
 	maxAttempts := s.maxAttempts()
 
-	if nextAttempt >= maxAttempts {
+	if nextAttempt >= maxAttempts || isPermanentFetchErr(cause) {
 		s.Logger.Error(
 			"subtree work item exceeded max attempts, routing to DLQ",
 			logfields.SubtreeHash(workMsg.SubtreeHash),
