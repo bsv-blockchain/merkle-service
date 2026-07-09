@@ -175,7 +175,10 @@ func TestFileBlobStore_RejectsDAHNamespaceKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileBlobStore: %v", err)
 	}
-	for _, key := range []string{".dah", ".dah/5/evil.list"} {
+	// Includes shapes that only land inside .dah after filepath.Clean
+	// ("./.dah/…", ".dah//…"): the check must run on the cleaned key, not the
+	// raw one, or a dot-prefixed key forges manifest entries.
+	for _, key := range []string{".dah", ".dah/5/evil.list", "./.dah/5/evil.list", ".dah//5/evil.list", "./.dah"} {
 		if err := bs.Set(key, []byte("x")); !errors.Is(err, ErrBlobKeyEscapesRoot) {
 			t.Errorf("Set(%q) must be rejected with ErrBlobKeyEscapesRoot, got %v", key, err)
 		}

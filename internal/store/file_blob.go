@@ -163,13 +163,15 @@ func (f *FileBlobStore) resolvePath(key string) (string, error) {
 			return "", fmt.Errorf("%w: %q contains parent segment", ErrBlobKeyEscapesRoot, key)
 		}
 	}
+	cleaned := filepath.Clean(key)
 	// The DAH manifest area is bookkeeping, not blob space: a key that lands
-	// inside it could forge delete schedules for arbitrary blobs.
-	if key == dahDirName || strings.HasPrefix(key, dahDirName+"/") {
+	// inside it could forge delete schedules for arbitrary blobs. Check the
+	// CLEANED key — raw shapes like "./.dah/x" or ".dah//x" only reveal their
+	// destination after Clean (the key is already known to be relative with no
+	// ".." segments, so Clean's output is exactly where Join will land).
+	if cleaned == dahDirName || strings.HasPrefix(cleaned, dahDirName+"/") {
 		return "", fmt.Errorf("%w: %q is reserved bookkeeping space", ErrBlobKeyEscapesRoot, key)
 	}
-
-	cleaned := filepath.Clean(key)
 	joined := filepath.Join(f.dir, cleaned)
 
 	abs, err := filepath.Abs(joined)
@@ -249,7 +251,14 @@ func (f *FileBlobStore) ScheduleDelete(key string, height uint64) error {
 			lastErr = err
 			continue
 		}
-		_, werr := fh.WriteString(key + "\n")
+		// Leading newline is torn-write armor: appends are not fsynced, so a
+		// crash can leave a partial line with no terminator. A bare "key\n"
+		// append would then fuse with that fragment into one corrupt key,
+		// silently unscheduling BOTH blobs. Starting with "\n" seals any torn
+		// fragment onto its own line so only the crashed append's key is lost
+		// (its blob falls through to the age sweeper); the resulting blank
+		// lines are skipped by the prune scan.
+		_, werr := fh.WriteString("\n" + key + "\n")
 		cerr := fh.Close()
 		if werr != nil {
 			lastErr = werr
