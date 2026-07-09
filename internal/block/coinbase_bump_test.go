@@ -421,7 +421,7 @@ func TestBuildCoinbaseBUMP_LiftedFinalSubtree_FoldsToHeaderRoot(t *testing.T) {
 					nodes[0] = subtreepkg.Node{Hash: testHash(0)} // placeholder
 				}
 				subtreeNodes[i] = nodes
-				total += uint64(leaves)
+				total += uint64(leaves) //nolint:gosec // test shapes are tiny positive constants
 			}
 			headerRoot := teranodeStyleHeaderRoot(t, subtreeNodes, cb)
 

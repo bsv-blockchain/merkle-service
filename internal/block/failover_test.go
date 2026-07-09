@@ -319,6 +319,7 @@ func contentAddressOf(t *testing.T, raw []byte) string {
 	root := (&subtreepkg.Subtree{Nodes: nodes}).RootHash()
 	if root == nil {
 		t.Fatal("nil root")
+		return "" // unreachable after Fatal; guards the deref below
 	}
 	return root.String()
 }
