@@ -154,8 +154,12 @@ func (p *Processor) buildBlockProcessedData(
 	}
 
 	// Fetch subtree 0's contents (the coinbase's subtree). Store it so the
-	// subtree worker doesn't re-fetch it later.
-	raw, err := p.dataHubClient.FetchSubtreeRaw(ctx, resolvedURL, meta.Subtrees[0])
+	// subtree worker doesn't re-fetch it later. Fails over across DataHub
+	// peers: the peer that served this block's metadata (resolvedURL) may have
+	// already pruned its subtree contents while another peer still serves them
+	// — without failover the coinbase BUMP would be dropped despite the data
+	// being available on the network.
+	raw, _, err := p.fetchSubtreeRawWithFailover(ctx, blockMsg.Hash, meta.Subtrees[0], resolvedURL)
 	if err != nil {
 		p.Logger.Warn("BLOCK_PROCESSED: could not fetch subtree 0; omitting coinbase BUMP",
 			logfields.BlockHash(blockMsg.Hash), "error", err)

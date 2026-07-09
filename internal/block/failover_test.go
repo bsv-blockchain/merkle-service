@@ -2,6 +2,7 @@ package block
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -190,5 +191,114 @@ func TestHandleMessage_FailoverAllPeersFailReturnsError(t *testing.T) {
 	if len(mockProducer.messages) != 0 {
 		t.Errorf("no subtree work should be published on metadata failure; got %d",
 			len(mockProducer.messages))
+	}
+}
+
+// subtreeOnlyServer serves raw subtree bytes at /subtree/* and 404s
+// everything else. served records whether it was hit.
+func subtreeOnlyServer(payload []byte, served *bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/subtree/") {
+			if served != nil {
+				*served = true
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(payload)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
+const testSubtreeHash = "078f3e8c684dfd1fe2e7e5a45a337c29bac886a00c0dc459be2a8f52c9078fde"
+
+// TestFetchSubtreeRawWithFailover_PrunedPreferredPeer is the coinbase-BUMP
+// scenario: the peer that served the block's metadata (preferred) has pruned
+// this block's subtree (404), but a registry peer still serves it. The fetch
+// must fail over to that peer instead of dropping the coinbase BUMP.
+func TestFetchSubtreeRawWithFailover_PrunedPreferredPeer(t *testing.T) {
+	pruned := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // subtree pruned here
+	}))
+	defer pruned.Close()
+
+	want := make([]byte, 64) // two 32-byte nodes
+	want[0], want[32] = 0x01, 0x02
+	var goodHit bool
+	good := subtreeOnlyServer(want, &goodHit)
+	defer good.Close()
+
+	reg := &stubDataHubRegistry{urls: []string{good.URL}}
+	p := buildProcessorWithRegistry(t, &failingSyncProducer{failAt: -1}, reg)
+
+	raw, resolved, err := p.fetchSubtreeRawWithFailover(
+		context.Background(), "blk-pruned", testSubtreeHash, pruned.URL)
+	if err != nil {
+		t.Fatalf("expected failover to the registry peer, got error: %v", err)
+	}
+	if resolved != good.URL {
+		t.Errorf("resolved = %q, want failover peer %q", resolved, good.URL)
+	}
+	if len(raw) != len(want) {
+		t.Errorf("raw len = %d, want %d", len(raw), len(want))
+	}
+	if !goodHit {
+		t.Error("failover peer was never queried")
+	}
+}
+
+// TestFetchSubtreeRawWithFailover_PreferredServes verifies no failover when
+// the preferred peer has the subtree (the common live-block case).
+func TestFetchSubtreeRawWithFailover_PreferredServes(t *testing.T) {
+	want := make([]byte, 32)
+	want[0] = 0xAB
+	good := subtreeOnlyServer(want, nil)
+	defer good.Close()
+
+	// A registry peer that would fail the test if it were ever queried.
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("registry peer should not be queried when the preferred peer serves")
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer other.Close()
+
+	reg := &stubDataHubRegistry{urls: []string{other.URL}}
+	p := buildProcessorWithRegistry(t, &failingSyncProducer{failAt: -1}, reg)
+
+	raw, resolved, err := p.fetchSubtreeRawWithFailover(
+		context.Background(), "blk", testSubtreeHash, good.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolved != good.URL {
+		t.Errorf("resolved = %q, want preferred %q", resolved, good.URL)
+	}
+	if len(raw) != 32 {
+		t.Errorf("raw len = %d, want 32", len(raw))
+	}
+}
+
+// TestFetchSubtreeRawWithFailover_AllPeersMissing verifies a clean error
+// (wrapping datahub.ErrNotFound) when no peer has the subtree.
+func TestFetchSubtreeRawWithFailover_AllPeersMissing(t *testing.T) {
+	notFound := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+	}
+	a, b := notFound(), notFound()
+	defer a.Close()
+	defer b.Close()
+
+	reg := &stubDataHubRegistry{urls: []string{b.URL}}
+	p := buildProcessorWithRegistry(t, &failingSyncProducer{failAt: -1}, reg)
+
+	_, _, err := p.fetchSubtreeRawWithFailover(
+		context.Background(), "blk", testSubtreeHash, a.URL)
+	if err == nil {
+		t.Fatal("expected error when every peer 404s")
+	}
+	if !errors.Is(err, datahub.ErrNotFound) {
+		t.Errorf("error should wrap datahub.ErrNotFound, got: %v", err)
 	}
 }
