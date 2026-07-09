@@ -98,6 +98,7 @@ func TestProcessBlockSubtree_FilterURL_ScopesToRequester(t *testing.T) {
 		nil, nil,
 		0,
 		urlA, "tok-a-override",
+		nil,
 		testLogger(),
 	)
 	if err != nil {
@@ -147,6 +148,7 @@ func TestProcessBlockSubtree_FilterURL_NoMatch(t *testing.T) {
 		nil, nil,
 		0,
 		"https://requester.example/cb", "",
+		nil,
 		testLogger(),
 	)
 	if err != nil {

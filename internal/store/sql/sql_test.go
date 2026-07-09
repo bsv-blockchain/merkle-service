@@ -1035,3 +1035,43 @@ func TestSeenCounter_BatchIncrement(t *testing.T) {
 		}
 	}
 }
+
+// TestSeenCounter_BatchDelete pins the mine-time cleanup: once a txid is
+// mined its seen counter is dead weight (the counter exists to track
+// pre-mine propagation), so the worker batch-deletes counters for the mined
+// registered txids. Deletion must remove both the counter row and its
+// per-subtree child rows, so a hypothetical later increment starts fresh.
+func TestSeenCounter_BatchDelete(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newSeenCounter(db, d, 3)
+
+	for _, txid := range []string{"tx-a", "tx-b", "tx-keep"} {
+		for i := 0; i < 2; i++ {
+			if _, err := s.Increment(txid, fmt.Sprintf("st%d", i)); err != nil {
+				t.Fatalf("Increment(%s): %v", txid, err)
+			}
+		}
+	}
+
+	if err := s.BatchDelete([]string{"tx-a", "tx-b", "tx-absent"}); err != nil {
+		t.Fatalf("BatchDelete: %v", err)
+	}
+
+	// Deleted txids restart from a clean slate.
+	res, err := s.Increment("tx-a", "st-new")
+	if err != nil {
+		t.Fatalf("Increment after delete: %v", err)
+	}
+	if res.NewCount != 1 {
+		t.Errorf("count after delete+increment = %d, want 1 (fresh counter)", res.NewCount)
+	}
+
+	// Untouched txid keeps its history.
+	res, err = s.Increment("tx-keep", "st2")
+	if err != nil {
+		t.Fatalf("Increment(tx-keep): %v", err)
+	}
+	if res.NewCount != 3 {
+		t.Errorf("tx-keep count = %d, want 3 (2 prior + 1 new)", res.NewCount)
+	}
+}

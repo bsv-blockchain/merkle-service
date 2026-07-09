@@ -64,6 +64,10 @@ type SubtreeResult struct {
 // set and overrideToken is non-empty, overrideToken replaces whatever token
 // regStore had on file for that URL — the request token is the source of
 // truth for this delivery (token rotation hasn't reached /watch yet).
+//
+// seenCounter, when non-nil, has its records for the subtree's registered
+// txids batch-deleted: a seen counter tracks pre-mine propagation, so the
+// mined event makes it dead weight. Best-effort like the TTL update above it.
 func ProcessBlockSubtree(
 	ctx context.Context,
 	subtreeHash string,
@@ -78,6 +82,7 @@ func ProcessBlockSubtree(
 	postMineTTLSec int,
 	filterURL string,
 	overrideToken string,
+	seenCounter store.SeenCounterStore,
 	logger *slog.Logger,
 ) (*SubtreeResult, error) {
 	// 6.2: Retrieve subtree data from blob store, falling back to DataHub.
@@ -95,6 +100,17 @@ func ProcessBlockSubtree(
 		// Store for potential future use.
 		if storeErr := subtreeStore.StoreSubtree(subtreeHash, rawData, blockHeight); storeErr != nil {
 			logger.Warn("failed to store fetched subtree", logfields.SubtreeHash(subtreeHash), "error", storeErr)
+		}
+	} else {
+		// The blob was stored at announcement time, when the height was
+		// unknown, so it carries no delete-at-height. This is the first
+		// moment its height IS known — schedule the same blockHeight+offset
+		// deletion StoreSubtree would have set on the refetch path. Without
+		// this, blobs on the healthy (already-fetched) path are never pruned
+		// and the shared volume grows until it fills. Best-effort like the
+		// re-store above: the age sweeper catches anything missed here.
+		if schedErr := subtreeStore.ScheduleDelete(subtreeHash, blockHeight); schedErr != nil {
+			logger.Warn("failed to schedule subtree prune", logfields.SubtreeHash(subtreeHash), "error", schedErr)
 		}
 	}
 
@@ -227,6 +243,23 @@ func ProcessBlockSubtree(
 		ttl := time.Duration(postMineTTLSec) * time.Second
 		if err := regStore.BatchUpdateTTL(registeredTxids, ttl); err != nil {
 			logger.Warn("failed to batch update TTLs (ensure Aerospike namespace has nsup-period configured)", "error", err)
+		}
+	}
+
+	// 6.12: Delete seen counters for the mined registered txids. Counters
+	// exist to track pre-mine propagation (SEEN_MULTIPLE_NODES), so the mined
+	// event ends their life. Without this cleanup the set grows forever —
+	// nothing else ever removes a counter. Best-effort: a failed delete is
+	// logged and the counter lingers until a later mined-path pass; not worth
+	// re-driving the work item over.
+	if seenCounter != nil && len(registrations) > 0 {
+		minedTxids := make([]string, 0, len(registrations))
+		for txid := range registrations {
+			minedTxids = append(minedTxids, txid)
+		}
+		if err := seenCounter.BatchDelete(minedTxids); err != nil {
+			logger.Warn("failed to batch delete seen counters for mined txids",
+				logfields.SubtreeHash(subtreeHash), logfields.TxIDCount(len(minedTxids)), "error", err)
 		}
 	}
 

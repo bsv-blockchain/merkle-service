@@ -295,3 +295,41 @@ func (s *aerospikeSeenCounter) batchIncrementChunk(txids []string, subtreeID str
 
 	return firstErr
 }
+
+// BatchDelete removes the counters for txids in chunked batch round-trips —
+// the mine-time cleanup: a counter tracks pre-mine propagation, so once its
+// txid is in a block the record is dead weight. Missing keys are not an
+// error (idempotent, safe on work-item redelivery); per-key failures surface
+// as the first error so the caller can log, while the rest of the batch
+// still deletes.
+func (s *aerospikeSeenCounter) BatchDelete(txids []string) error {
+	if len(txids) == 0 {
+		return nil
+	}
+
+	return forEachChunkConcurrent(txids, s.client.batchChunkConcurrency,
+		func(chunk []string) error {
+			batchRecs := make([]as.BatchRecordIfc, 0, len(chunk))
+			for _, txid := range chunk {
+				key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
+				if err != nil {
+					return fmt.Errorf("failed to create key for %s: %w", txid, err)
+				}
+				batchRecs = append(batchRecs, as.NewBatchDelete(nil, key))
+			}
+
+			bp := s.client.BatchPolicy(s.maxRetries, s.retryBaseMs)
+			if err := s.client.Client().BatchOperate(bp, batchRecs); err != nil {
+				return fmt.Errorf("batch delete seen counters: %w", err)
+			}
+
+			var firstErr error
+			for i, br := range batchRecs {
+				rec := br.BatchRec()
+				if rec.Err != nil && !rec.Err.Matches(astypes.KEY_NOT_FOUND_ERROR) && firstErr == nil {
+					firstErr = fmt.Errorf("delete seen counter for %s: %w", chunk[i], rec.Err)
+				}
+			}
+			return firstErr
+		})
+}

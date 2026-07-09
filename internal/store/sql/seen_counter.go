@@ -154,3 +154,31 @@ func (s *seenCounter) tryFireThreshold(ctx context.Context, tx *sql.Tx, txid str
 	}
 	return n > 0, nil
 }
+
+// BatchDelete removes the counters (and their per-subtree child rows) for
+// txids — the mine-time cleanup: once a txid is in a block its propagation
+// counter is dead weight. Missing txids are silently skipped (idempotent, so
+// work-item redelivery is safe). Per-txid statements match this backend's
+// tests-and-small-deployments posture (see BatchIncrement).
+func (s *seenCounter) BatchDelete(txids []string) error {
+	if len(txids) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	qChildren := fmt.Sprintf("DELETE FROM seen_counter_subtrees WHERE txid = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from internal function
+	qParent := fmt.Sprintf("DELETE FROM seen_counters WHERE txid = %s", s.d.placeholder(1))           //nolint:gosec // placeholder from internal function
+
+	var firstErr error
+	for _, txid := range txids {
+		if _, err := s.db.ExecContext(ctx, qChildren, txid); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delete seen counter subtrees for %s: %w", txid, err)
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, qParent, txid); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delete seen counter for %s: %w", txid, err)
+		}
+	}
+	return firstErr
+}

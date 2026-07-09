@@ -75,6 +75,16 @@ func (m *MemoryBlobStore) Del(key string) error {
 	return nil
 }
 
+// ScheduleDelete records a delete-at-height for an already-stored blob
+// without rewriting its bytes — the in-memory analog of FileBlobStore's
+// manifest append.
+func (m *MemoryBlobStore) ScheduleDelete(key string, height uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dah[key] = height
+	return nil
+}
+
 func (m *MemoryBlobStore) SetCurrentBlockHeight(height uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

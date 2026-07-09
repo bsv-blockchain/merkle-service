@@ -90,7 +90,12 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 		ExpectedStump:       newExpectedStump(db, d, cfg.Aerospike.SubtreeCounterTTLSec),
 		Health:              &pingHealth{db: db},
 	}
+	// Backstop for blobs whose height is never learned (announced but never
+	// mined) — see StartBlobSweeperFromConfig. No-op for memory stores.
+	stopBlobSweeper := storepkg.StartBlobSweeperFromConfig(blob, cfg.BlobStore, logger)
+
 	r.AddCloser(func() error {
+		stopBlobSweeper()
 		cancelSweeper()
 		sw.waitStopped()
 		return db.Close()

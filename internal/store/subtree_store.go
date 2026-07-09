@@ -21,6 +21,12 @@ type BlobStore interface {
 	Get(key string) ([]byte, error)
 	GetIoReader(key string) (io.ReadCloser, error)
 	Del(key string) error
+	// ScheduleDelete records a delete-at-height for an already-stored blob
+	// without rewriting its bytes — used when the height becomes known only
+	// after the write (a subtree stored at announcement time is scheduled at
+	// block time). Schedules are not cancellable and firing on a missing key
+	// is a no-op, so double-scheduling is harmless.
+	ScheduleDelete(key string, height uint64) error
 	SetCurrentBlockHeight(height uint64)
 }
 
@@ -115,6 +121,24 @@ func (s *blobSubtreeStore) DeleteSubtree(id string) error {
 	return nil
 }
 
+// ScheduleDelete schedules an already-stored subtree for pruning at
+// blockHeight + dahOffset — the same schedule StoreSubtree would have set had
+// the height been known at write time. This is the block-time path for
+// subtrees that were stored at announcement time (height unknown, no DAH):
+// the worker calls it when it finds the blob already present, so the
+// blob-hit path and the DataHub-refetch path prune at the same height.
+// blockHeight 0 (unknown) is a no-op, mirroring StoreSubtree.
+func (s *blobSubtreeStore) ScheduleDelete(id string, blockHeight uint64) error {
+	if blockHeight == 0 {
+		return nil
+	}
+	dah := blockHeight + s.dahOffset
+	if err := s.store.ScheduleDelete(id, dah); err != nil {
+		return fmt.Errorf("failed to schedule subtree %s delete at %d: %w", id, dah, err)
+	}
+	return nil
+}
+
 // SetCurrentBlockHeight updates the current block height for DAH pruning.
 func (s *blobSubtreeStore) SetCurrentBlockHeight(height uint64) {
 	s.mu.Lock()
@@ -182,6 +206,10 @@ func (c *ConcurrentBlobStore) GetIoReader(key string) (io.ReadCloser, error) {
 
 func (c *ConcurrentBlobStore) Del(key string) error {
 	return c.store.Del(key)
+}
+
+func (c *ConcurrentBlobStore) ScheduleDelete(key string, height uint64) error {
+	return c.store.ScheduleDelete(key, height)
 }
 
 func (c *ConcurrentBlobStore) SetCurrentBlockHeight(height uint64) {

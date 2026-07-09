@@ -37,7 +37,7 @@ func main() {
 
 	worker := block.NewSubtreeWorkerService(
 		cfg.Kafka, cfg.Block, cfg.DataHub,
-		registry.Registration, registry.Subtree, registry.Stump, registry.CallbackURLRegistry, registry.SubtreeCounter, registry.ExpectedStump,
+		registry.Registration, registry.Subtree, registry.Stump, registry.CallbackURLRegistry, registry.SubtreeCounter, registry.ExpectedStump, registry.SeenCounter,
 		logger,
 	)
 

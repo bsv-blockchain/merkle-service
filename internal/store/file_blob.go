@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -76,13 +77,27 @@ func schemeOf(rawURL string) string {
 	return rawURL
 }
 
+// dahDirName is the reserved directory (under the store root) holding the
+// on-disk delete-at-height manifests. It is not valid blob-key space:
+// resolvePath rejects keys that would land inside it.
+//
+// Layout: <root>/.dah/<height>/<owner>.list — one blob key per line. Each
+// process appends to its own <owner>.list (so concurrent writers never share
+// a file), and ANY process that learns a new block height prunes every
+// manifest at or below that height. Keeping the bookkeeping on the volume —
+// instead of in a per-process map — is what makes pruning survive restarts
+// and work across the fetcher/worker/block-processor split, where the
+// process that writes a blob is usually not the one that learns the height
+// (this is how the shared subtree PVC previously filled to 100%: every
+// process held a private map and none of them ever pruned another's blobs).
+const dahDirName = ".dah"
+
 // FileBlobStore implements BlobStore using the local filesystem.
 type FileBlobStore struct {
 	dir     string
 	rootAbs string // absolute, cleaned form of dir for traversal checks
-	mu      sync.RWMutex
-	dah     map[string]uint64 // delete-at-height per key
-	height  uint64
+	owner   string // per-process manifest filename stem (hostname-pid)
+	mu      sync.Mutex
 }
 
 // ErrBlobKeyEscapesRoot is returned when a blob key resolves to a filesystem
@@ -101,10 +116,14 @@ func NewFileBlobStore(dir string) (*FileBlobStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving blob store directory %s: %w", dir, err)
 	}
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "unknown"
+	}
 	return &FileBlobStore{
 		dir:     dir,
 		rootAbs: rootAbs,
-		dah:     make(map[string]uint64),
+		owner:   fmt.Sprintf("%s-%d", hostname, os.Getpid()),
 	}, nil
 }
 
@@ -144,6 +163,11 @@ func (f *FileBlobStore) resolvePath(key string) (string, error) {
 			return "", fmt.Errorf("%w: %q contains parent segment", ErrBlobKeyEscapesRoot, key)
 		}
 	}
+	// The DAH manifest area is bookkeeping, not blob space: a key that lands
+	// inside it could forge delete schedules for arbitrary blobs.
+	if key == dahDirName || strings.HasPrefix(key, dahDirName+"/") {
+		return "", fmt.Errorf("%w: %q is reserved bookkeeping space", ErrBlobKeyEscapesRoot, key)
+	}
 
 	cleaned := filepath.Clean(key)
 	joined := filepath.Join(f.dir, cleaned)
@@ -182,12 +206,62 @@ func (f *FileBlobStore) Set(key string, data []byte, opts ...BlobOption) error {
 	}
 
 	if o.deleteAtHeight > 0 {
-		f.mu.Lock()
-		f.dah[key] = o.deleteAtHeight
-		f.mu.Unlock()
+		if err := f.ScheduleDelete(key, o.deleteAtHeight); err != nil {
+			return fmt.Errorf("recording delete-at-height for blob %s: %w", key, err)
+		}
 	}
 
 	return nil
+}
+
+// ScheduleDelete durably records that key's blob should be deleted once the
+// chain reaches height, without touching the blob bytes. The record is an
+// append to this process's manifest file under <root>/.dah/<height>/ — see
+// dahDirName for the layout and why this lives on disk. Schedules are
+// append-only and not cancellable (manifests may belong to other processes);
+// firing on an already-deleted or re-stored key is harmless because blobs
+// are content-addressed.
+func (f *FileBlobStore) ScheduleDelete(key string, height uint64) error {
+	// Callers pass keys that already went through resolvePath, but validate
+	// again so no future call path can smuggle an unvalidated key into a
+	// manifest.
+	if _, err := f.resolvePath(key); err != nil {
+		return err
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	manifestDir := filepath.Join(f.rootAbs, dahDirName, strconv.FormatUint(height, 10))
+	manifest := filepath.Join(manifestDir, f.owner+".list")
+
+	// A concurrent pruner can remove the height directory between MkdirAll
+	// and OpenFile; one retry closes that window (the second MkdirAll runs
+	// after the removal has finished).
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := os.MkdirAll(manifestDir, 0o755); err != nil { //nolint:gosec // 0755 intentional for data dirs
+			lastErr = err
+			continue
+		}
+		fh, err := os.OpenFile(manifest, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // path is store-internal bookkeeping
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_, werr := fh.WriteString(key + "\n")
+		cerr := fh.Close()
+		if werr != nil {
+			lastErr = werr
+			continue
+		}
+		if cerr != nil {
+			lastErr = cerr
+			continue
+		}
+		return nil
+	}
+	return lastErr
 }
 
 func (f *FileBlobStore) SetFromReader(key string, r io.Reader, size int64, opts ...BlobOption) error {
@@ -227,10 +301,6 @@ func (f *FileBlobStore) Del(key string) error {
 		return err
 	}
 
-	f.mu.Lock()
-	delete(f.dah, key)
-	f.mu.Unlock()
-
 	err = os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("deleting blob %s: %w", key, err)
@@ -238,20 +308,59 @@ func (f *FileBlobStore) Del(key string) error {
 	return nil
 }
 
+// SetCurrentBlockHeight prunes every blob scheduled for deletion at or below
+// height, reading the schedules from the on-disk manifests (see dahDirName).
+// It is safe to call from any process sharing the volume and safe to call
+// concurrently: blob removal ignores already-missing files, and a manifest
+// directory that received a concurrent append is left in place for the next
+// call. Manifest keys are re-validated against the store root before any
+// filesystem delete, so a forged manifest cannot reach outside the store
+// (same F-038 posture as the old in-memory map path).
 func (f *FileBlobStore) SetCurrentBlockHeight(height uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.height = height
 
-	// Prune entries whose DAH has been reached. Keys in f.dah were already
-	// validated by Set, but re-validate defensively so a future bug that
-	// writes to f.dah outside Set can't trigger a traversal during pruning.
-	for key, dah := range f.dah {
-		if height >= dah {
-			if path, err := f.resolvePath(key); err == nil {
-				_ = os.Remove(path)
-			}
-			delete(f.dah, key)
+	dahRoot := filepath.Join(f.rootAbs, dahDirName)
+	dirs, err := os.ReadDir(dahRoot)
+	if err != nil {
+		return // no schedules recorded (or unreadable — nothing safe to do)
+	}
+
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
 		}
+		h, err := strconv.ParseUint(d.Name(), 10, 64)
+		if err != nil || h > height {
+			continue
+		}
+
+		heightDir := filepath.Join(dahRoot, d.Name())
+		manifests, err := os.ReadDir(heightDir)
+		if err != nil {
+			continue
+		}
+		for _, m := range manifests {
+			if m.IsDir() || !strings.HasSuffix(m.Name(), ".list") {
+				continue
+			}
+			manifestPath := filepath.Join(heightDir, m.Name())
+			data, err := os.ReadFile(manifestPath) //nolint:gosec // path is store-internal bookkeeping
+			if err != nil {
+				continue
+			}
+			for _, key := range strings.Split(string(data), "\n") {
+				if key == "" {
+					continue
+				}
+				if path, err := f.resolvePath(key); err == nil {
+					_ = os.Remove(path)
+				}
+			}
+			_ = os.Remove(manifestPath)
+		}
+		// Succeeds only when empty; a concurrent append keeps the directory
+		// alive and the next prune pass picks it up.
+		_ = os.Remove(heightDir)
 	}
 }

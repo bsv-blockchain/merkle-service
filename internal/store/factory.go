@@ -100,5 +100,11 @@ func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Lo
 		Health: asClient,
 	}
 	r.AddCloser(func() error { asClient.Close(); return nil })
+
+	// Backstop for blobs whose height is never learned (announced but never
+	// mined) — see StartBlobSweeperFromConfig. No-op for memory stores.
+	stopSweeper := StartBlobSweeperFromConfig(blob, cfg.BlobStore, logger)
+	r.AddCloser(func() error { stopSweeper(); return nil })
+
 	return r, nil
 }
