@@ -26,9 +26,10 @@ var exitFunc = func(code int) { os.Exit(code) }
 // MessageHandler is called for each consumed message.
 type MessageHandler func(ctx context.Context, msg *Message) error
 
-// handlerErrorBackoff is how long a partition worker waits before re-fetching
-// a partition whose handler failed. It throttles the redeliver-and-fail cycle
-// when the underlying problem (Aerospike blip, DLQ producer hiccup) persists.
+// handlerErrorBackoff is how long a partition whose handler failed stays
+// paused before its fetches resume (and how long its worker sleeps before
+// taking more batches). It throttles the redeliver-and-fail cycle when the
+// underlying problem (Aerospike blip, DLQ producer hiccup) persists.
 // Under sarama the equivalent throttle was the session-teardown/rebalance
 // cycle triggered by returning an error from ConsumeClaim.
 const handlerErrorBackoff = 500 * time.Millisecond
@@ -96,10 +97,11 @@ type topicPartition struct {
 
 // Consumer wraps a franz-go consumer-group client and runs ONE worker
 // goroutine per assigned partition — the same concurrency model sarama's
-// ConsumerGroupHandler provided via per-claim ConsumeClaim goroutines. The
-// poll loop only fetches and dispatches; all handler execution, offset
-// commits, and failure rewinds happen on the per-partition workers, so a slow
-// or failing handler on one partition never stalls the others.
+// ConsumerGroupHandler provided via per-claim ConsumeClaim goroutines.
+// Handler execution and offset commits happen on the per-partition workers,
+// so a slow or failing handler on one partition never stalls the others; the
+// poll loop fetches, dispatches, and applies worker-recorded failure rewinds
+// (see rewindReqs / applyRewinds).
 type Consumer struct {
 	client  *kgo.Client
 	groupID string
@@ -265,9 +267,11 @@ func (c *Consumer) Start(parent context.Context) error {
 }
 
 // pollLoop fetches records and dispatches each partition's batch to that
-// partition's worker. It does no handler work itself: commits and failure
-// rewinds live on the workers (see partitionWorker), which is what restores
+// partition's worker. It does no handler work itself: handler execution and
+// commits live on the workers (see partitionWorker), which is what restores
 // sarama's per-partition concurrency (one ConsumeClaim goroutine per claim).
+// Failure rewinds are recorded by the workers but APPLIED here, between a
+// poll return and AllowRebalance (see applyRewinds).
 //
 // The loop exits ONLY when the client is closed, never on ctx alone: during
 // shutdown the close-initiated group leave needs these polls to keep allowing
@@ -287,12 +291,28 @@ func (c *Consumer) pollLoop(ctx context.Context) {
 			return
 		}
 
+		// A zero-length Fetches is kgo's one poll return that does NOT hold
+		// the rebalance-blocking poller (its fill raced a rebalance that
+		// drained the readied buffers and un-registered the poller), so the
+		// post-poll window is NOT revoke-safe here. Skip rewind application
+		// until the next tick, at most pollTick away.
+		if len(fetches) == 0 {
+			c.signalReady()
+			c.client.AllowRebalance()
+			continue
+		}
+
 		if errs := fetches.Errors(); len(errs) > 0 {
 			fatal := false
 			tickOnly := true
 			for _, e := range errs {
 				// Our own pollTick deadline: an idle tick, not a broker error.
-				if errors.Is(e.Err, context.DeadlineExceeded) {
+				// Only the fake fetch kgo injects for the poll context (no
+				// topic, partition -1) qualifies — a real topic/partition
+				// error that merely wraps DeadlineExceeded (e.g. an
+				// offset-validation timeout) must still be counted and
+				// logged below.
+				if e.Topic == "" && e.Partition < 0 && errors.Is(e.Err, context.DeadlineExceeded) {
 					continue
 				}
 				tickOnly = false
@@ -448,12 +468,23 @@ func (c *Consumer) stopWorkers(tps map[string][]int32) {
 				stopped = append(stopped, w)
 				delete(c.workers, tp)
 			}
-			// Drop rewind state for the departing partition and un-pause it:
-			// pause is client-local, so a partition revoked mid-backoff and
-			// later re-assigned to this client would otherwise never fetch
-			// again. Runs on the poll goroutine (rebalance callback or final
-			// teardown), so touching resumeAt is safe; Resume on a
-			// never-paused or closing client is a no-op.
+		}
+	}
+	for _, w := range stopped {
+		<-w.done
+	}
+	// Drop rewind state for the departing partitions and un-pause them:
+	// pause is client-local, so a partition revoked mid-backoff and later
+	// re-assigned to this client would otherwise never fetch again. This
+	// runs AFTER the workers have fully drained: a worker caught
+	// mid-process by signalStop can still queue one final rewind on its
+	// way out, and cleaning before the wait would leave that stale request
+	// to be applied if the partition were promptly re-assigned here.
+	// Serialized with applyRewinds by BlockRebalanceOnPoll, so touching
+	// resumeAt is safe; Resume on a never-paused client is a no-op.
+	for topic, parts := range tps {
+		for _, part := range parts {
+			tp := topicPartition{topic, part}
 			c.rewindMu.Lock()
 			delete(c.rewindReqs, tp)
 			c.rewindMu.Unlock()
@@ -462,9 +493,6 @@ func (c *Consumer) stopWorkers(tps map[string][]int32) {
 				c.client.ResumeFetchPartitions(map[string][]int32{tp.topic: {tp.partition}})
 			}
 		}
-	}
-	for _, w := range stopped {
-		<-w.done
 	}
 }
 
@@ -493,8 +521,8 @@ func (c *Consumer) handleMetrics(topic string, valueLen int) func(outcome string
 
 // partitionWorker consumes one partition's record batches in order — the
 // franz-go equivalent of one sarama ConsumeClaim goroutine. It owns the
-// partition's commit and failure-rewind logic, so a handler stall or failure
-// affects only this partition.
+// partition's commit logic and records failure rewinds (applied on the poll
+// goroutine), so a handler stall or failure affects only this partition.
 type partitionWorker struct {
 	c    *Consumer
 	tp   topicPartition
