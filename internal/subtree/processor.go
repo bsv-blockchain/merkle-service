@@ -16,6 +16,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
+	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 )
 
@@ -350,6 +351,17 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		// from the same host to short-circuit at the IsHealthy gate above
 		// once the threshold is reached.
 		if errors.Is(err, datahub.ErrNotFound) {
+			return p.handlePermanentFailure(ctx, subtreeMsg, "fetching subtree from DataHub", err, start)
+		}
+		// SSRF/DNS validation failures are equally permanent for that URL:
+		// the announcing peer advertised an address we can never resolve or
+		// are policy-bound to refuse (e.g. its cluster-internal service name,
+		// http://asset:8090). Retrying cannot help; burning the retry budget
+		// here is what used to land these in outcome="dlq" and page on-call.
+		// Intake-side validation (p2p client) drops these announcements
+		// before Kafka now — this guards messages already in the topic and
+		// any future intake gap.
+		if errors.Is(err, ssrfguard.ErrInvalidURL) || errors.Is(err, ssrfguard.ErrBlockedAddress) {
 			return p.handlePermanentFailure(ctx, subtreeMsg, "fetching subtree from DataHub", err, start)
 		}
 		return p.handleTransientFailure(ctx, subtreeMsg, "fetching subtree from DataHub", err, start)

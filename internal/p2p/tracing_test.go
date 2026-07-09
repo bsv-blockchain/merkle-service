@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 
 	teranode "github.com/bsv-blockchain/teranode/services/p2p"
@@ -115,6 +116,9 @@ func TestHandleSubtreeMessage_SpanEndsAndRecordsErrorOnPublishExhaustion(t *test
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	failing := kafka.NewTestProducer(&mockSyncProducer{failErr: errors.New("kafka down")}, "subtree", logger)
 	client := NewClient(config.P2PConfig{}, failing, failing, nil, false, logger)
+	client.lookupIP = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
 
 	msg := teranode.SubtreeMessage{Hash: "subtree-fail", DataHubURL: "https://dh.example/st"}
 	if err := client.handleSubtreeMessage(context.Background(), msg); !errors.Is(err, ErrPublishExhausted) {
