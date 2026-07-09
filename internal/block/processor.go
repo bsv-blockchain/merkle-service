@@ -382,6 +382,87 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	return nil
 }
 
+// datahubAttempt is one candidate peer for a failover fetch. forceTry is
+// set for the preferred/announced peer so it is tried even when currently
+// marked unhealthy (a peer that recovered gets a chance to serve).
+type datahubAttempt struct {
+	url      string
+	forceTry bool
+}
+
+// datahubFailoverCandidates builds the ordered peer list for a failover
+// fetch: the preferred peer first (forced), then every distinct URL in the
+// DataHub registry. A registry scan failure is logged but non-fatal — the
+// preferred peer alone is still a valid attempt list.
+func (p *Processor) datahubFailoverCandidates(blockHash, preferredURL string) []datahubAttempt {
+	tried := make(map[string]struct{})
+	var attempts []datahubAttempt
+	if preferredURL != "" {
+		attempts = append(attempts, datahubAttempt{url: preferredURL, forceTry: true})
+		tried[preferredURL] = struct{}{}
+	}
+	if p.dataHubRegistry != nil {
+		registered, regErr := p.dataHubRegistry.GetAll()
+		if regErr != nil {
+			p.Logger.Warn("failed to list DataHub registry for failover",
+				logfields.BlockHash(blockHash), "error", regErr)
+		}
+		for _, u := range registered {
+			if u == "" {
+				continue
+			}
+			if _, ok := tried[u]; ok {
+				continue
+			}
+			tried[u] = struct{}{}
+			attempts = append(attempts, datahubAttempt{url: u})
+		}
+	}
+	return attempts
+}
+
+// fetchSubtreeRawWithFailover fetches a subtree's raw bytes, trying the
+// preferred peer (the one that served this block's metadata) first and then
+// the rest of the DataHub registry. This matters for the coinbase-BUMP path:
+// the peer that still has a block's metadata may have already pruned that
+// block's subtree contents, while another (longer-retention) peer still
+// serves it. Without failover the coinbase BUMP is dropped even though the
+// data is available elsewhere on the network. Returns the resolved URL that
+// served the subtree.
+func (p *Processor) fetchSubtreeRawWithFailover(
+	ctx context.Context,
+	blockHash, subtreeHash, preferredURL string,
+) ([]byte, string, error) {
+	attempts := p.datahubFailoverCandidates(blockHash, preferredURL)
+	ph := p.dataHubClient.PeerHealth()
+	var lastErr error
+	for _, a := range attempts {
+		if !a.forceTry && ph != nil && !ph.IsHealthy(a.url) {
+			continue
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, blockFetchPerPeerTimeout)
+		raw, err := p.dataHubClient.FetchSubtreeRaw(probeCtx, a.url, subtreeHash)
+		cancel()
+		if err == nil {
+			if a.url != preferredURL {
+				p.Logger.Info("subtree served by failover DataHub",
+					logfields.BlockHash(blockHash), logfields.SubtreeHash(subtreeHash),
+					"preferredUrl", preferredURL, "resolvedUrl", a.url)
+			}
+			return raw, a.url, nil
+		}
+		lastErr = err
+		p.Logger.Debug("DataHub subtree failover candidate failed",
+			logfields.BlockHash(blockHash), logfields.SubtreeHash(subtreeHash),
+			logfields.DataHubURL(a.url),
+			"notFound", errors.Is(err, datahub.ErrNotFound), "error", err)
+	}
+	if lastErr == nil {
+		return nil, "", fmt.Errorf("no healthy DataHub peer available for subtree %s", subtreeHash)
+	}
+	return nil, "", lastErr
+}
+
 // fetchBlockMetadataWithFailover fetches block metadata, trying the
 // announced peer first and then known-good peers from the DataHub
 // registry. The announcing peer is honored even if it is currently
@@ -398,38 +479,7 @@ func (p *Processor) fetchBlockMetadataWithFailover(
 	ctx context.Context,
 	blockHash, announcedURL string,
 ) (*datahub.BlockMetadata, string, error) {
-	type attempt struct {
-		url      string
-		forceTry bool // announced URL: try even if currently unhealthy
-	}
-
-	tried := make(map[string]struct{})
-	var attempts []attempt
-	if announcedURL != "" {
-		attempts = append(attempts, attempt{url: announcedURL, forceTry: true})
-		tried[announcedURL] = struct{}{}
-	}
-
-	// Registry candidates only matter when there's an actual registry and
-	// at least one URL is registered. A scan failure should not abort the
-	// whole fetch — we still have the announced URL.
-	if p.dataHubRegistry != nil {
-		registered, regErr := p.dataHubRegistry.GetAll()
-		if regErr != nil {
-			p.Logger.Warn("failed to list DataHub registry for failover",
-				logfields.BlockHash(blockHash), "error", regErr)
-		}
-		for _, u := range registered {
-			if u == "" {
-				continue
-			}
-			if _, ok := tried[u]; ok {
-				continue
-			}
-			tried[u] = struct{}{}
-			attempts = append(attempts, attempt{url: u})
-		}
-	}
+	attempts := p.datahubFailoverCandidates(blockHash, announcedURL)
 
 	ph := p.dataHubClient.PeerHealth()
 	var lastErr error
