@@ -39,14 +39,6 @@ const handlerErrorBackoff = 500 * time.Millisecond
 // bounded per-partition message channel that back-pressured the fetcher.
 const workerChannelDepth = 5
 
-// pollTick bounds how long a single PollFetches call may block waiting for
-// records. The poll loop must keep turning even when nothing is fetchable —
-// every partition paused mid-rewind, or simply no traffic — because rewind
-// application and resumption run on the poll goroutine between polls (see
-// applyRewinds). Without a deadline an all-paused consumer would sit in
-// PollFetches forever and never resume its partitions.
-const pollTick = 250 * time.Millisecond
-
 // consumerOpts returns the franz-go client options used by every consumer group
 // created by this package. Extracted so unit tests can verify the invariants we
 // care about (notably the F-031 initial-offset policy and the explicit
@@ -116,27 +108,6 @@ type Consumer struct {
 	// needed.
 	workers map[topicPartition]*partitionWorker
 
-	// rewindReqs holds the failed record each partition worker wants its
-	// partition rewound to. Workers only RECORD the request (under rewindMu);
-	// the client calls that perform it — PauseFetchPartitions, SetOffsets,
-	// ResumeFetchPartitions — run on the poll goroutine in applyRewinds.
-	// kgo's SetOffsets mutates the consumer's partition assignment and its
-	// docs require callers to block concurrent revokes while issuing it;
-	// calling it from worker goroutines (as this consumer originally did)
-	// raced group rebalances and could deadlock the whole consumer: poll
-	// goroutine blocked dispatching, rebalance waiting on the poll, worker
-	// waiting inside SetOffsets on state the rebalance owns. On the poll
-	// goroutine, between a PollFetches return and AllowRebalance, rebalances
-	// are provably quiescent (BlockRebalanceOnPoll) — the exact window the
-	// docs ask for.
-	rewindMu   sync.Mutex
-	rewindReqs map[topicPartition]*kgo.Record
-
-	// resumeAt schedules the post-rewind resume (handlerErrorBackoff after
-	// the rewind is applied) per paused partition. Poll-goroutine-owned like
-	// workers; no mutex needed.
-	resumeAt map[topicPartition]time.Time
-
 	cancelMu   sync.Mutex // teranode #638: guard the cancel func against races
 	cancel     context.CancelFunc
 	consumeCtx context.Context //nolint:containedctx // handed to workers created by rebalance callbacks
@@ -163,14 +134,12 @@ type Consumer struct {
 // topic at 1 partition.
 func NewConsumer(brokers []string, groupID string, topics []string, handler MessageHandler, partitions map[string]int32, logger *slog.Logger) (*Consumer, error) {
 	c := &Consumer{
-		groupID:    groupID,
-		topics:     topics,
-		handler:    handler,
-		logger:     logger,
-		ready:      make(chan struct{}),
-		workers:    make(map[topicPartition]*partitionWorker),
-		rewindReqs: make(map[topicPartition]*kgo.Record),
-		resumeAt:   make(map[topicPartition]time.Time),
+		groupID: groupID,
+		topics:  topics,
+		handler: handler,
+		logger:  logger,
+		ready:   make(chan struct{}),
+		workers: make(map[topicPartition]*partitionWorker),
 	}
 
 	// Ensure the subscribed topics exist (at their configured partition count)
@@ -275,11 +244,7 @@ func (c *Consumer) Start(parent context.Context) error {
 // shutdown watcher in Start translates ctx cancellation into a client close.
 func (c *Consumer) pollLoop(ctx context.Context) {
 	for {
-		// Deadline-bounded poll (see pollTick): the loop must keep turning to
-		// apply and resume rewinds even when nothing is fetchable.
-		pollCtx, cancelPoll := context.WithTimeout(context.Background(), pollTick)
-		fetches := c.client.PollFetches(pollCtx)
-		cancelPoll()
+		fetches := c.client.PollFetches(context.Background())
 
 		// teranode #636/#638: client-closed is franz's self-healing reconnect or
 		// our own shutdown — recover, do not treat as a fatal goroutine exit.
@@ -289,13 +254,7 @@ func (c *Consumer) pollLoop(ctx context.Context) {
 
 		if errs := fetches.Errors(); len(errs) > 0 {
 			fatal := false
-			tickOnly := true
 			for _, e := range errs {
-				// Our own pollTick deadline: an idle tick, not a broker error.
-				if errors.Is(e.Err, context.DeadlineExceeded) {
-					continue
-				}
-				tickOnly = false
 				if errors.Is(e.Err, context.Canceled) || errors.Is(e.Err, kgo.ErrClientClosed) {
 					fatal = true
 					continue
@@ -306,18 +265,13 @@ func (c *Consumer) pollLoop(ctx context.Context) {
 			if fatal {
 				return
 			}
-			if !tickOnly {
-				// Transient fetch errors: let the client self-heal and poll again.
-				c.applyRewinds()
-				c.client.AllowRebalance()
-				continue
-			}
-			// Idle tick: fall through — rewind application and AllowRebalance
-			// below still run.
-		} else {
-			// First healthy poll signals readiness.
-			c.signalReady()
+			// Transient fetch errors: let the client self-heal and poll again.
+			c.client.AllowRebalance()
+			continue
 		}
+
+		// First healthy poll signals readiness.
+		c.signalReady()
 
 		fetches.EachPartition(func(p kgo.FetchTopicPartition) {
 			if len(p.Records) == 0 {
@@ -335,65 +289,9 @@ func (c *Consumer) pollLoop(ctx context.Context) {
 			}
 		})
 
-		// Apply worker-recorded rewinds while rebalances are still blocked
-		// (post-poll, pre-AllowRebalance) — the only window where SetOffsets
-		// cannot race a revoke. See rewindReqs.
-		c.applyRewinds()
-
 		// With BlockRebalanceOnPoll, rebalances wait until we explicitly allow
 		// them — after dispatch, so partitions never move mid-dispatch.
 		c.client.AllowRebalance()
-	}
-}
-
-// applyRewinds performs the client side of every pending rewind and resumes
-// partitions whose post-rewind backoff has elapsed. MUST run on the poll
-// goroutine between a PollFetches return and AllowRebalance: rebalances are
-// blocked there, satisfying SetOffsets' requirement that no revoke runs
-// concurrently, and giving safe access to the poll-goroutine-owned workers
-// and resumeAt maps.
-func (c *Consumer) applyRewinds() {
-	c.rewindMu.Lock()
-	var reqs map[topicPartition]*kgo.Record
-	if len(c.rewindReqs) > 0 {
-		reqs = c.rewindReqs
-		c.rewindReqs = make(map[topicPartition]*kgo.Record)
-	}
-	c.rewindMu.Unlock()
-
-	for tp, rec := range reqs {
-		if _, ok := c.workers[tp]; !ok {
-			// Partition revoked after the worker recorded the request; the
-			// new owner resumes from the last committed offset, which is
-			// before the failed record (commits never advance past a
-			// failure), so redelivery still happens — there.
-			continue
-		}
-		c.logger.Warn(
-			"rewinding partition to redeliver failed record",
-			"group", c.groupID,
-			"topic", tp.topic,
-			"partition", tp.partition,
-			"offset", rec.Offset,
-		)
-		paused := map[string][]int32{tp.topic: {tp.partition}}
-		c.client.PauseFetchPartitions(paused)
-		c.client.SetOffsets(map[string]map[int32]kgo.EpochOffset{
-			tp.topic: {tp.partition: {Epoch: rec.LeaderEpoch, Offset: rec.Offset}},
-		})
-		c.resumeAt[tp] = time.Now().Add(handlerErrorBackoff)
-	}
-
-	if len(c.resumeAt) == 0 {
-		return
-	}
-	now := time.Now()
-	for tp, at := range c.resumeAt {
-		if now.Before(at) {
-			continue
-		}
-		c.client.ResumeFetchPartitions(map[string][]int32{tp.topic: {tp.partition}})
-		delete(c.resumeAt, tp)
 	}
 }
 
@@ -447,19 +345,6 @@ func (c *Consumer) stopWorkers(tps map[string][]int32) {
 				w.signalStop()
 				stopped = append(stopped, w)
 				delete(c.workers, tp)
-			}
-			// Drop rewind state for the departing partition and un-pause it:
-			// pause is client-local, so a partition revoked mid-backoff and
-			// later re-assigned to this client would otherwise never fetch
-			// again. Runs on the poll goroutine (rebalance callback or final
-			// teardown), so touching resumeAt is safe; Resume on a
-			// never-paused or closing client is a no-op.
-			c.rewindMu.Lock()
-			delete(c.rewindReqs, tp)
-			c.rewindMu.Unlock()
-			if _, paused := c.resumeAt[tp]; paused {
-				delete(c.resumeAt, tp)
-				c.client.ResumeFetchPartitions(map[string][]int32{tp.topic: {tp.partition}})
 			}
 		}
 	}
@@ -580,9 +465,8 @@ func (w *partitionWorker) process(recs []*kgo.Record) {
 	}
 }
 
-// rewind records that this partition's fetch position must be reset to the
-// failed record so it (and everything after it) is redelivered, then backs
-// off before processing more batches.
+// rewind resets this partition's fetch position back to the failed record so
+// it (and everything after it) is redelivered, then backs off before resuming.
 //
 // This is load-bearing for at-least-once delivery. Unlike sarama — where an
 // uncommitted offset was automatically re-fetched after the session ended —
@@ -590,40 +474,35 @@ func (w *partitionWorker) process(recs []*kgo.Record) {
 // PollFetches, independent of commits. Merely withholding the commit does NOT
 // cause redelivery within a running session; without the rewind the failed
 // record would be silently and permanently lost as soon as a later record
-// committed.
-//
-// The worker only RECORDS the request; the pause/SetOffsets/resume sequence
-// runs on the poll goroutine (applyRewinds), where rebalances are provably
-// blocked. Issuing SetOffsets from here — as this method originally did —
-// violated kgo's documented requirement to block concurrent revokes and
-// could deadlock the consumer under a rebalance-during-rewind-storm (the
-// dev-ovh-1 subtree-fetcher wedge of 8 Jul 2026). Batches fetched between
-// recording and application are dropped by the discardUntil guard, so the
-// deferred application does not weaken redelivery.
+// committed. Sequence per franz-go guidance: pause (no new fetches mid-reset),
+// SetOffsets to the failed record (purges records already buffered client-side
+// for the partition), back off, resume. Only this partition stalls; sarama, by
+// contrast, tore down the entire session.
 func (w *partitionWorker) rewind(rec *kgo.Record) {
-	w.discardUntil = rec.Offset
-	w.c.queueRewind(topicPartition{rec.Topic, rec.Partition}, rec)
+	w.c.logger.Warn(
+		"rewinding partition to redeliver failed record",
+		"group", w.c.groupID,
+		"topic", rec.Topic,
+		"partition", rec.Partition,
+		"offset", rec.Offset,
+	)
 
-	// Throttle the redeliver-and-fail cycle while the underlying problem
-	// (Aerospike blip, DLQ hiccup) persists; abandoned early on stop.
+	paused := map[string][]int32{rec.Topic: {rec.Partition}}
+	w.c.client.PauseFetchPartitions(paused)
+	w.c.client.SetOffsets(map[string]map[int32]kgo.EpochOffset{
+		rec.Topic: {rec.Partition: {Epoch: rec.LeaderEpoch, Offset: rec.Offset}},
+	})
+	w.discardUntil = rec.Offset
+
 	select {
 	case <-time.After(handlerErrorBackoff):
 	case <-w.quit:
 	case <-w.ctx.Done():
 	}
-}
 
-// queueRewind records the failed record a partition must be rewound to,
-// keeping the earliest offset if one is already pending (defensive — the
-// worker is serial, so two pending requests for one partition should not
-// happen). Safe from any goroutine; applied by the poll goroutine.
-func (c *Consumer) queueRewind(tp topicPartition, rec *kgo.Record) {
-	c.rewindMu.Lock()
-	defer c.rewindMu.Unlock()
-	if existing, ok := c.rewindReqs[tp]; ok && existing.Offset <= rec.Offset {
-		return
-	}
-	c.rewindReqs[tp] = rec
+	// Resume even when stopping: leaving a partition paused on a live client
+	// would silently stop consumption; on a closing client it is a no-op.
+	w.c.client.ResumeFetchPartitions(paused)
 }
 
 // processBatch runs the handler over one partition's records in order and

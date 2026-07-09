@@ -170,23 +170,6 @@ type Producer struct {
 
 // NewProducer creates a new Kafka producer backed by franz-go.
 func NewProducer(brokers []string, topic string, logger *slog.Logger) (*Producer, error) {
-	// Ensure the target topic exists before the first publish, exactly as
-	// NewConsumer does for its subscribed topics. Consumers only pre-create
-	// what they consume, so a producer-only topic (a DLQ) otherwise depends
-	// on broker-side auto-creation — and with that disabled every publish
-	// fails with UNKNOWN_TOPIC_OR_PARTITION. That is how the subtree-fetcher
-	// collapsed on dev-ovh-1: its disk-full overflow path had nowhere to
-	// park failures (subtree-dlq was never created), so every one fell
-	// through to the partition rewind path instead. Best-effort, matching
-	// NewConsumer: a transient failure is logged, not fatal — auto-creating
-	// brokers still work without it.
-	ensureCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if eErr := EnsureTopics(ensureCtx, brokers, []string{topic}, nil, logger); eErr != nil && logger != nil {
-		logger.Warn("could not pre-create producer topic; relying on broker auto-create",
-			"topic", topic, "error", eErr)
-	}
-	cancel()
-
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
 		kgo.DefaultProduceTopic(topic),
