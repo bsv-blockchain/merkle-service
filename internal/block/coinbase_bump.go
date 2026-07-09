@@ -95,9 +95,11 @@ func buildCoinbaseSiblings(subtree0Nodes []subtreepkg.Node, subtreeRoots []chain
 // BLOCK_PROCESSED. It is best-effort: any step that fails degrades gracefully
 // to the richest data gathered so far (a consumer that's missing a field falls
 // back to a datahub), and it never returns nil for a block with subtrees. The
-// merkle root and coinbase tx come from the P2P BlockMessage (no datahub); the
-// subtree list comes from the already-fetched metadata; only the coinbase
-// BUMP requires fetching subtree 0.
+// merkle root and coinbase tx come from the already-fetched block metadata
+// (falling back to the P2P BlockMessage fields, which are not reliably
+// populated: teranode's announcement never carries the coinbase, and
+// /reprocess-driven messages carry neither); the subtree list comes from the
+// same metadata; only the coinbase BUMP requires fetching subtree 0.
 func (p *Processor) buildBlockProcessedData(
 	ctx context.Context,
 	blockMsg *kafka.BlockMessage,
@@ -109,7 +111,11 @@ func (p *Processor) buildBlockProcessedData(
 		SubtreeHashes: meta.Subtrees,
 	}
 
-	merkleRoot, err := merkleRootFromHeader(blockMsg.Header)
+	headerHex := meta.HeaderHex
+	if headerHex == "" {
+		headerHex = blockMsg.Header
+	}
+	merkleRoot, err := merkleRootFromHeader(headerHex)
 	if err != nil {
 		// Without the merkle root a consumer can't validate against the canonical
 		// chain, but the subtree list is still useful. Log and carry on.
@@ -125,7 +131,11 @@ func (p *Processor) buildBlockProcessedData(
 		return data // coinbase-only block: no subtrees, no coinbase BUMP needed.
 	}
 
-	cbTxID, err := coinbaseTxIDFromHex(blockMsg.Coinbase)
+	coinbaseHex := meta.CoinbaseTxHex
+	if coinbaseHex == "" {
+		coinbaseHex = blockMsg.Coinbase
+	}
+	cbTxID, err := coinbaseTxIDFromHex(coinbaseHex)
 	if err != nil {
 		p.Logger.Warn("BLOCK_PROCESSED: could not compute coinbase txid; omitting coinbase BUMP",
 			logfields.BlockHash(blockMsg.Hash), "error", err)
