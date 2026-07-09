@@ -2,6 +2,7 @@ package datahub
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -230,6 +231,17 @@ type BlockMetadata struct {
 	Header           *BlockHeader `json:"header,omitempty"`
 	Subtrees         []string     `json:"subtrees"`
 	TransactionCount uint64       `json:"transaction_count"`
+
+	// HeaderHex is the hex-encoded 80-byte block header and CoinbaseTxHex the
+	// hex-encoded raw coinbase transaction, both taken from the fetched block
+	// binary. They mirror the kafka.BlockMessage.Header/.Coinbase wire format
+	// so consumers can use them interchangeably. The BlockMessage fields are
+	// not reliably populated (teranode's block announcement never carries the
+	// coinbase, and /reprocess-driven messages carry neither), whereas the
+	// block binary — which we fetch anyway for the subtree list — always
+	// carries both.
+	HeaderHex     string `json:"header_hex,omitempty"`
+	CoinbaseTxHex string `json:"coinbase_tx_hex,omitempty"`
 }
 
 // FetchSubtreeRaw fetches raw binary subtree data from a DataHub endpoint.
@@ -311,11 +323,29 @@ func ParseBinaryBlockMetadata(data []byte) (*BlockMetadata, error) {
 		subtrees[i] = h.String()
 	}
 
-	return &BlockMetadata{
+	meta := &BlockMetadata{
 		Height:           block.Height,
 		Subtrees:         subtrees,
 		TransactionCount: block.TransactionCount,
-	}, nil
+	}
+
+	// Carry the header and coinbase through instead of discarding them: the
+	// block binary is the only source that reliably has both (the P2P block
+	// announcement omits the coinbase; /reprocess messages omit the header
+	// too), and downstream BLOCK_PROCESSED enrichment needs them for the
+	// merkle root and the coinbase BUMP.
+	if block.Header != nil {
+		meta.HeaderHex = hex.EncodeToString(block.Header.Bytes())
+	}
+	// A nil coinbase serializes as an input-less placeholder tx and parses
+	// back as such, so gate on a real coinbase (exactly one input) rather
+	// than non-nil alone — an empty placeholder must read as "absent", not
+	// hash to a bogus txid downstream.
+	if block.CoinbaseTx != nil && len(block.CoinbaseTx.Inputs) > 0 {
+		meta.CoinbaseTxHex = hex.EncodeToString(block.CoinbaseTx.Bytes())
+	}
+
+	return meta, nil
 }
 
 // FetchBlockMetadata fetches block metadata (binary) from a DataHub endpoint.

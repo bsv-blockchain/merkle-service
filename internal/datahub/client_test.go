@@ -2,6 +2,7 @@ package datahub
 
 import (
 	"context"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	bt "github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/model"
 )
@@ -564,5 +566,70 @@ func TestFetch_RecordsPeerHealth(t *testing.T) {
 	}
 	if !ph.IsHealthy(server.URL) {
 		t.Fatal("success should restore peer health")
+	}
+}
+
+// TestParseBinaryBlockMetadata_HeaderAndCoinbase verifies the parser carries
+// the 80-byte header and the raw coinbase tx through from the block binary
+// instead of discarding them: they are the only reliable source for the
+// BLOCK_PROCESSED merkle root + coinbase BUMP (the P2P announcement never
+// carries the coinbase, and /reprocess messages carry no header either).
+func TestParseBinaryBlockMetadata_HeaderAndCoinbase(t *testing.T) {
+	// Bitcoin genesis coinbase — a real, parseable coinbase (one input).
+	const coinbaseHex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000"
+	coinbaseTx, err := bt.NewTxFromString(coinbaseHex)
+	if err != nil {
+		t.Fatalf("parse coinbase: %v", err)
+	}
+
+	merkleRoot := &chainhash.Hash{}
+	merkleRoot[0] = 0xAB
+	header := &model.BlockHeader{
+		HashPrevBlock:  &chainhash.Hash{},
+		HashMerkleRoot: merkleRoot,
+	}
+	subtree := &chainhash.Hash{}
+	subtree[0] = 0x01
+
+	block, err := model.NewBlock(header, coinbaseTx, []*chainhash.Hash{subtree}, 0, 0, 700001, 0)
+	if err != nil {
+		t.Fatalf("NewBlock: %v", err)
+	}
+	payload, err := block.Bytes()
+	if err != nil {
+		t.Fatalf("block.Bytes: %v", err)
+	}
+
+	meta, err := ParseBinaryBlockMetadata(payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := hex.EncodeToString(header.Bytes()); meta.HeaderHex != want {
+		t.Errorf("HeaderHex = %q, want %q", meta.HeaderHex, want)
+	}
+	if len(meta.HeaderHex) != 160 {
+		t.Errorf("HeaderHex length = %d, want 160 (80 bytes)", len(meta.HeaderHex))
+	}
+	if meta.CoinbaseTxHex != coinbaseHex {
+		t.Errorf("CoinbaseTxHex = %q, want the original coinbase hex", meta.CoinbaseTxHex)
+	}
+}
+
+// TestParseBinaryBlockMetadata_NilCoinbase verifies a block serialized
+// without a coinbase (it round-trips as an input-less placeholder tx) yields
+// an EMPTY CoinbaseTxHex — the placeholder must read as absent, not hash to
+// a bogus coinbase txid downstream.
+func TestParseBinaryBlockMetadata_NilCoinbase(t *testing.T) {
+	payload := buildBinaryBlockBytes(42, [][]byte{append([]byte{0x01}, make([]byte, 31)...)})
+
+	meta, err := ParseBinaryBlockMetadata(payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta.CoinbaseTxHex != "" {
+		t.Errorf("CoinbaseTxHex = %q, want empty for a placeholder coinbase", meta.CoinbaseTxHex)
+	}
+	if meta.HeaderHex == "" {
+		t.Error("HeaderHex empty: header must always be carried through")
 	}
 }
