@@ -242,6 +242,15 @@ type BlockMetadata struct {
 	// carries both.
 	HeaderHex     string `json:"header_hex,omitempty"`
 	CoinbaseTxHex string `json:"coinbase_tx_hex,omitempty"`
+
+	// CoinbaseBUMPHex is teranode's ready-made BRC-74 coinbase BUMP, carried
+	// in the block binary's tail. When present and valid it is the preferred
+	// source for the BLOCK_PROCESSED coinbase BUMP: it is authoritative (the
+	// node computed it from the full block, including the final-subtree
+	// height-lift) and it remains available even after every peer has pruned
+	// the block's subtree data — reconstruction from subtree 0 cannot make
+	// that guarantee.
+	CoinbaseBUMPHex string `json:"coinbase_bump_hex,omitempty"`
 }
 
 // FetchSubtreeRaw fetches raw binary subtree data from a DataHub endpoint.
@@ -343,6 +352,9 @@ func ParseBinaryBlockMetadata(data []byte) (*BlockMetadata, error) {
 	// hash to a bogus txid downstream.
 	if block.CoinbaseTx != nil && len(block.CoinbaseTx.Inputs) > 0 {
 		meta.CoinbaseTxHex = hex.EncodeToString(block.CoinbaseTx.Bytes())
+	}
+	if len(block.CoinbaseBUMP) > 0 {
+		meta.CoinbaseBUMPHex = hex.EncodeToString(block.CoinbaseBUMP)
 	}
 
 	return meta, nil
