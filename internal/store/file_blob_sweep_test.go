@@ -149,3 +149,29 @@ func TestStartBlobSweeperFromConfig(t *testing.T) {
 		stop() // must not panic
 	})
 }
+
+// TestFileBlobStore_StartOrphanSweeperGuardsInterval pins that a non-positive
+// interval cannot panic time.NewTicker: the runner clamps it to a sane
+// default. (StartBlobSweeperFromConfig already clamps, but this method is
+// exported and callable directly.)
+func TestFileBlobStore_StartOrphanSweeperGuardsInterval(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := NewFileBlobStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileBlobStore: %v", err)
+	}
+	if err := bs.Set("ancient", []byte("x")); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	past := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(filepath.Join(dir, "ancient"), past, past); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	stop := bs.StartOrphanSweeper(0, time.Hour, nil) // must not panic
+	defer stop()
+
+	if _, err := bs.Get("ancient"); !errors.Is(err, ErrBlobNotFound) {
+		t.Errorf("immediate sweep must still run with clamped interval; Get err = %v", err)
+	}
+}

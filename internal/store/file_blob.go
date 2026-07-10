@@ -155,6 +155,16 @@ func (f *FileBlobStore) resolvePath(key string) (string, error) {
 	if strings.ContainsRune(key, '\\') {
 		return "", fmt.Errorf("%w: %q contains backslash", ErrBlobKeyEscapesRoot, key)
 	}
+	// Reject control characters. DAH manifests are line-oriented (one key per
+	// line), so a key containing "\n" would persist as TWO manifest lines —
+	// forging a delete schedule for a different in-root blob. No legitimate
+	// key (hex hashes, optional "<bucket>/" prefix) contains control
+	// characters, so reject the whole class rather than just newlines.
+	for _, r := range key {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("%w: %q contains control character", ErrBlobKeyEscapesRoot, key)
+		}
+	}
 	// Walk segments and reject any "..". Splitting by "/" works for the
 	// forward-slash-namespaced keys this store accepts; the IsAbs check
 	// above already rejects anything starting at root.

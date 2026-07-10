@@ -315,3 +315,24 @@ func TestSubtreeStore_ScheduleDeleteAppliesDAHOffset(t *testing.T) {
 		t.Error("subtree must be pruned at blockHeight+dahOffset")
 	}
 }
+
+// TestFileBlobStore_RejectsControlCharacterKeys pins that keys containing
+// control characters are rejected. DAH manifests are line-oriented (one key
+// per line), so a key containing "\n" would be persisted as TWO manifest
+// lines — forging a delete schedule for a different in-root blob. "\r" and
+// friends are rejected on the same grounds: no legitimate key (hex hashes,
+// optional "stump/" prefix) ever contains control characters.
+func TestFileBlobStore_RejectsControlCharacterKeys(t *testing.T) {
+	bs, err := NewFileBlobStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileBlobStore: %v", err)
+	}
+	for _, key := range []string{"aaa\nvictim", "aaa\rvictim", "aaa\tvictim", "\n", "aaa\x00bbb"} {
+		if err := bs.Set(key, []byte("x")); !errors.Is(err, ErrBlobKeyEscapesRoot) {
+			t.Errorf("Set(%q) must be rejected, got %v", key, err)
+		}
+		if err := bs.ScheduleDelete(key, 5); !errors.Is(err, ErrBlobKeyEscapesRoot) {
+			t.Errorf("ScheduleDelete(%q) must be rejected, got %v", key, err)
+		}
+	}
+}

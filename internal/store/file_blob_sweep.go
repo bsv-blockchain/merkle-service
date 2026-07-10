@@ -75,8 +75,14 @@ func (f *FileBlobStore) SweepOrphans(maxAge time.Duration) (int, error) {
 
 // StartOrphanSweeper runs SweepOrphans immediately and then every interval,
 // until the returned stop function is called. The stop function is
-// idempotent and safe to call concurrently. logger may be nil.
+// idempotent and safe to call concurrently. logger may be nil. A
+// non-positive interval is clamped to one hour: time.NewTicker panics on
+// values <= 0, and this method is exported (StartBlobSweeperFromConfig
+// clamps too, but direct callers deserve the same protection).
 func (f *FileBlobStore) StartOrphanSweeper(interval, maxAge time.Duration, logger *slog.Logger) (stop func()) {
+	if interval <= 0 {
+		interval = time.Hour
+	}
 	sweep := func() {
 		removed, err := f.SweepOrphans(maxAge)
 		if logger == nil {
