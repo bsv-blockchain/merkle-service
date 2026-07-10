@@ -47,13 +47,14 @@ func TestConsumer_RewindStormSurvivesRebalance(t *testing.T) {
 	// Continuous production across all partitions for the whole test, so
 	// fetch buffers and worker channels stay hot like the production storm.
 	prodCtx, stopProd := context.WithCancel(context.Background())
-	defer stopProd()
 	prod, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.DefaultProduceTopic(topic))
 	if err != nil {
+		stopProd()
 		t.Fatalf("creating producer: %v", err)
 	}
-	defer prod.Close()
+	prodDone := make(chan struct{})
 	go func() {
+		defer close(prodDone)
 		i := 0
 		for prodCtx.Err() == nil {
 			for p := int32(0); p < partitions; p++ {
@@ -65,6 +66,13 @@ func TestConsumer_RewindStormSurvivesRebalance(t *testing.T) {
 			i++
 			time.Sleep(5 * time.Millisecond)
 		}
+	}()
+	// Teardown order matters: stop the producer goroutine and wait for it to
+	// exit BEFORE closing the client, so no Produce call races the close.
+	defer func() {
+		stopProd()
+		<-prodDone
+		prod.Close()
 	}()
 
 	// F-053 crash-guard stub (see redelivery_test.go).
