@@ -406,6 +406,15 @@ blobStore:
   # Env: BLOB_STORE_URL
   url: file:///mnt/nvme/merkle-subtreestore
 
+  # Orphan sweeper (file:// stores only). Blobs whose block height becomes
+  # known are pruned by delete-at-height schedules; blobs that are announced
+  # but never mined have no height and would otherwise live forever. The
+  # sweeper deletes blob files older than orphanMaxAgeSec — set it well above
+  # the longest plausible announcement-to-mine gap. 0 disables the sweeper.
+  orphanMaxAgeSec: 86400
+  # How often the sweeper walks the store.
+  sweepIntervalSec: 3600
+
 # ---------------------------------------------------------------------------
 # DataHub — HTTP client for fetching subtree/block data from Teranode
 # ---------------------------------------------------------------------------

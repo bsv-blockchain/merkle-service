@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/bsv-blockchain/merkle-service/internal/cache"
@@ -45,9 +46,18 @@ type SubtreeWorkerService struct {
 	urlRegistry      store.CallbackURLRegistry
 	subtreeCounter   store.SubtreeCounterStore
 	expectedStumps   store.ExpectedStumpStore
+	seenCounter      store.SeenCounterStore // mine-time counter cleanup; nil disables
 	dataHubClient    *datahub.Client
 	regCache         RegCache
 	batchSem         chan struct{}
+
+	// lastPruneHeight is the highest block height this worker has passed to
+	// subtreeStore.SetCurrentBlockHeight. Workers see a height on every work
+	// item; advancing the store's prune height here — not only in the
+	// block-processor — is what makes delete-at-height schedules fire in the
+	// worker process at all. Only strictly-increasing heights trigger a
+	// prune pass, so the steady-state per-message cost is one atomic load.
+	lastPruneHeight atomic.Uint64
 }
 
 func NewSubtreeWorkerService(
@@ -60,6 +70,7 @@ func NewSubtreeWorkerService(
 	urlRegistry store.CallbackURLRegistry,
 	subtreeCounter store.SubtreeCounterStore,
 	expectedStumps store.ExpectedStumpStore,
+	seenCounter store.SeenCounterStore,
 	logger *slog.Logger,
 ) *SubtreeWorkerService {
 	s := &SubtreeWorkerService{
@@ -72,6 +83,7 @@ func NewSubtreeWorkerService(
 		urlRegistry:    urlRegistry,
 		subtreeCounter: subtreeCounter,
 		expectedStumps: expectedStumps,
+		seenCounter:    seenCounter,
 	}
 	s.InitBase("subtree-worker")
 	if logger != nil {
@@ -254,6 +266,25 @@ func (s *SubtreeWorkerService) maxAttempts() int {
 // re-publish BLOCK_PROCESSED. Receiver-side dedup at the delivery service
 // (keyed by blockHash + callbackURL + type) ensures the registered endpoint
 // sees BLOCK_PROCESSED at most once per (block, URL) pair.
+// advancePruneHeight passes height to the subtree store's prune pass when it
+// is higher than any height this worker has seen. The CAS loop means exactly
+// one goroutine runs the prune for a given new height; the rest see the
+// updated value and skip. Heights arrive out of order across partitions —
+// stale (lower) heights are ignored, which is fine: pruning at H already
+// covered everything at or below it.
+func (s *SubtreeWorkerService) advancePruneHeight(height uint64) {
+	for {
+		last := s.lastPruneHeight.Load()
+		if height <= last {
+			return
+		}
+		if s.lastPruneHeight.CompareAndSwap(last, height) {
+			s.subtreeStore.SetCurrentBlockHeight(height)
+			return
+		}
+	}
+}
+
 func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Message) error {
 	workMsg, err := kafka.DecodeSubtreeWorkMessage(msg.Value)
 	if err != nil {
@@ -276,6 +307,12 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 		"attemptCount", workMsg.AttemptCount,
 	)
 
+	// Fire delete-at-height schedules up to (but excluding) this block.
+	// Safe before processing: everything belonging to the current block is
+	// scheduled at blockHeight+dahOffset (> blockHeight), so this only ever
+	// removes prior blocks' blobs.
+	s.advancePruneHeight(uint64(workMsg.BlockHeight))
+
 	result, err := ProcessBlockSubtree(
 		ctx,
 		workMsg.SubtreeHash,
@@ -290,6 +327,7 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 		s.blockCfg.PostMineTTLSec,
 		workMsg.OverrideCallbackURL,
 		workMsg.OverrideCallbackToken,
+		s.seenCounter,
 		s.Logger,
 	)
 	if err != nil {

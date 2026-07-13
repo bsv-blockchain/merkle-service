@@ -154,3 +154,52 @@ func (s *seenCounter) tryFireThreshold(ctx context.Context, tx *sql.Tx, txid str
 	}
 	return n > 0, nil
 }
+
+// BatchDelete removes the counters (and their per-subtree child rows) for
+// txids — the mine-time cleanup: once a txid is in a block its propagation
+// counter is dead weight. Missing txids are silently skipped (idempotent, so
+// work-item redelivery is safe). Per-txid statements match this backend's
+// tests-and-small-deployments posture (see BatchIncrement).
+func (s *seenCounter) BatchDelete(txids []string) error {
+	if len(txids) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	qChildren := fmt.Sprintf("DELETE FROM seen_counter_subtrees WHERE txid = %s", s.d.placeholder(1))
+	qParent := fmt.Sprintf("DELETE FROM seen_counters WHERE txid = %s", s.d.placeholder(1))
+
+	// Children + parent go in ONE transaction per txid (no FK cascade in the
+	// schema): unpaired deletes could interleave with a concurrent Increment
+	// and leave orphan child rows that a recreated parent later counts as
+	// phantom subtrees. Per-txid transactions (not one big one) preserve the
+	// best-effort contract — a failure on one txid doesn't roll back the rest.
+	var firstErr error
+	for _, txid := range txids {
+		if err := s.deleteOne(ctx, qChildren, qParent, txid); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// deleteOne atomically removes one txid's child rows and parent counter row.
+func (s *seenCounter) deleteOne(ctx context.Context, qChildren, qParent, txid string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete seen counter tx for %s: %w", txid, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, qChildren, txid); err != nil {
+		return fmt.Errorf("delete seen counter subtrees for %s: %w", txid, err)
+	}
+	if _, err := tx.ExecContext(ctx, qParent, txid); err != nil {
+		return fmt.Errorf("delete seen counter for %s: %w", txid, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete seen counter for %s: %w", txid, err)
+	}
+	return nil
+}

@@ -154,6 +154,15 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.BlobStore.URL != "file:///tmp/merkle-subtrees" {
 		t.Errorf("BlobStore.URL: expected %q, got %q", "file:///tmp/merkle-subtrees", cfg.BlobStore.URL)
 	}
+	// Orphan sweeper: on by default with a generous window — it is the
+	// backstop for blobs whose height is never learned (announced but never
+	// mined), which delete-at-height pruning cannot reach.
+	if cfg.BlobStore.OrphanMaxAgeSec != 86400 {
+		t.Errorf("BlobStore.OrphanMaxAgeSec: expected 86400, got %d", cfg.BlobStore.OrphanMaxAgeSec)
+	}
+	if cfg.BlobStore.SweepIntervalSec != 3600 {
+		t.Errorf("BlobStore.SweepIntervalSec: expected 3600, got %d", cfg.BlobStore.SweepIntervalSec)
+	}
 }
 
 func TestLoad_EnvOverrides(t *testing.T) {

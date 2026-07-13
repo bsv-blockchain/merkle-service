@@ -41,6 +41,11 @@ type SubtreeStore interface {
 	GetSubtree(id string) ([]byte, error)
 	GetSubtreeReader(id string) (io.ReadCloser, error)
 	DeleteSubtree(id string) error
+	// ScheduleDelete schedules an already-stored subtree for pruning at
+	// blockHeight + dahOffset without rewriting its bytes — the block-time
+	// complement to StoreSubtree's announcement-time write (which cannot set
+	// a DAH because the height is unknown then). blockHeight 0 is a no-op.
+	ScheduleDelete(id string, blockHeight uint64) error
 	SetCurrentBlockHeight(height uint64)
 }
 
@@ -102,6 +107,12 @@ type CallbackAccumulatorStore interface {
 type SeenCounterStore interface {
 	Increment(txid, subtreeID string) (*IncrementResult, error)
 	BatchIncrement(txids []string, subtreeID string) (map[string]*IncrementResult, error)
+	// BatchDelete removes the counters for txids. Called at mine time: a
+	// counter tracks pre-mine propagation, so once its txid is in a block
+	// the record is dead weight — this is the event-driven cleanup that
+	// keeps the set from growing forever. Missing txids are not an error
+	// (idempotent, safe on work-item redelivery).
+	BatchDelete(txids []string) error
 	Threshold() int
 }
 

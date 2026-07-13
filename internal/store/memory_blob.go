@@ -71,7 +71,20 @@ func (m *MemoryBlobStore) Del(key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.data, key)
-	delete(m.dah, key)
+	// The DAH schedule survives Del: schedules are append-only and not
+	// cancellable (FileBlobStore's manifests likewise outlive the blob), and
+	// firing on a deleted or re-stored key is harmless because blobs are
+	// content-addressed.
+	return nil
+}
+
+// ScheduleDelete records a delete-at-height for an already-stored blob
+// without rewriting its bytes — the in-memory analog of FileBlobStore's
+// manifest append.
+func (m *MemoryBlobStore) ScheduleDelete(key string, height uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dah[key] = height
 	return nil
 }
 

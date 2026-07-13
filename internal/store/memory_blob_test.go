@@ -47,6 +47,31 @@ func TestMemoryBlobStore_Delete(t *testing.T) {
 	}
 }
 
+// TestMemoryBlobStore_DelDoesNotCancelSchedule pins that the in-memory store
+// honors the same schedule contract as FileBlobStore (see
+// TestFileBlobStore_ScheduleIsNotCancelable): delete-at-height schedules are
+// append-only and survive Del, so a Del + re-store does not rescue the blob
+// from its scheduled prune.
+func TestMemoryBlobStore_DelDoesNotCancelSchedule(t *testing.T) {
+	s := NewMemoryBlobStore()
+	if err := s.Set("k1", []byte("v1"), WithDeleteAtHeight(4)); err != nil {
+		t.Fatalf("set failed: %v", err)
+	}
+	if err := s.Del("k1"); err != nil {
+		t.Fatalf("del failed: %v", err)
+	}
+	// Re-store the same key without a DAH; the earlier schedule still fires.
+	if err := s.Set("k1", []byte("v1")); err != nil {
+		t.Fatalf("re-set failed: %v", err)
+	}
+
+	s.SetCurrentBlockHeight(4)
+
+	if _, err := s.Get("k1"); err == nil {
+		t.Fatal("schedule must fire at height 4 despite Del+re-store")
+	}
+}
+
 func TestMemoryBlobStore_DAH(t *testing.T) {
 	s := NewMemoryBlobStore()
 	err := s.Set("k1", []byte("v1"), WithDeleteAtHeight(10))

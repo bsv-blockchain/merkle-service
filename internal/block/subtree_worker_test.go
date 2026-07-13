@@ -23,6 +23,7 @@ func TestSubtreeWorkerService_NewAndHealth(t *testing.T) {
 		nil, // urlRegistry
 		nil, // subtreeCounter
 		nil, // expectedStumps
+		nil, // seenCounter
 		logger,
 	)
 

@@ -422,6 +422,16 @@ type CallbackConfig struct {
 // BlobStoreConfig holds blob store configuration.
 type BlobStoreConfig struct {
 	URL string `yaml:"url" mapstructure:"url"`
+	// OrphanMaxAgeSec is the age after which a blob file with no fired
+	// delete-at-height schedule is removed by the background sweeper — the
+	// backstop for subtrees announced but never mined (their height is never
+	// learned, so height-based pruning cannot reach them) and for files
+	// orphaned by a crash between write and schedule. Must comfortably
+	// exceed the longest plausible announcement-to-mine gap. 0 disables the
+	// sweeper.
+	OrphanMaxAgeSec int `yaml:"orphanMaxAgeSec" mapstructure:"orphanmaxagesec"`
+	// SweepIntervalSec is how often the orphan sweeper walks the store.
+	SweepIntervalSec int `yaml:"sweepIntervalSec" mapstructure:"sweepintervalsec"`
 }
 
 // DataHubConfig holds DataHub HTTP client configuration.
@@ -594,6 +604,8 @@ func registerDefaults(v *viper.Viper) {
 
 	// BlobStore
 	v.SetDefault("blobstore.url", "file:///tmp/merkle-subtrees")
+	v.SetDefault("blobstore.orphanmaxagesec", 86400)
+	v.SetDefault("blobstore.sweepintervalsec", 3600)
 
 	// DataHub
 	// Defaults tuned so a known-bad peer is dropped in seconds, not minutes.
