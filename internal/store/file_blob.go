@@ -368,7 +368,21 @@ func (f *FileBlobStore) SetCurrentBlockHeight(height uint64) {
 			if err != nil {
 				continue
 			}
-			for _, key := range strings.Split(string(data), "\n") {
+			// Only act on newline-terminated entries. A manifest that does not
+			// end in "\n" was torn mid-append (every complete append ends with
+			// "\n"), so the trailing fragment is a truncated key — acting on it
+			// could remove a blob that was never scheduled. Dropping it loses
+			// only the crashed append's schedule; that blob falls through to
+			// the age sweeper, same as the torn-write posture in ScheduleDelete.
+			entries := string(data)
+			if !strings.HasSuffix(entries, "\n") {
+				if i := strings.LastIndexByte(entries, '\n'); i >= 0 {
+					entries = entries[:i+1]
+				} else {
+					entries = ""
+				}
+			}
+			for _, key := range strings.Split(entries, "\n") {
 				if key == "" {
 					continue
 				}

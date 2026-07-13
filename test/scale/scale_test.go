@@ -263,7 +263,7 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 	t.Cleanup(func() { processor.Stop() })
 
 	// Start subtree worker service.
-	subtreeWorker := block.NewSubtreeWorkerService(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, stumpStore, urlRegistry, subtreeCounter, expectedStumps, logger)
+	subtreeWorker := block.NewSubtreeWorkerService(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, stumpStore, urlRegistry, subtreeCounter, expectedStumps, nil, logger)
 	if err := subtreeWorker.Init(nil); err != nil {
 		t.Fatalf("failed to init subtree worker: %v", err)
 	}

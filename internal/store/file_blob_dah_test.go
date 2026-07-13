@@ -316,6 +316,47 @@ func TestSubtreeStore_ScheduleDeleteAppliesDAHOffset(t *testing.T) {
 	}
 }
 
+// TestFileBlobStore_PruneIgnoresTornManifestFragment pins that pruning acts
+// only on newline-terminated manifest entries. Appends are not fsynced, so a
+// crash can leave a truncated key as the manifest's final, unterminated
+// fragment; if pruning acted on that fragment, a blob that was never
+// scheduled could be deleted. The torn append's blob is instead left for the
+// age sweeper (the same recovery path ScheduleDelete's torn-write armor
+// documents).
+func TestFileBlobStore_PruneIgnoresTornManifestFragment(t *testing.T) {
+	dir := t.TempDir()
+
+	bs, err := NewFileBlobStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileBlobStore: %v", err)
+	}
+	if err := bs.Set("aa11", []byte("scheduled")); err != nil {
+		t.Fatalf("Set(aa11): %v", err)
+	}
+	if err := bs.Set("bb22", []byte("never-scheduled")); err != nil {
+		t.Fatalf("Set(bb22): %v", err)
+	}
+
+	// Simulate a manifest torn mid-append: one complete entry for aa11, then
+	// an unterminated fragment that happens to spell bb22's key.
+	manifestDir := filepath.Join(dir, ".dah", "9")
+	if err := os.MkdirAll(manifestDir, 0o750); err != nil {
+		t.Fatalf("mkdir manifest dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestDir, "torn.list"), []byte("\naa11\n\nbb22"), 0o600); err != nil {
+		t.Fatalf("writing torn manifest: %v", err)
+	}
+
+	bs.SetCurrentBlockHeight(9)
+
+	if _, err := bs.Get("aa11"); !errors.Is(err, ErrBlobNotFound) {
+		t.Errorf("terminated entry must still prune; Get err = %v", err)
+	}
+	if _, err := bs.Get("bb22"); err != nil {
+		t.Errorf("unterminated fragment must not delete a blob; Get err = %v", err)
+	}
+}
+
 // TestFileBlobStore_RejectsControlCharacterKeys pins that keys containing
 // control characters are rejected. DAH manifests are line-oriented (one key
 // per line), so a key containing "\n" would be persisted as TWO manifest
