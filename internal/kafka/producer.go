@@ -168,8 +168,14 @@ type Producer struct {
 	logger *slog.Logger
 }
 
-// NewProducer creates a new Kafka producer backed by franz-go.
+// NewProducer creates a new Kafka producer backed by franz-go. A nil logger
+// is replaced with slog.Default(): Publish and PublishBatch log unconditionally,
+// so accepting nil here without defaulting would turn the first publish into a
+// panic.
 func NewProducer(brokers []string, topic string, logger *slog.Logger) (*Producer, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	// Ensure the target topic exists before the first publish, exactly as
 	// NewConsumer does for its subscribed topics. Consumers only pre-create
 	// what they consume, so a producer-only topic (a DLQ) otherwise depends
@@ -181,7 +187,7 @@ func NewProducer(brokers []string, topic string, logger *slog.Logger) (*Producer
 	// NewConsumer: a transient failure is logged, not fatal — auto-creating
 	// brokers still work without it.
 	ensureCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if eErr := EnsureTopics(ensureCtx, brokers, []string{topic}, nil, logger); eErr != nil && logger != nil {
+	if eErr := EnsureTopics(ensureCtx, brokers, []string{topic}, nil, logger); eErr != nil {
 		logger.Warn("could not pre-create producer topic; relying on broker auto-create",
 			"topic", topic, "error", eErr)
 	}

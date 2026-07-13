@@ -164,6 +164,13 @@ type Consumer struct {
 // absent from the map default to 1. Pass nil to create/keep every subscribed
 // topic at 1 partition.
 func NewConsumer(brokers []string, groupID string, topics []string, handler MessageHandler, partitions map[string]int32, logger *slog.Logger) (*Consumer, error) {
+	// A nil logger is replaced with slog.Default(): Start, the poll loop, and
+	// the partition workers log unconditionally, so accepting nil here without
+	// defaulting would panic at the first consumed message.
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	c := &Consumer{
 		groupID:    groupID,
 		topics:     topics,
@@ -183,7 +190,7 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 	// still works via metadata refresh + producer-side auto-creation, just less
 	// promptly (and at the default partition count until a later start grows it).
 	ensureCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if eErr := EnsureTopics(ensureCtx, brokers, topics, partitions, logger); eErr != nil && logger != nil {
+	if eErr := EnsureTopics(ensureCtx, brokers, topics, partitions, logger); eErr != nil {
 		logger.Warn("could not pre-create consumer topics; relying on auto-create",
 			"groupID", groupID, "topics", topics, "error", eErr)
 	}
