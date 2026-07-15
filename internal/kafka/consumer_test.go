@@ -14,10 +14,14 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// rec builds a single-partition record at the given offset on topic "test".
+// testTopic is the topic name shared by the broker-free unit tests in this
+// package (record fixtures, struct-literal consumers/workers).
+const testTopic = "test"
+
+// rec builds a single-partition record at the given offset on topic testTopic.
 func rec(offset int64) *kgo.Record {
 	return &kgo.Record{
-		Topic:     "test",
+		Topic:     testTopic,
 		Partition: 0,
 		Offset:    offset,
 		Value:     []byte("v"),
@@ -121,7 +125,7 @@ func TestProcessBatch_FirstMessageError(t *testing.T) {
 // partition_concurrency_test.go, because franz options are opaque and cannot
 // be introspected the way sarama's *Config struct could.
 func TestConsumerOpts_AcceptedByClient(t *testing.T) {
-	client, err := kgo.NewClient(consumerOpts([]string{"localhost:9092"}, "test-group", []string{"test"})...)
+	client, err := kgo.NewClient(consumerOpts([]string{"localhost:9092"}, "test-group", []string{testTopic})...)
 	if err != nil {
 		t.Fatalf("consumerOpts produced an invalid franz option set: %v", err)
 	}

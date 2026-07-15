@@ -133,6 +133,7 @@ func (p *Processor) Init(_ interface{}) error {
 	callbackProducer, err := kafka.NewProducer(
 		p.cfg.Kafka.Brokers,
 		p.cfg.Kafka.CallbackTopic,
+		p.cfg.Kafka.TopicRetention(),
 		p.Logger,
 	)
 	if err != nil {
@@ -146,6 +147,7 @@ func (p *Processor) Init(_ interface{}) error {
 	retryProducer, err := kafka.NewProducer(
 		p.cfg.Kafka.Brokers,
 		p.cfg.Kafka.SubtreeTopic,
+		p.cfg.Kafka.TopicRetention(),
 		p.Logger,
 	)
 	if err != nil {
@@ -159,6 +161,7 @@ func (p *Processor) Init(_ interface{}) error {
 	dlqProducer, err := kafka.NewProducer(
 		p.cfg.Kafka.Brokers,
 		p.cfg.Kafka.SubtreeDLQTopic,
+		p.cfg.Kafka.TopicRetention(),
 		p.Logger,
 	)
 	if err != nil {
@@ -172,6 +175,7 @@ func (p *Processor) Init(_ interface{}) error {
 		[]string{p.cfg.Kafka.SubtreeTopic},
 		p.handleMessage,
 		p.cfg.Kafka.TopicPartitions(),
+		p.cfg.Kafka.TopicRetention(),
 		p.Logger,
 	)
 	if err != nil {

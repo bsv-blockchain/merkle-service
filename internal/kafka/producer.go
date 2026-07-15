@@ -172,7 +172,15 @@ type Producer struct {
 // is replaced with slog.Default(): Publish and PublishBatch log unconditionally,
 // so accepting nil here without defaulting would turn the first publish into a
 // panic.
-func NewProducer(brokers []string, topic string, logger *slog.Logger) (*Producer, error) {
+//
+// retentionMs optionally maps topic names to the retention.ms a topic should
+// be CREATED with (source: KafkaConfig.TopicRetention); existing topics are
+// never altered. This matters most here: the DLQ topics are producer-only, so
+// this call is the only place they are ever created — created with nil
+// configs on a fresh cluster they inherit the broker default retention
+// (15 minutes on dev-ovh-1), silently expiring dead letters. Pass nil only in
+// unit tests.
+func NewProducer(brokers []string, topic string, retentionMs map[string]int64, logger *slog.Logger) (*Producer, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -187,7 +195,7 @@ func NewProducer(brokers []string, topic string, logger *slog.Logger) (*Producer
 	// NewConsumer: a transient failure is logged, not fatal — auto-creating
 	// brokers still work without it.
 	ensureCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if eErr := EnsureTopics(ensureCtx, brokers, []string{topic}, nil, logger); eErr != nil {
+	if eErr := EnsureTopics(ensureCtx, brokers, []string{topic}, nil, retentionMs, logger); eErr != nil {
 		logger.Warn("could not pre-create producer topic; relying on broker auto-create",
 			"topic", topic, "error", eErr)
 	}

@@ -52,7 +52,7 @@ func newCommitTestConsumer(handler MessageHandler, cc *commitCapture) *Consumer 
 }
 
 // recsRange builds n consecutive records starting at offset 0 on topic
-// "test" partition 0 (see rec in consumer_test.go).
+// testTopic partition 0 (see rec in consumer_test.go).
 func recsRange(n int) []*kgo.Record {
 	out := make([]*kgo.Record, n)
 	for i := range out {
@@ -74,7 +74,7 @@ func TestPartitionWorker_CommitsProgressMidBatch(t *testing.T) {
 	c := newCommitTestConsumer(handler, cc)
 
 	const total = 2*commitEvery + 20 // three chunks: full, full, partial
-	w := newPartitionWorker(c, topicPartition{"test", 0}, context.Background())
+	w := newPartitionWorker(c, topicPartition{testTopic, 0}, context.Background())
 	w.process(recsRange(total))
 
 	batches := cc.get()
@@ -116,7 +116,7 @@ func TestPartitionWorker_MidBatchFailureCommitsPrefixOnly(t *testing.T) {
 	cc := &commitCapture{}
 	c := newCommitTestConsumer(handler, cc)
 
-	tp := topicPartition{"test", 0}
+	tp := topicPartition{testTopic, 0}
 	w := newPartitionWorker(c, tp, context.Background())
 	w.process(recsRange(3 * commitEvery))
 
@@ -152,7 +152,7 @@ func TestPartitionWorker_MidBatchFailureCommitsPrefixOnly(t *testing.T) {
 // handler latencies). Introspected via kgo's OptValue since franz options are
 // otherwise opaque.
 func TestConsumerOpts_BoundsFetchSizes(t *testing.T) {
-	client, err := kgo.NewClient(consumerOpts([]string{"localhost:9092"}, "test-group", []string{"test"})...)
+	client, err := kgo.NewClient(consumerOpts([]string{"localhost:9092"}, "test-group", []string{testTopic})...)
 	if err != nil {
 		t.Fatalf("building client: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestPartitionWorker_StopSkipsRemainingChunks(t *testing.T) {
 		return nil
 	}
 	c = newCommitTestConsumer(handler, cc)
-	w = newPartitionWorker(c, topicPartition{"test", 0}, context.Background())
+	w = newPartitionWorker(c, topicPartition{testTopic, 0}, context.Background())
 
 	w.process(recsRange(3 * commitEvery))
 

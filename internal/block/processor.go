@@ -99,6 +99,7 @@ func (p *Processor) Init(cfg interface{}) error {
 	subtreeWorkProducer, err := kafka.NewProducer(
 		p.kafkaCfg.Brokers,
 		p.kafkaCfg.SubtreeWorkTopic,
+		p.kafkaCfg.TopicRetention(),
 		p.Logger,
 	)
 	if err != nil {
@@ -110,6 +111,7 @@ func (p *Processor) Init(cfg interface{}) error {
 	callbackProducer, err := kafka.NewProducer(
 		p.kafkaCfg.Brokers,
 		p.kafkaCfg.CallbackTopic,
+		p.kafkaCfg.TopicRetention(),
 		p.Logger,
 	)
 	if err != nil {
@@ -123,6 +125,7 @@ func (p *Processor) Init(cfg interface{}) error {
 		[]string{p.kafkaCfg.BlockTopic},
 		p.handleMessage,
 		nil, // 'block' is low-rate and deliberately stays at 1 partition
+		p.kafkaCfg.TopicRetention(),
 		p.Logger,
 	)
 	if err != nil {

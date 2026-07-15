@@ -18,7 +18,7 @@ import (
 // The consumer must tolerate minutes of slow processing before being fenced.
 // Introspected via kgo's OptValue since franz options are otherwise opaque.
 func TestConsumerOpts_SurvivesSlowProcessing(t *testing.T) {
-	client, err := kgo.NewClient(consumerOpts([]string{"localhost:9092"}, "test-group", []string{"test"})...)
+	client, err := kgo.NewClient(consumerOpts([]string{"localhost:9092"}, "test-group", []string{testTopic})...)
 	if err != nil {
 		t.Fatalf("building client: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestConsumer_PartitionsLostCancelsInFlightHandler(t *testing.T) {
 	cc := &commitCapture{}
 	c := newCommitTestConsumer(handler, cc)
 
-	tp := topicPartition{"test", 0}
+	tp := topicPartition{testTopic, 0}
 	w := newPartitionWorker(c, tp, context.Background())
 	c.workers[tp] = w
 	go w.run()
@@ -119,7 +119,7 @@ func TestConsumer_PartitionsRevokedDrainsWithoutCancel(t *testing.T) {
 	cc := &commitCapture{}
 	c := newCommitTestConsumer(handler, cc)
 
-	tp := topicPartition{"test", 0}
+	tp := topicPartition{testTopic, 0}
 	w := newPartitionWorker(c, tp, context.Background())
 	c.workers[tp] = w
 	go w.run()

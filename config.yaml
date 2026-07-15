@@ -243,6 +243,17 @@ kafka:
   # Env: KAFKA_SUBTREE_WORK_PARTITIONS
   subtreeWorkPartitions: 24
 
+  # retention.ms applied when THIS service creates a topic (work topics and
+  # DLQ topics respectively). Applied at CREATE time only — existing topics
+  # are never altered, so GitOps-managed Topic CRDs stay authoritative.
+  # Without an explicit value, a fresh cluster's broker default applies
+  # silently (some clusters default to minutes, silently expiring queued work
+  # and dead letters). Defaults: 6 hours for work topics, 7 days for DLQs.
+  # Env: KAFKA_TOPIC_RETENTION_MS
+  topicRetentionMs: 21600000
+  # Env: KAFKA_DLQ_RETENTION_MS
+  dlqRetentionMs: 604800000
+
 # ---------------------------------------------------------------------------
 # P2P — Teranode network connectivity via go-teranode-p2p-client
 # ---------------------------------------------------------------------------
@@ -291,6 +302,13 @@ subtree:
   # Prevents reprocessing of subtrees already successfully handled.
   # Env: SUBTREE_DEDUP_CACHE_SIZE
   dedupCacheSize: 100000
+
+  # Base delay (ms) before a transient subtree failure is re-published for
+  # retry; doubles per attempt, capped at 30s, so the bounded retry budget
+  # spans real time instead of burning out in milliseconds. 0 disables the
+  # backoff (not recommended in production).
+  # Env: SUBTREE_RETRY_BACKOFF_BASE_MS
+  retryBackoffBaseMs: 1000
 
   # Caps how many matched txids are included (as a "txids" array) on the Info
   # log emitted for each SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES batch published

@@ -87,7 +87,7 @@ func TestConsumer_RewindStormSurvivesRebalance(t *testing.T) {
 		return errors.New("permanent handler failure (storm)")
 	}
 
-	c1, err := NewConsumer(brokers, "storm-group", []string{topic}, failingHandler, nil, logger)
+	c1, err := NewConsumer(brokers, "storm-group", []string{topic}, failingHandler, nil, nil, logger)
 	if err != nil {
 		t.Fatalf("NewConsumer(c1): %v", err)
 	}
@@ -114,7 +114,7 @@ func TestConsumer_RewindStormSurvivesRebalance(t *testing.T) {
 	// Membership churn mid-storm: join and leave a second member twice,
 	// forcing revokes/assigns to interleave with in-flight rewinds.
 	for i := 0; i < 2; i++ {
-		c2, cErr := NewConsumer(brokers, "storm-group", []string{topic}, failingHandler, nil, logger)
+		c2, cErr := NewConsumer(brokers, "storm-group", []string{topic}, failingHandler, nil, nil, logger)
 		if cErr != nil {
 			t.Fatalf("NewConsumer(c2 #%d): %v", i, cErr)
 		}

@@ -29,7 +29,7 @@ func TestNewProducer_EnsuresTopicOnStartup(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	p, err := NewProducer(cluster.ListenAddrs(), "ensure-dlq-test", logger)
+	p, err := NewProducer(cluster.ListenAddrs(), "ensure-dlq-test", nil, logger)
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}

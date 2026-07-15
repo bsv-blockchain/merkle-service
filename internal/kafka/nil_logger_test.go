@@ -17,7 +17,7 @@ func TestNewProducer_NilLoggerIsSafe(t *testing.T) {
 	}
 	defer cluster.Close()
 
-	p, err := NewProducer(cluster.ListenAddrs(), "nil-logger-producer-test", nil)
+	p, err := NewProducer(cluster.ListenAddrs(), "nil-logger-producer-test", nil, nil)
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestNewConsumer_NilLoggerIsSafe(t *testing.T) {
 
 	handler := func(ctx context.Context, msg *Message) error { return nil }
 
-	c, err := NewConsumer(cluster.ListenAddrs(), "nil-logger-group", []string{"nil-logger-consumer-test"}, handler, nil, nil)
+	c, err := NewConsumer(cluster.ListenAddrs(), "nil-logger-group", []string{"nil-logger-consumer-test"}, handler, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewConsumer: %v", err)
 	}

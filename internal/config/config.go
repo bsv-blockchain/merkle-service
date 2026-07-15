@@ -285,6 +285,17 @@ const (
 	defaultSubtreeWorkPartitions = 24
 )
 
+// Default retention.ms applied when THIS service creates a topic (see
+// TopicRetention). Work topics get 6h — comfortably above any realistic
+// processing backlog; DLQ topics get 7d so dead letters survive long enough
+// for a human to notice and act. Without an explicit value a fresh cluster's
+// broker default applies silently — on dev-ovh-1 that default was 15
+// MINUTES, short enough to expire parked work and dead letters unseen.
+const (
+	defaultTopicRetentionMs int64 = 21_600_000  // 6h
+	defaultDLQRetentionMs   int64 = 604_800_000 // 7d
+)
+
 type KafkaConfig struct {
 	Brokers             []string `yaml:"brokers"             mapstructure:"brokers"`
 	SubtreeTopic        string   `yaml:"subtreeTopic"        mapstructure:"subtreetopic"`
@@ -310,6 +321,15 @@ type KafkaConfig struct {
 	// cross-partition delivery barrier exists (see docs/callback-topic-partition-design.md).
 	SubtreePartitions     int `yaml:"subtreePartitions"     mapstructure:"subtreepartitions"`
 	SubtreeWorkPartitions int `yaml:"subtreeWorkPartitions" mapstructure:"subtreeworkpartitions"`
+
+	// TopicRetentionMs / DLQRetentionMs set the retention.ms config applied
+	// when this service CREATES a topic (work topics and DLQ topics
+	// respectively — see TopicRetention). Applied at create time only:
+	// existing topics are never altered, so GitOps-managed Topic CRDs remain
+	// authoritative wherever they exist. Non-positive values fall back to the
+	// built-in defaults (6h / 7d).
+	TopicRetentionMs int64 `yaml:"topicRetentionMs" mapstructure:"topicretentionms"`
+	DLQRetentionMs   int64 `yaml:"dlqRetentionMs"   mapstructure:"dlqretentionms"`
 }
 
 // TopicPartitions maps each topic name to the partition count it should be
@@ -331,6 +351,34 @@ func (k KafkaConfig) TopicPartitions() map[string]int32 {
 	}
 	if k.SubtreeWorkTopic != "" {
 		m[k.SubtreeWorkTopic] = int32(work)
+	}
+	return m
+}
+
+// TopicRetention maps every configured topic name to the retention.ms it
+// should be CREATED with (EnsureTopics never alters existing topics): work
+// topics get TopicRetentionMs, DLQ topics get DLQRetentionMs, non-positive
+// values fall back to the built-in defaults (6h / 7d). Empty topic names are
+// skipped.
+func (k KafkaConfig) TopicRetention() map[string]int64 {
+	topicMs := k.TopicRetentionMs
+	if topicMs <= 0 {
+		topicMs = defaultTopicRetentionMs
+	}
+	dlqMs := k.DLQRetentionMs
+	if dlqMs <= 0 {
+		dlqMs = defaultDLQRetentionMs
+	}
+	m := make(map[string]int64, 7)
+	for _, topic := range []string{k.SubtreeTopic, k.BlockTopic, k.CallbackTopic, k.SubtreeWorkTopic} {
+		if topic != "" {
+			m[topic] = topicMs
+		}
+	}
+	for _, topic := range []string{k.CallbackDLQTopic, k.SubtreeDLQTopic, k.SubtreeWorkDLQTopic} {
+		if topic != "" {
+			m[topic] = dlqMs
+		}
 	}
 	return m
 }
@@ -568,6 +616,8 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("kafka.consumergroup", "merkle-service")
 	v.SetDefault("kafka.subtreepartitions", defaultSubtreePartitions)
 	v.SetDefault("kafka.subtreeworkpartitions", defaultSubtreeWorkPartitions)
+	v.SetDefault("kafka.topicretentionms", defaultTopicRetentionMs)
+	v.SetDefault("kafka.dlqretentionms", defaultDLQRetentionMs)
 
 	// P2P
 	v.SetDefault("p2p.network", "main")
@@ -728,6 +778,8 @@ func bindEnvVars(v *viper.Viper) {
 		"kafka.subtreeworktopic":    "KAFKA_SUBTREE_WORK_TOPIC",
 		"kafka.subtreeworkdlqtopic": "KAFKA_SUBTREE_WORK_DLQ_TOPIC",
 		"kafka.consumergroup":       "KAFKA_CONSUMER_GROUP",
+		"kafka.topicretentionms":    "KAFKA_TOPIC_RETENTION_MS",
+		"kafka.dlqretentionms":      "KAFKA_DLQ_RETENTION_MS",
 
 		// P2P
 		"p2p.network":               "P2P_NETWORK",

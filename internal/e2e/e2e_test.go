@@ -156,7 +156,7 @@ func newAerospikeClient(t *testing.T, namespace string) *store.AerospikeClient {
 // newCallbackProducer creates a Kafka producer for the given callback topic.
 func newCallbackProducer(t *testing.T, topic string) *kafka.Producer {
 	t.Helper()
-	producer, err := kafka.NewProducer([]string{kafkaBroker}, topic, testLogger())
+	producer, err := kafka.NewProducer([]string{kafkaBroker}, topic, nil, testLogger())
 	if err != nil {
 		t.Skipf("Kafka not available: %v", err)
 	}

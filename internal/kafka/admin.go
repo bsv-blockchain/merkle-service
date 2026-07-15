@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
@@ -33,6 +34,15 @@ const (
 // safe even if a producer lazily auto-created the topic at 1 partition first: the
 // next consumer start grows it to the configured width.
 //
+// retentionMs maps a topic name to the retention.ms it should be CREATED
+// with (source: KafkaConfig.TopicRetention). Applied at create time ONLY —
+// existing topics are never altered, so GitOps-managed Topic CRDs stay
+// authoritative wherever they exist. Topics absent from the map (or with a
+// non-positive value) are created with nil configs, i.e. the broker default —
+// which is exactly what bit dev-ovh-1: a fresh cluster's default retention of
+// 15 minutes silently applied to the work queues and DLQs this service
+// created, expiring parked messages and dead letters unseen.
+//
 // It is idempotent: an already-existing topic is success (kerr.TopicAlreadyExists
 // checked on both the call error and the per-topic response, per teranode #633 —
 // not a string match), and an already-wide-enough topic is success
@@ -46,7 +56,7 @@ const (
 // unconsumed (the previous sarama client created topics eagerly on first
 // metadata request). Explicit creation also works on brokers with
 // auto.create.topics.enable=false.
-func EnsureTopics(ctx context.Context, brokers, topics []string, partitions map[string]int32, logger *slog.Logger) error {
+func EnsureTopics(ctx context.Context, brokers, topics []string, partitions map[string]int32, retentionMs map[string]int64, logger *slog.Logger) error {
 	uniq := dedupeNonEmpty(topics)
 	if len(uniq) == 0 {
 		return nil
@@ -65,7 +75,18 @@ func EnsureTopics(ctx context.Context, brokers, topics []string, partitions map[
 			want = p
 		}
 
-		resp, cErr := admin.CreateTopic(ctx, want, defaultTopicReplication, nil, topic)
+		// Create-time-only topic configs; never sent to an existing topic
+		// (CreateTopic on one fails with TopicAlreadyExists below, and no
+		// AlterConfigs is ever issued).
+		var configs map[string]*string
+		var retention int64
+		if ms, ok := retentionMs[topic]; ok && ms > 0 {
+			retention = ms
+			v := strconv.FormatInt(ms, 10)
+			configs = map[string]*string{"retention.ms": &v}
+		}
+
+		resp, cErr := admin.CreateTopic(ctx, want, defaultTopicReplication, configs, topic)
 		existed := errors.Is(cErr, kerr.TopicAlreadyExists) || errors.Is(resp.Err, kerr.TopicAlreadyExists)
 		if cErr != nil && !existed {
 			return fmt.Errorf("ensure topic %s: %w", topic, cErr)
@@ -75,7 +96,7 @@ func EnsureTopics(ctx context.Context, brokers, topics []string, partitions map[
 		}
 		if !existed {
 			if logger != nil {
-				logger.Debug("created kafka topic", "topic", topic, "partitions", want)
+				logger.Debug("created kafka topic", "topic", topic, "partitions", want, "retentionMs", retention)
 			}
 			continue
 		}

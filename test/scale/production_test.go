@@ -235,7 +235,7 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 	}
 
 	// ---- Phase A: SEEN (network observation) ----
-	subtreeProducer, err := kafka.NewProducer([]string{kafkaBroker}, subtreeTopic, logger)
+	subtreeProducer, err := kafka.NewProducer([]string{kafkaBroker}, subtreeTopic, nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create subtree producer: %v", err)
 	}
@@ -281,7 +281,7 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 	_, seenTxids := waitSeen()
 
 	// ---- Phase B: MINED (block processing) ----
-	blockProducer, err := kafka.NewProducer([]string{kafkaBroker}, blockTopic, logger)
+	blockProducer, err := kafka.NewProducer([]string{kafkaBroker}, blockTopic, nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create block producer: %v", err)
 	}
