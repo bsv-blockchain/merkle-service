@@ -285,6 +285,17 @@ const (
 	defaultSubtreeWorkPartitions = 24
 )
 
+// Default retention.ms applied when THIS service creates a topic (see
+// TopicRetention). Work topics get 6h — comfortably above any realistic
+// processing backlog; DLQ topics get 7d so dead letters survive long enough
+// for a human to notice and act. Without an explicit value a fresh cluster's
+// broker default applies silently — on dev-ovh-1 that default was 15
+// MINUTES, short enough to expire parked work and dead letters unseen.
+const (
+	defaultTopicRetentionMs int64 = 21_600_000  // 6h
+	defaultDLQRetentionMs   int64 = 604_800_000 // 7d
+)
+
 type KafkaConfig struct {
 	Brokers             []string `yaml:"brokers"             mapstructure:"brokers"`
 	SubtreeTopic        string   `yaml:"subtreeTopic"        mapstructure:"subtreetopic"`
@@ -310,6 +321,15 @@ type KafkaConfig struct {
 	// cross-partition delivery barrier exists (see docs/callback-topic-partition-design.md).
 	SubtreePartitions     int `yaml:"subtreePartitions"     mapstructure:"subtreepartitions"`
 	SubtreeWorkPartitions int `yaml:"subtreeWorkPartitions" mapstructure:"subtreeworkpartitions"`
+
+	// TopicRetentionMs / DLQRetentionMs set the retention.ms config applied
+	// when this service CREATES a topic (work topics and DLQ topics
+	// respectively — see TopicRetention). Applied at create time only:
+	// existing topics are never altered, so GitOps-managed Topic CRDs remain
+	// authoritative wherever they exist. Non-positive values fall back to the
+	// built-in defaults (6h / 7d).
+	TopicRetentionMs int64 `yaml:"topicRetentionMs" mapstructure:"topicretentionms"`
+	DLQRetentionMs   int64 `yaml:"dlqRetentionMs"   mapstructure:"dlqretentionms"`
 }
 
 // TopicPartitions maps each topic name to the partition count it should be
@@ -331,6 +351,34 @@ func (k KafkaConfig) TopicPartitions() map[string]int32 {
 	}
 	if k.SubtreeWorkTopic != "" {
 		m[k.SubtreeWorkTopic] = int32(work)
+	}
+	return m
+}
+
+// TopicRetention maps every configured topic name to the retention.ms it
+// should be CREATED with (EnsureTopics never alters existing topics): work
+// topics get TopicRetentionMs, DLQ topics get DLQRetentionMs, non-positive
+// values fall back to the built-in defaults (6h / 7d). Empty topic names are
+// skipped.
+func (k KafkaConfig) TopicRetention() map[string]int64 {
+	topicMs := k.TopicRetentionMs
+	if topicMs <= 0 {
+		topicMs = defaultTopicRetentionMs
+	}
+	dlqMs := k.DLQRetentionMs
+	if dlqMs <= 0 {
+		dlqMs = defaultDLQRetentionMs
+	}
+	m := make(map[string]int64, 7)
+	for _, topic := range []string{k.SubtreeTopic, k.BlockTopic, k.CallbackTopic, k.SubtreeWorkTopic} {
+		if topic != "" {
+			m[topic] = topicMs
+		}
+	}
+	for _, topic := range []string{k.CallbackDLQTopic, k.SubtreeDLQTopic, k.SubtreeWorkDLQTopic} {
+		if topic != "" {
+			m[topic] = dlqMs
+		}
 	}
 	return m
 }
@@ -366,6 +414,13 @@ type SubtreeConfig struct {
 	// permanently-failing subtree (e.g. DataHub 404) stalled the partition
 	// forever because the consumer doesn't MarkMessage on handler error.
 	MaxAttempts int `yaml:"maxAttempts" mapstructure:"maxattempts"`
+	// RetryBackoffBaseMs is the base delay before a transient subtree failure
+	// is re-published for retry; it doubles per attempt and is capped at 30s.
+	// Without it the whole MaxAttempts budget burned in ~300ms on dev-ovh-1
+	// (blob-store ENOSPC), turning a 15-minute disk incident into 1,406
+	// permanent dead letters. Default 1000. 0 disables the backoff (unit
+	// tests; not recommended in production).
+	RetryBackoffBaseMs int `yaml:"retryBackoffBaseMs" mapstructure:"retrybackoffbasems"`
 	// SeenTxidLogMax caps how many matched txids are included (as logfields.TxIDs)
 	// on the Info log emitted for each SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES
 	// batch published to a callback URL. 0 disables the txids array entirely
@@ -561,6 +616,8 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("kafka.consumergroup", "merkle-service")
 	v.SetDefault("kafka.subtreepartitions", defaultSubtreePartitions)
 	v.SetDefault("kafka.subtreeworkpartitions", defaultSubtreeWorkPartitions)
+	v.SetDefault("kafka.topicretentionms", defaultTopicRetentionMs)
+	v.SetDefault("kafka.dlqretentionms", defaultDLQRetentionMs)
 
 	// P2P
 	v.SetDefault("p2p.network", "main")
@@ -581,6 +638,10 @@ func registerDefaults(v *viper.Viper) {
 	// (initial + 2 retries) gives us recovery from transient blips without
 	// turning into a self-inflicted DoS.
 	v.SetDefault("subtree.maxattempts", 3)
+	// 1s base, doubling per attempt (cap 30s): 3 attempts span ~3s of real
+	// time instead of ~300ms, giving transient blob-store/DataHub conditions
+	// a chance to clear before the DLQ.
+	v.SetDefault("subtree.retrybackoffbasems", 1000)
 	v.SetDefault("subtree.seentxidlogmax", 1000)
 
 	// Block
@@ -717,6 +778,8 @@ func bindEnvVars(v *viper.Viper) {
 		"kafka.subtreeworktopic":    "KAFKA_SUBTREE_WORK_TOPIC",
 		"kafka.subtreeworkdlqtopic": "KAFKA_SUBTREE_WORK_DLQ_TOPIC",
 		"kafka.consumergroup":       "KAFKA_CONSUMER_GROUP",
+		"kafka.topicretentionms":    "KAFKA_TOPIC_RETENTION_MS",
+		"kafka.dlqretentionms":      "KAFKA_DLQ_RETENTION_MS",
 
 		// P2P
 		"p2p.network":               "P2P_NETWORK",
@@ -731,13 +794,14 @@ func bindEnvVars(v *viper.Viper) {
 		"p2p.msgbus.enablemdns":     "P2P_ENABLE_MDNS",
 
 		// Subtree
-		"subtree.storagemode":    "SUBTREE_STORAGE_MODE",
-		"subtree.dahoffset":      "SUBTREE_DAH_OFFSET",
-		"subtree.stumpdahoffset": "SUBTREE_STUMP_DAH_OFFSET",
-		"subtree.cachemaxmb":     "SUBTREE_CACHE_MAX_MB",
-		"subtree.dedupcachesize": "SUBTREE_DEDUP_CACHE_SIZE",
-		"subtree.maxattempts":    "SUBTREE_MAX_ATTEMPTS",
-		"subtree.seentxidlogmax": "SUBTREE_SEEN_TXID_LOG_MAX",
+		"subtree.storagemode":        "SUBTREE_STORAGE_MODE",
+		"subtree.dahoffset":          "SUBTREE_DAH_OFFSET",
+		"subtree.stumpdahoffset":     "SUBTREE_STUMP_DAH_OFFSET",
+		"subtree.cachemaxmb":         "SUBTREE_CACHE_MAX_MB",
+		"subtree.dedupcachesize":     "SUBTREE_DEDUP_CACHE_SIZE",
+		"subtree.maxattempts":        "SUBTREE_MAX_ATTEMPTS",
+		"subtree.retrybackoffbasems": "SUBTREE_RETRY_BACKOFF_BASE_MS",
+		"subtree.seentxidlogmax":     "SUBTREE_SEEN_TXID_LOG_MAX",
 
 		// Block
 		"block.workerpoolsize":      "BLOCK_WORKER_POOL_SIZE",

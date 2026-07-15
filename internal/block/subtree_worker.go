@@ -130,6 +130,7 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 	callbackProducer, err := kafka.NewProducer(
 		s.kafkaCfg.Brokers,
 		s.kafkaCfg.CallbackTopic,
+		s.kafkaCfg.TopicRetention(),
 		s.Logger,
 	)
 	if err != nil {
@@ -140,6 +141,7 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 	retryProducer, err := kafka.NewProducer(
 		s.kafkaCfg.Brokers,
 		s.kafkaCfg.SubtreeWorkTopic,
+		s.kafkaCfg.TopicRetention(),
 		s.Logger,
 	)
 	if err != nil {
@@ -154,6 +156,7 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 	dlqProducer, err := kafka.NewProducer(
 		s.kafkaCfg.Brokers,
 		dlqTopic,
+		s.kafkaCfg.TopicRetention(),
 		s.Logger,
 	)
 	if err != nil {
@@ -167,6 +170,7 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 		[]string{s.kafkaCfg.SubtreeWorkTopic},
 		s.handleMessage,
 		s.kafkaCfg.TopicPartitions(),
+		s.kafkaCfg.TopicRetention(),
 		s.Logger,
 	)
 	if err != nil {

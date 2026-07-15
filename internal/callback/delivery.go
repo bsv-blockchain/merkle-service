@@ -209,6 +209,7 @@ func (d *DeliveryService) Init(_ interface{}) error {
 	dlqProducer, err := kafka.NewProducer(
 		d.cfg.Kafka.Brokers,
 		d.cfg.Kafka.CallbackDLQTopic,
+		d.cfg.Kafka.TopicRetention(),
 		d.Logger,
 	)
 	if err != nil {
@@ -222,6 +223,7 @@ func (d *DeliveryService) Init(_ interface{}) error {
 	retryProducer, err := kafka.NewProducer(
 		d.cfg.Kafka.Brokers,
 		d.cfg.Kafka.CallbackTopic,
+		d.cfg.Kafka.TopicRetention(),
 		d.Logger,
 	)
 	if err != nil {
@@ -236,6 +238,7 @@ func (d *DeliveryService) Init(_ interface{}) error {
 		[]string{d.cfg.Kafka.CallbackTopic},
 		d.handleMessage,
 		nil, // 'callback' must stay at 1 partition until a cross-partition BLOCK_PROCESSED barrier exists
+		d.cfg.Kafka.TopicRetention(),
 		d.Logger,
 	)
 	if err != nil {

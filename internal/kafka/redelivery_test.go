@@ -80,7 +80,7 @@ func TestConsumer_RedeliversFailedRecordAndTail(t *testing.T) {
 		return nil
 	}
 
-	consumer, err := NewConsumer(brokers, "redeliver-group", []string{topic}, handler, nil, discardLogger())
+	consumer, err := NewConsumer(brokers, "redeliver-group", []string{topic}, handler, nil, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("creating consumer: %v", err)
 	}

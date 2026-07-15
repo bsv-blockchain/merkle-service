@@ -36,19 +36,19 @@ func main() {
 	}
 	defer func() { _ = telemetryShutdown(context.Background()) }()
 
-	registry, err := store.NewFromConfig(ctx, cfg, logger)
+	registry, err := store.NewFromConfigWithRetry(ctx, cfg, logger)
 	if err != nil {
 		log.Fatal("failed to build store registry: ", err)
 	}
 	defer func() { _ = registry.Close() }()
 
-	subtreeProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.SubtreeTopic, logger)
+	subtreeProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.SubtreeTopic, cfg.Kafka.TopicRetention(), logger)
 	if err != nil {
 		log.Fatal("failed to create subtree producer: ", err)
 	}
 	defer func() { _ = subtreeProducer.Close() }()
 
-	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, logger)
+	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, cfg.Kafka.TopicRetention(), logger)
 	if err != nil {
 		log.Fatal("failed to create block producer: ", err)
 	}

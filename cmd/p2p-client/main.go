@@ -46,13 +46,13 @@ func run() error {
 	defer func() { _ = telemetryShutdown(context.Background()) }()
 
 	// Create Kafka producers for subtree and block topics.
-	subtreeProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.SubtreeTopic, logger)
+	subtreeProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.SubtreeTopic, cfg.Kafka.TopicRetention(), logger)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = subtreeProducer.Close() }()
 
-	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, logger)
+	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, cfg.Kafka.TopicRetention(), logger)
 	if err != nil {
 		return err
 	}

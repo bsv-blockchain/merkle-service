@@ -95,7 +95,7 @@ func TestConsumer_PartitionsProcessConcurrently(t *testing.T) {
 		return nil
 	}
 
-	consumer, err := NewConsumer(brokers, "partition-concurrency-group", []string{topic}, handler, nil, discardLogger())
+	consumer, err := NewConsumer(brokers, "partition-concurrency-group", []string{topic}, handler, nil, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("creating consumer: %v", err)
 	}

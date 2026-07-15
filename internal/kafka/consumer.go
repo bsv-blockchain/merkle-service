@@ -40,6 +40,53 @@ const handlerErrorBackoff = 500 * time.Millisecond
 // bounded per-partition message channel that back-pressured the fetcher.
 const workerChannelDepth = 5
 
+// commitEvery is how many records a partition worker handles before it
+// commits the successful prefix of its in-flight batch. Commits used to
+// happen only after an ENTIRE fetched batch completed; under the dev-ovh-1
+// backlog (50k messages, 1-2s per record on DataHub fetches) a single batch
+// took hours, the committed offset stayed frozen for 40+ minutes while
+// workers demonstrably processed work, and every pod restart reprocessed the
+// whole batch from scratch. Committing every commitEvery records bounds the
+// redelivery window to at most commitEvery records per partition without
+// measurably increasing broker commit load (one OffsetCommit per ~50 handler
+// calls). Prefix-commit semantics (F-030) are unchanged: a chunk's commit
+// still only covers records whose handler succeeded, in order.
+const commitEvery = 50
+
+// fetchMaxPartitionBytes / fetchMaxBytes bound how much data one poll may
+// return per partition and in total. kgo's defaults (1 MiB per partition,
+// 50 MiB total) let a deep backlog of small subtree announcements (~250 B
+// each) hand a worker thousands of records in a single batch — hours of work
+// at 1-2s per record. Bounding the fetch keeps dispatched batches to at most
+// a few hundred records so rewinds discard less and buffered memory stays at
+// worst workerChannelDepth x fetchMaxPartitionBytes per partition. A single
+// record/batch larger than the partition cap is still returned whole (kgo
+// guarantees progress), so large callback-topic records cannot wedge a
+// partition.
+const (
+	fetchMaxPartitionBytes int32 = 256 << 10 // 256 KiB
+	fetchMaxBytes          int32 = 8 << 20   // 8 MiB
+)
+
+// Group-liveness timeouts. The values must satisfy kgo's (and the broker's)
+// constraint sessionTimeout >= 3x heartbeatInterval.
+//
+// The original sarama-parity values — SessionTimeout 10s, RebalanceTimeout
+// 60s — fenced healthy members under load on dev-ovh-1: slow handlers (1-2s
+// per record, DataHub fetches) filled the depth-5 worker channels, the poll
+// loop blocked dispatching, rebalances couldn't be serviced within the 60s
+// rebalance window, and the coordinator fenced members one by one until the
+// 24-partition group had collapsed 5 -> 1 with every pod still Running.
+// Heartbeats stay at 3s (background goroutine, cheap), so a genuinely dead
+// pod is still detected in sessionTimeout; the wider rebalanceTimeout only
+// extends how long a LIVE member may take to finish its in-flight chunk and
+// rejoin during a rebalance.
+const (
+	sessionTimeout    = 30 * time.Second
+	heartbeatInterval = 3 * time.Second
+	rebalanceTimeout  = 5 * time.Minute
+)
+
 // pollTick bounds how long a single PollFetches call may block waiting for
 // records. The poll loop must keep turning even when nothing is fetchable —
 // every partition paused mid-rewind, or simply no traffic — because rewind
@@ -74,11 +121,17 @@ func consumerOpts(brokers []string, groupID string, topics []string) []kgo.Opt {
 		// commit each successfully-handled record explicitly (see
 		// partitionWorker.process).
 		kgo.DisableAutoCommit(),
-		// Explicit timeout defaults sarama provided for free (teranode #633).
-		kgo.SessionTimeout(10 * time.Second),
-		kgo.HeartbeatInterval(3 * time.Second),
-		kgo.RebalanceTimeout(60 * time.Second),
+		// Explicit timeouts sarama provided defaults for (teranode #633),
+		// widened to survive slow processing without fencing — see the
+		// sessionTimeout const block.
+		kgo.SessionTimeout(sessionTimeout),
+		kgo.HeartbeatInterval(heartbeatInterval),
+		kgo.RebalanceTimeout(rebalanceTimeout),
 		kgo.FetchMaxWait(100 * time.Millisecond),
+		// Bound per-poll fetch sizes so a deep backlog cannot hand a worker an
+		// hours-long batch (see fetchMaxPartitionBytes).
+		kgo.FetchMaxPartitionBytes(fetchMaxPartitionBytes),
+		kgo.FetchMaxBytes(fetchMaxBytes),
 		// Sarama parity: sarama's default config sets
 		// Metadata.AllowAutoTopicCreation=true, so consumers of a
 		// not-yet-existing topic triggered broker-side auto-creation and
@@ -108,6 +161,11 @@ type Consumer struct {
 	topics  []string
 	handler MessageHandler
 	logger  *slog.Logger
+
+	// commitRecords is the offset-commit seam: kgo.Client.CommitRecords in
+	// production, a capture in unit tests (same indirection pattern as
+	// exitFunc). Partition workers call it for every committed chunk.
+	commitRecords func(ctx context.Context, recs ...*kgo.Record) error
 
 	readyOnce sync.Once
 	ready     chan struct{}
@@ -163,7 +221,12 @@ type Consumer struct {
 // should be created with (and grown to) by the startup EnsureTopics call; topics
 // absent from the map default to 1. Pass nil to create/keep every subscribed
 // topic at 1 partition.
-func NewConsumer(brokers []string, groupID string, topics []string, handler MessageHandler, partitions map[string]int32, logger *slog.Logger) (*Consumer, error) {
+// retentionMs optionally maps a subscribed topic name to the retention.ms it
+// should be CREATED with (source: KafkaConfig.TopicRetention); existing
+// topics are never altered. Pass nil to create topics with broker-default
+// retention (unit tests only — see EnsureTopics for why production callers
+// must pass the config-derived map).
+func NewConsumer(brokers []string, groupID string, topics []string, handler MessageHandler, partitions map[string]int32, retentionMs map[string]int64, logger *slog.Logger) (*Consumer, error) {
 	// A nil logger is replaced with slog.Default(): Start, the poll loop, and
 	// the partition workers log unconditionally, so accepting nil here without
 	// defaulting would panic at the first consumed message.
@@ -190,7 +253,7 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 	// still works via metadata refresh + producer-side auto-creation, just less
 	// promptly (and at the default partition count until a later start grows it).
 	ensureCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if eErr := EnsureTopics(ensureCtx, brokers, topics, partitions, logger); eErr != nil {
+	if eErr := EnsureTopics(ensureCtx, brokers, topics, partitions, retentionMs, logger); eErr != nil {
 		logger.Warn("could not pre-create consumer topics; relying on auto-create",
 			"groupID", groupID, "topics", topics, "error", eErr)
 	}
@@ -212,6 +275,7 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 		return nil, fmt.Errorf("failed to create consumer group %s: %w", groupID, err)
 	}
 	c.client = client
+	c.commitRecords = client.CommitRecords
 	return c, nil
 }
 
@@ -452,25 +516,37 @@ func (c *Consumer) partitionsAssigned(_ context.Context, _ *kgo.Client, assigned
 }
 
 // partitionsRevoked stops the workers for revoked partitions and waits for
-// them to finish their in-flight batch (whose successes they commit) before
+// them to finish their in-flight chunk (whose successes they commit) before
 // the rebalance hands the partitions to another member.
 func (c *Consumer) partitionsRevoked(_ context.Context, _ *kgo.Client, revoked map[string][]int32) {
-	c.stopWorkers(revoked)
+	c.stopWorkers(revoked, false)
 }
 
 // partitionsLost is like revoked, but the partitions are already owned by
-// others (session expiry, fencing) — workers are stopped; their final commits
-// may fail, which is fine: uncommitted work is redelivered (at-least-once).
+// others (session expiry, fencing) — there is nothing to drain FOR, so each
+// worker's context is canceled to abort its in-flight handler. Pre-fix,
+// fenced dev-ovh-1 pods kept processing partitions they no longer owned
+// (13-14 cores of work whose commits the broker rejected) because a lost
+// partition's handlers ran to completion exactly like a graceful revoke's.
+// Final commits may fail, which is fine: uncommitted work is redelivered
+// (at-least-once).
 func (c *Consumer) partitionsLost(_ context.Context, _ *kgo.Client, lost map[string][]int32) {
-	c.stopWorkers(lost)
+	c.stopWorkers(lost, true)
 }
 
-func (c *Consumer) stopWorkers(tps map[string][]int32) {
+// stopWorkers stops and drains the workers for the given partitions. With
+// cancelInFlight (partitions LOST), each worker's context is canceled first
+// so ctx-honoring handlers abort promptly; on a graceful revoke the in-flight
+// chunk completes and commits before the partition moves.
+func (c *Consumer) stopWorkers(tps map[string][]int32, cancelInFlight bool) {
 	var stopped []*partitionWorker
 	for topic, parts := range tps {
 		for _, part := range parts {
 			tp := topicPartition{topic, part}
 			if w, ok := c.workers[tp]; ok {
+				if cancelInFlight {
+					w.cancel()
+				}
 				w.signalStop()
 				stopped = append(stopped, w)
 				delete(c.workers, tp)
@@ -531,10 +607,16 @@ func (c *Consumer) handleMetrics(topic string, valueLen int) func(outcome string
 // partition's commit logic and records failure rewinds (applied on the poll
 // goroutine), so a handler stall or failure affects only this partition.
 type partitionWorker struct {
-	c    *Consumer
-	tp   topicPartition
-	ctx  context.Context //nolint:containedctx // worker lifetime == consume ctx
-	recs chan []*kgo.Record
+	c  *Consumer
+	tp topicPartition
+	// ctx is the worker's OWN cancelable child of the consume context.
+	// Canceled on partitions-lost (fencing/session expiry) so in-flight
+	// handlers abort instead of finishing work on a partition another member
+	// already owns; left alone on graceful revoke, where the in-flight chunk
+	// drains and commits. Released via run's deferred cancel either way.
+	ctx    context.Context //nolint:containedctx // worker lifetime == worker goroutine
+	cancel context.CancelFunc
+	recs   chan []*kgo.Record
 
 	quitOnce sync.Once
 	quit     chan struct{}
@@ -547,11 +629,13 @@ type partitionWorker struct {
 	discardUntil int64
 }
 
-func newPartitionWorker(c *Consumer, tp topicPartition, ctx context.Context) *partitionWorker {
+func newPartitionWorker(c *Consumer, tp topicPartition, parent context.Context) *partitionWorker {
+	ctx, cancel := context.WithCancel(parent)
 	return &partitionWorker{
 		c:            c,
 		tp:           tp,
 		ctx:          ctx,
+		cancel:       cancel,
 		recs:         make(chan []*kgo.Record, workerChannelDepth),
 		quit:         make(chan struct{}),
 		done:         make(chan struct{}),
@@ -571,6 +655,10 @@ func (w *partitionWorker) stop() {
 
 func (w *partitionWorker) run() {
 	defer close(w.done)
+	// Release the worker's child context so it detaches from the consume
+	// context's children list (rebalances create and destroy workers for the
+	// process lifetime). No-op when partitionsLost already canceled it.
+	defer w.cancel()
 	for {
 		select {
 		case <-w.quit:
@@ -581,10 +669,19 @@ func (w *partitionWorker) run() {
 	}
 }
 
-// process runs the handler over one in-order batch, commits the successful
-// prefix, and rewinds the partition on the first failure (F-030: a failed
-// record and everything after it in the partition are redelivered; committed
-// offsets never advance past a failure).
+// process runs the handler over one in-order batch in chunks of commitEvery
+// records, committing each chunk's successful prefix as it completes, and
+// rewinds the partition on the first failure (F-030: a failed record and
+// everything after it in the partition are redelivered; committed offsets
+// never advance past a failure).
+//
+// Chunked commits are the fix for the dev-ovh-1 commit freeze (see
+// commitEvery): progress becomes durable DURING a long batch, not only after
+// it, so a restart or rebalance mid-batch redelivers at most the un-committed
+// tail instead of the whole batch. Between chunks the worker also checks for
+// a stop signal (revoke/lost/shutdown) and abandons the remaining chunks —
+// their records are uncommitted and are redelivered to the partition's next
+// owner.
 func (w *partitionWorker) process(recs []*kgo.Record) {
 	if len(recs) == 0 {
 		return
@@ -596,22 +693,55 @@ func (w *partitionWorker) process(recs []*kgo.Record) {
 		w.discardUntil = -1
 	}
 
-	committable, failed := processBatch(w.ctx, recs, w.c.handler, w.c.handleMetrics, w.c.logger, w.c.groupID)
+	for start := 0; start < len(recs); start += commitEvery {
+		end := start + commitEvery
+		if end > len(recs) {
+			end = len(recs)
+		}
 
-	if len(committable) > 0 {
-		if err := w.c.client.CommitRecords(w.ctx, committable...); err != nil {
-			// Commit failure leaves offsets uncommitted; on the next
-			// rebalance/restart the group resumes from the last committed
-			// offset, so already-handled records are simply redelivered
-			// (at-least-once; handlers are idempotent).
-			if !errors.Is(err, context.Canceled) {
-				w.c.logger.Error("offset commit failed",
-					"group", w.c.groupID, "topic", w.tp.topic, "partition", w.tp.partition, "error", err)
-			}
+		committable, failed := processBatch(w.ctx, recs[start:end], w.c.handler, w.c.handleMetrics, w.c.logger, w.c.groupID)
+
+		if len(committable) > 0 {
+			w.commit(committable)
+		}
+		if failed != nil {
+			w.rewind(failed)
+			return // later chunks are redelivered after the rewind
+		}
+
+		// Stop between chunks when the worker is quitting: the uncommitted
+		// tail is redelivered, and the revoke/shutdown that signaled us is
+		// not held for the rest of a potentially huge batch.
+		select {
+		case <-w.quit:
+			return
+		case <-w.ctx.Done():
+			return
+		default:
 		}
 	}
-	if failed != nil {
-		w.rewind(failed)
+}
+
+// commit commits one in-order chunk of successfully-handled records. A commit
+// failure leaves the offsets uncommitted; on the next rebalance/restart the
+// group resumes from the last committed offset, so already-handled records
+// are simply redelivered (at-least-once; handlers are idempotent). That makes
+// a failed commit WARN-worthy, not fatal — but it MUST be visible: on
+// dev-ovh-1, members fenced during slow processing kept working partitions
+// they no longer owned and their rejected commits were the only signal.
+func (w *partitionWorker) commit(recs []*kgo.Record) {
+	if err := w.c.commitRecords(w.ctx, recs...); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return // shutdown/lost-partition teardown, not a broker rejection
+		}
+		w.c.logger.Warn("offset commit failed; records will be redelivered",
+			"group", w.c.groupID,
+			"topic", w.tp.topic,
+			"partition", w.tp.partition,
+			"firstOffset", recs[0].Offset,
+			"lastOffset", recs[len(recs)-1].Offset,
+			"error", err,
+		)
 	}
 }
 

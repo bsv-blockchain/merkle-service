@@ -32,7 +32,7 @@ func main() {
 	}
 	defer func() { _ = telemetryShutdown(context.Background()) }()
 
-	registry, err := store.NewFromConfig(ctx, cfg, logger)
+	registry, err := store.NewFromConfigWithRetry(ctx, cfg, logger)
 	if err != nil {
 		log.Fatal("failed to build store registry: ", err)
 	}
@@ -62,7 +62,7 @@ func main() {
 	// block-processor so /reprocess can't be coerced into probing
 	// loopback/RFC1918 addresses unless the operator opted in via
 	// datahub.allowPrivateIPs.
-	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, logger)
+	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, cfg.Kafka.TopicRetention(), logger)
 	if err != nil {
 		log.Fatal("failed to create block producer: ", err)
 	}
