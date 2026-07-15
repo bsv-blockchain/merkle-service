@@ -17,7 +17,7 @@ func TestNewProducer_NilLoggerIsSafe(t *testing.T) {
 	}
 	defer cluster.Close()
 
-	p, err := NewProducer(cluster.ListenAddrs(), "nil-logger-producer-test", nil, nil)
+	p, err := NewProducer(cluster.ListenAddrs(), "nil-logger-producer-test", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}

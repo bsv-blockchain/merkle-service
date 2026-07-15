@@ -107,7 +107,7 @@ func TestCallbackDelivery_SuccessfulCallback(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	// Now publish a CallbackTopicMessage to Kafka.
-	producer, err := kafka.NewProducer(brokers, stumpsTopic, nil, slog.Default())
+	producer, err := kafka.NewProducer(brokers, stumpsTopic, nil, nil, slog.Default())
 	if err != nil {
 		t.Skipf("Kafka not available; skipping: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestCallbackDelivery_RetryOnFailure(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	// Now publish the CallbackTopicMessage.
-	producer, err := kafka.NewProducer(brokers, stumpsTopic, nil, slog.Default())
+	producer, err := kafka.NewProducer(brokers, stumpsTopic, nil, nil, slog.Default())
 	if err != nil {
 		t.Skipf("Kafka not available; skipping: %v", err)
 	}

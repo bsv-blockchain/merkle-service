@@ -57,7 +57,7 @@ func TestKafka_ProduceConsumeRoundTrip(t *testing.T) {
 	topic := uniqueTopic(t, "integ_roundtrip")
 	ensureTopicExists(t, topic)
 
-	producer, err := kafka.NewProducer(brokers, topic, nil, slog.Default())
+	producer, err := kafka.NewProducer(brokers, topic, nil, nil, slog.Default())
 	if err != nil {
 		t.Skipf("Kafka not available: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestKafka_ProduceMultipleConsumeInOrder(t *testing.T) {
 	topic := uniqueTopic(t, "integ_order")
 	ensureTopicExists(t, topic)
 
-	producer, err := kafka.NewProducer(brokers, topic, nil, slog.Default())
+	producer, err := kafka.NewProducer(brokers, topic, nil, nil, slog.Default())
 	if err != nil {
 		t.Skipf("Kafka not available: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestKafka_ConsumerGroupOffsetManagement(t *testing.T) {
 	topic := uniqueTopic(t, "integ_offset")
 	ensureTopicExists(t, topic)
 
-	producer, err := kafka.NewProducer(brokers, topic, nil, slog.Default())
+	producer, err := kafka.NewProducer(brokers, topic, nil, nil, slog.Default())
 	if err != nil {
 		t.Skipf("Kafka not available: %v", err)
 	}

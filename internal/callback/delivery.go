@@ -209,6 +209,7 @@ func (d *DeliveryService) Init(_ interface{}) error {
 	dlqProducer, err := kafka.NewProducer(
 		d.cfg.Kafka.Brokers,
 		d.cfg.Kafka.CallbackDLQTopic,
+		d.cfg.Kafka.TopicPartitions(),
 		d.cfg.Kafka.TopicRetention(),
 		d.Logger,
 	)
@@ -223,6 +224,7 @@ func (d *DeliveryService) Init(_ interface{}) error {
 	retryProducer, err := kafka.NewProducer(
 		d.cfg.Kafka.Brokers,
 		d.cfg.Kafka.CallbackTopic,
+		d.cfg.Kafka.TopicPartitions(),
 		d.cfg.Kafka.TopicRetention(),
 		d.Logger,
 	)

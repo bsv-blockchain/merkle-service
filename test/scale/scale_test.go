@@ -31,7 +31,7 @@ func testLogger() *slog.Logger {
 // TestMain performs environment checks before running scale tests.
 func TestMain(m *testing.M) {
 	// Check Kafka reachability.
-	p, err := kafka.NewProducer([]string{kafkaBroker}, "probe-topic", nil, slog.Default())
+	p, err := kafka.NewProducer([]string{kafkaBroker}, "probe-topic", nil, nil, slog.Default())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "SKIP: Kafka not reachable at %s: %v\n", kafkaBroker, err)
 		os.Exit(0)
@@ -219,7 +219,7 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 	stumpsDLQTopic := stumpsTopic + "-dlq"
 	subtreeWorkTopic := fmt.Sprintf("scale-subtree-work-%d", time.Now().UnixNano())
 
-	blockProducer, err := kafka.NewProducer([]string{kafkaBroker}, blockTopic, nil, logger)
+	blockProducer, err := kafka.NewProducer([]string{kafkaBroker}, blockTopic, nil, nil, logger)
 	if err != nil {
 		t.Fatalf("failed to create block producer: %v", err)
 	}

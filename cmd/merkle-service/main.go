@@ -42,13 +42,13 @@ func main() {
 	}
 	defer func() { _ = registry.Close() }()
 
-	subtreeProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.SubtreeTopic, cfg.Kafka.TopicRetention(), logger)
+	subtreeProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.SubtreeTopic, cfg.Kafka.TopicPartitions(), cfg.Kafka.TopicRetention(), logger)
 	if err != nil {
 		log.Fatal("failed to create subtree producer: ", err)
 	}
 	defer func() { _ = subtreeProducer.Close() }()
 
-	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, cfg.Kafka.TopicRetention(), logger)
+	blockProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.BlockTopic, cfg.Kafka.TopicPartitions(), cfg.Kafka.TopicRetention(), logger)
 	if err != nil {
 		log.Fatal("failed to create block producer: ", err)
 	}
