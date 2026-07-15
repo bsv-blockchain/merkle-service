@@ -5,8 +5,8 @@
 
 ## 2. Configuration
 
-- [ ] 2.1 Add `RetryBackoffBaseMs` (mapstructure `retrybackoffbasems`) and `NotFoundMaxAttempts` (`notfoundmaxattempts`) to `config.BlockConfig` with incident-referencing doc comments
-- [ ] 2.2 Defaults `block.retrybackoffbasems=1000`, `block.notfoundmaxattempts=3`; env bindings `BLOCK_RETRY_BACKOFF_BASE_MS`, `BLOCK_NOT_FOUND_MAX_ATTEMPTS`; document both in `config.yaml`
+- [x] 2.1 Add `RetryBackoffBaseMs` (mapstructure `retrybackoffbasems`) and `NotFoundMaxAttempts` (`notfoundmaxattempts`) to `config.BlockConfig` with incident-referencing doc comments
+- [x] 2.2 Defaults `block.retrybackoffbasems=1000`, `block.notfoundmaxattempts=3`; env bindings `BLOCK_RETRY_BACKOFF_BASE_MS`, `BLOCK_NOT_FOUND_MAX_ATTEMPTS`; document both in `config.yaml`
 
 ## 3. Metrics
 
