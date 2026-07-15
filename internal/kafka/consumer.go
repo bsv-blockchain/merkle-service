@@ -68,6 +68,25 @@ const (
 	fetchMaxBytes          int32 = 8 << 20   // 8 MiB
 )
 
+// Group-liveness timeouts. The values must satisfy kgo's (and the broker's)
+// constraint sessionTimeout >= 3x heartbeatInterval.
+//
+// The original sarama-parity values — SessionTimeout 10s, RebalanceTimeout
+// 60s — fenced healthy members under load on dev-ovh-1: slow handlers (1-2s
+// per record, DataHub fetches) filled the depth-5 worker channels, the poll
+// loop blocked dispatching, rebalances couldn't be serviced within the 60s
+// rebalance window, and the coordinator fenced members one by one until the
+// 24-partition group had collapsed 5 -> 1 with every pod still Running.
+// Heartbeats stay at 3s (background goroutine, cheap), so a genuinely dead
+// pod is still detected in sessionTimeout; the wider rebalanceTimeout only
+// extends how long a LIVE member may take to finish its in-flight chunk and
+// rejoin during a rebalance.
+const (
+	sessionTimeout    = 30 * time.Second
+	heartbeatInterval = 3 * time.Second
+	rebalanceTimeout  = 5 * time.Minute
+)
+
 // pollTick bounds how long a single PollFetches call may block waiting for
 // records. The poll loop must keep turning even when nothing is fetchable —
 // every partition paused mid-rewind, or simply no traffic — because rewind
@@ -102,10 +121,12 @@ func consumerOpts(brokers []string, groupID string, topics []string) []kgo.Opt {
 		// commit each successfully-handled record explicitly (see
 		// partitionWorker.process).
 		kgo.DisableAutoCommit(),
-		// Explicit timeout defaults sarama provided for free (teranode #633).
-		kgo.SessionTimeout(10 * time.Second),
-		kgo.HeartbeatInterval(3 * time.Second),
-		kgo.RebalanceTimeout(60 * time.Second),
+		// Explicit timeouts sarama provided defaults for (teranode #633),
+		// widened to survive slow processing without fencing — see the
+		// sessionTimeout const block.
+		kgo.SessionTimeout(sessionTimeout),
+		kgo.HeartbeatInterval(heartbeatInterval),
+		kgo.RebalanceTimeout(rebalanceTimeout),
 		kgo.FetchMaxWait(100 * time.Millisecond),
 		// Bound per-poll fetch sizes so a deep backlog cannot hand a worker an
 		// hours-long batch (see fetchMaxPartitionBytes).
@@ -490,25 +511,37 @@ func (c *Consumer) partitionsAssigned(_ context.Context, _ *kgo.Client, assigned
 }
 
 // partitionsRevoked stops the workers for revoked partitions and waits for
-// them to finish their in-flight batch (whose successes they commit) before
+// them to finish their in-flight chunk (whose successes they commit) before
 // the rebalance hands the partitions to another member.
 func (c *Consumer) partitionsRevoked(_ context.Context, _ *kgo.Client, revoked map[string][]int32) {
-	c.stopWorkers(revoked)
+	c.stopWorkers(revoked, false)
 }
 
 // partitionsLost is like revoked, but the partitions are already owned by
-// others (session expiry, fencing) — workers are stopped; their final commits
-// may fail, which is fine: uncommitted work is redelivered (at-least-once).
+// others (session expiry, fencing) — there is nothing to drain FOR, so each
+// worker's context is canceled to abort its in-flight handler. Pre-fix,
+// fenced dev-ovh-1 pods kept processing partitions they no longer owned
+// (13-14 cores of work whose commits the broker rejected) because a lost
+// partition's handlers ran to completion exactly like a graceful revoke's.
+// Final commits may fail, which is fine: uncommitted work is redelivered
+// (at-least-once).
 func (c *Consumer) partitionsLost(_ context.Context, _ *kgo.Client, lost map[string][]int32) {
-	c.stopWorkers(lost)
+	c.stopWorkers(lost, true)
 }
 
-func (c *Consumer) stopWorkers(tps map[string][]int32) {
+// stopWorkers stops and drains the workers for the given partitions. With
+// cancelInFlight (partitions LOST), each worker's context is canceled first
+// so ctx-honoring handlers abort promptly; on a graceful revoke the in-flight
+// chunk completes and commits before the partition moves.
+func (c *Consumer) stopWorkers(tps map[string][]int32, cancelInFlight bool) {
 	var stopped []*partitionWorker
 	for topic, parts := range tps {
 		for _, part := range parts {
 			tp := topicPartition{topic, part}
 			if w, ok := c.workers[tp]; ok {
+				if cancelInFlight {
+					w.cancel()
+				}
 				w.signalStop()
 				stopped = append(stopped, w)
 				delete(c.workers, tp)
@@ -569,10 +602,16 @@ func (c *Consumer) handleMetrics(topic string, valueLen int) func(outcome string
 // partition's commit logic and records failure rewinds (applied on the poll
 // goroutine), so a handler stall or failure affects only this partition.
 type partitionWorker struct {
-	c    *Consumer
-	tp   topicPartition
-	ctx  context.Context //nolint:containedctx // worker lifetime == consume ctx
-	recs chan []*kgo.Record
+	c  *Consumer
+	tp topicPartition
+	// ctx is the worker's OWN cancelable child of the consume context.
+	// Canceled on partitions-lost (fencing/session expiry) so in-flight
+	// handlers abort instead of finishing work on a partition another member
+	// already owns; left alone on graceful revoke, where the in-flight chunk
+	// drains and commits. Released via run's deferred cancel either way.
+	ctx    context.Context //nolint:containedctx // worker lifetime == worker goroutine
+	cancel context.CancelFunc
+	recs   chan []*kgo.Record
 
 	quitOnce sync.Once
 	quit     chan struct{}
@@ -585,11 +624,13 @@ type partitionWorker struct {
 	discardUntil int64
 }
 
-func newPartitionWorker(c *Consumer, tp topicPartition, ctx context.Context) *partitionWorker {
+func newPartitionWorker(c *Consumer, tp topicPartition, parent context.Context) *partitionWorker {
+	ctx, cancel := context.WithCancel(parent)
 	return &partitionWorker{
 		c:            c,
 		tp:           tp,
 		ctx:          ctx,
+		cancel:       cancel,
 		recs:         make(chan []*kgo.Record, workerChannelDepth),
 		quit:         make(chan struct{}),
 		done:         make(chan struct{}),
@@ -609,6 +650,10 @@ func (w *partitionWorker) stop() {
 
 func (w *partitionWorker) run() {
 	defer close(w.done)
+	// Release the worker's child context so it detaches from the consume
+	// context's children list (rebalances create and destroy workers for the
+	// process lifetime). No-op when partitionsLost already canceled it.
+	defer w.cancel()
 	for {
 		select {
 		case <-w.quit:
