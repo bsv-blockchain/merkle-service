@@ -29,7 +29,7 @@ func main() {
 	}
 	defer func() { _ = telemetryShutdown(context.Background()) }()
 
-	registry, err := store.NewFromConfig(ctx, cfg, logger)
+	registry, err := store.NewFromConfigWithRetry(ctx, cfg, logger)
 	if err != nil {
 		log.Fatal("failed to build store registry: ", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 )
@@ -42,6 +43,65 @@ func NewFromConfig(ctx context.Context, cfg *config.Config, logger *slog.Logger)
 	default:
 		return nil, fmt.Errorf("unknown store backend %q", cfg.Store.Backend)
 	}
+}
+
+// Startup retry policy for NewFromConfigWithRetry: 5 attempts with the
+// backoff doubling from 8s — 8+16+32+64 = 120s of waiting, so a binary rides
+// out ~2 minutes of backend unavailability before giving up.
+const (
+	registryRetryAttempts  = 5
+	registryRetryBaseDelay = 8 * time.Second
+)
+
+// NewFromConfigWithRetry is NewFromConfig with a bounded startup retry. Every
+// binary builds its store registry first thing at startup, and a transient
+// backend blip there used to exit the process immediately: on dev-ovh-1 the
+// api-server pods crash-looped 5-7 times each on a single Aerospike
+// "command execution timed out" while the cluster recovered from the disk
+// incident. A slow backend at boot is an operational condition to wait out,
+// not a configuration error — but a persistent failure must still fail
+// startup so the orchestrator surfaces it.
+func NewFromConfigWithRetry(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*Registry, error) {
+	return newRegistryWithRetry(ctx, registryRetryAttempts, registryRetryBaseDelay, logger, func() (*Registry, error) {
+		return NewFromConfig(ctx, cfg, logger)
+	})
+}
+
+// newRegistryWithRetry runs build up to attempts times, sleeping baseDelay
+// (doubling per attempt) between failures. Every failed attempt is logged so
+// a crash-looping pod's history is visible in the log stream, not just the
+// restart counter. The context aborts a pending wait (SIGTERM mid-backoff).
+func newRegistryWithRetry(ctx context.Context, attempts int, baseDelay time.Duration, logger *slog.Logger, build func() (*Registry, error)) (*Registry, error) {
+	var lastErr error
+	delay := baseDelay
+	for attempt := 1; attempt <= attempts; attempt++ {
+		r, err := build()
+		if err == nil {
+			if attempt > 1 {
+				logger.Info("store registry built after retry", "attempt", attempt)
+			}
+			return r, nil
+		}
+		lastErr = err
+		if attempt == attempts {
+			break
+		}
+		logger.Warn("failed to build store registry; backing off before retry",
+			"attempt", attempt,
+			"maxAttempts", attempts,
+			"retryIn", delay.String(),
+			"error", err,
+		)
+		t := time.NewTimer(delay)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return nil, fmt.Errorf("store registry build aborted while backing off: %w", ctx.Err())
+		}
+		delay *= 2
+	}
+	return nil, fmt.Errorf("store registry build failed after %d attempts: %w", attempts, lastErr)
 }
 
 // newAerospikeRegistry constructs every Aerospike-backed store plus the
