@@ -50,7 +50,7 @@ func BenchmarkPublishFanout(b *testing.B) {
 	}
 	adminClient.Close()
 
-	prod, err := kafka.NewProducer([]string{brokers}, topic, nil, logger)
+	prod, err := kafka.NewProducer([]string{brokers}, topic, nil, nil, logger)
 	if err != nil {
 		b.Skipf("Kafka not available at %s: %v", brokers, err)
 	}

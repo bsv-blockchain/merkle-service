@@ -82,8 +82,8 @@ func TestConsumer_CrashesOnPersistentUnknownTopicID(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := c.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
+	if sErr := c.Start(ctx); sErr != nil {
+		t.Fatalf("Start: %v", sErr)
 	}
 	defer func() { _ = c.Stop() }()
 
@@ -95,8 +95,8 @@ func TestConsumer_CrashesOnPersistentUnknownTopicID(t *testing.T) {
 
 	// Healthy baseline: the consumer must be demonstrably consuming before
 	// the wedge, so the crash below cannot be a startup artifact.
-	if err := prod.ProduceSync(context.Background(), &kgo.Record{Value: []byte("pre")}).FirstErr(); err != nil {
-		t.Fatalf("producing baseline record: %v", err)
+	if pErr := prod.ProduceSync(context.Background(), &kgo.Record{Value: []byte("pre")}).FirstErr(); pErr != nil {
+		t.Fatalf("producing baseline record: %v", pErr)
 	}
 	waitFor(t, "baseline record consumed", 15*time.Second,
 		func() bool { return handled.Load() > 0 })
