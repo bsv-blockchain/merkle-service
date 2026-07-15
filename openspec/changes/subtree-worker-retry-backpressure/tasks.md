@@ -10,8 +10,8 @@
 
 ## 3. Metrics
 
-- [ ] 3.1 New `internal/metrics/block.go`: `SubtreeWorkMessagesTotal` CounterVec (`merkle_subtree_work_messages_total`, label `outcome`) + `IncSubtreeWork(outcome)`, reusing the existing outcome label constants
-- [ ] 3.2 Increment `retried` / `dlq` on the worker's two existing `handleTransientFailure` branches, with tests pinning the deltas
+- [x] 3.1 New `internal/metrics/block.go`: `SubtreeWorkMessagesTotal` CounterVec (`merkle_subtree_work_messages_total`, label `outcome`) + `IncSubtreeWork(outcome)`, reusing the existing outcome label constants
+- [x] 3.2 Increment `retried` / `dlq` on the worker's two existing `handleTransientFailure` branches, with tests pinning the deltas
 
 ## 4. Worker retry path
 

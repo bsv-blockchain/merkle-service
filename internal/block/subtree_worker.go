@@ -13,6 +13,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/logfields"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -452,6 +453,7 @@ func (s *SubtreeWorkerService) handleTransientFailure(ctx context.Context, workM
 		if pubErr := s.dlqProducer.PublishWithHashKey(context.WithoutCancel(ctx), workMsg.SubtreeHash, data); pubErr != nil {
 			return fmt.Errorf("publishing subtree work message to DLQ: %w", pubErr)
 		}
+		metrics.IncSubtreeWork(metrics.OutcomeDLQ)
 		return nil
 	}
 
@@ -480,6 +482,7 @@ func (s *SubtreeWorkerService) handleTransientFailure(ctx context.Context, workM
 	if pubErr := s.retryProducer.PublishWithHashKey(context.WithoutCancel(ctx), workMsg.SubtreeHash, data); pubErr != nil {
 		return fmt.Errorf("re-publishing subtree work message for retry: %w", pubErr)
 	}
+	metrics.IncSubtreeWork(metrics.OutcomeRetried)
 	// Intentionally do NOT decrement on retry — only success or DLQ counts.
 	return nil
 }
