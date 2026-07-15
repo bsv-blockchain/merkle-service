@@ -1,7 +1,7 @@
 ## 1. retryutil extraction (zero behavior change)
 
-- [ ] 1.1 Create `internal/retryutil` with `Backoff(baseMs, attempt int, maxBackoff time.Duration) time.Duration` (exponential, 1-based attempt, 0 when baseMs<=0, shift-overflow guard → maxBackoff), `Wait(ctx, d) error` (ctx-aware timer, d<=0 → nil), and `IsDiskFull(err) bool` (ENOSPC via errors.Is + "no space left on device"/"disk quota exceeded" text match); unit tests for schedule/cap/overflow/disable, Wait cancellation, and the IsDiskFull matrix
-- [ ] 1.2 Refactor `internal/subtree/processor.go` `retryBackoff`/`waitBackoff`/`isDiskFull` into one-line wrappers over retryutil, keeping `subtreeRetryBackoffCap = 30s` local; `processor_backpressure_test.go` passes UNMODIFIED
+- [x] 1.1 Create `internal/retryutil` with `Backoff(baseMs, attempt int, maxBackoff time.Duration) time.Duration` (exponential, 1-based attempt, 0 when baseMs<=0, shift-overflow guard → maxBackoff), `Wait(ctx, d) error` (ctx-aware timer, d<=0 → nil), and `IsDiskFull(err) bool` (ENOSPC via errors.Is + "no space left on device"/"disk quota exceeded" text match); unit tests for schedule/cap/overflow/disable, Wait cancellation, and the IsDiskFull matrix
+- [x] 1.2 Refactor `internal/subtree/processor.go` `retryBackoff`/`waitBackoff`/`isDiskFull` into one-line wrappers over retryutil, keeping `subtreeRetryBackoffCap = 30s` local; `processor_backpressure_test.go` passes UNMODIFIED
 
 ## 2. Configuration
 
