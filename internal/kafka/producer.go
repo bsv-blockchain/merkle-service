@@ -173,6 +173,15 @@ type Producer struct {
 // so accepting nil here without defaulting would turn the first publish into a
 // panic.
 //
+// partitions optionally maps topic names to the partition count each should be
+// created with (config.KafkaConfig.TopicPartitions), exactly as NewConsumer
+// takes it; only this producer's target topic is looked up. Pass nil for
+// topics with no configured width (they are created at 1 partition). Without
+// this, a producer that started before any consumer created the work topics
+// 1-partition wide (scale-ovh, 15 Jul 2026: the subtree topic's on-disk
+// layout showed partition 0 from the producer's create and partitions 1+ from
+// a later consumer grow, remapping keys mid-stream).
+//
 // retentionMs optionally maps topic names to the retention.ms a topic should
 // be CREATED with (source: KafkaConfig.TopicRetention); existing topics are
 // never altered. This matters most here: the DLQ topics are producer-only, so
@@ -180,7 +189,7 @@ type Producer struct {
 // configs on a fresh cluster they inherit the broker default retention
 // (15 minutes on dev-ovh-1), silently expiring dead letters. Pass nil only in
 // unit tests.
-func NewProducer(brokers []string, topic string, retentionMs map[string]int64, logger *slog.Logger) (*Producer, error) {
+func NewProducer(brokers []string, topic string, partitions map[string]int32, retentionMs map[string]int64, logger *slog.Logger) (*Producer, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -195,7 +204,7 @@ func NewProducer(brokers []string, topic string, retentionMs map[string]int64, l
 	// NewConsumer: a transient failure is logged, not fatal — auto-creating
 	// brokers still work without it.
 	ensureCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if eErr := EnsureTopics(ensureCtx, brokers, []string{topic}, nil, retentionMs, logger); eErr != nil {
+	if eErr := EnsureTopics(ensureCtx, brokers, []string{topic}, partitions, retentionMs, logger); eErr != nil {
 		logger.Warn("could not pre-create producer topic; relying on broker auto-create",
 			"topic", topic, "error", eErr)
 	}

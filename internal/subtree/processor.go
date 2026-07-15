@@ -133,6 +133,7 @@ func (p *Processor) Init(_ interface{}) error {
 	callbackProducer, err := kafka.NewProducer(
 		p.cfg.Kafka.Brokers,
 		p.cfg.Kafka.CallbackTopic,
+		p.cfg.Kafka.TopicPartitions(),
 		p.cfg.Kafka.TopicRetention(),
 		p.Logger,
 	)
@@ -147,6 +148,7 @@ func (p *Processor) Init(_ interface{}) error {
 	retryProducer, err := kafka.NewProducer(
 		p.cfg.Kafka.Brokers,
 		p.cfg.Kafka.SubtreeTopic,
+		p.cfg.Kafka.TopicPartitions(),
 		p.cfg.Kafka.TopicRetention(),
 		p.Logger,
 	)
@@ -161,6 +163,7 @@ func (p *Processor) Init(_ interface{}) error {
 	dlqProducer, err := kafka.NewProducer(
 		p.cfg.Kafka.Brokers,
 		p.cfg.Kafka.SubtreeDLQTopic,
+		p.cfg.Kafka.TopicPartitions(),
 		p.cfg.Kafka.TopicRetention(),
 		p.Logger,
 	)

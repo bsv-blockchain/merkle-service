@@ -99,6 +99,7 @@ func (p *Processor) Init(cfg interface{}) error {
 	subtreeWorkProducer, err := kafka.NewProducer(
 		p.kafkaCfg.Brokers,
 		p.kafkaCfg.SubtreeWorkTopic,
+		p.kafkaCfg.TopicPartitions(),
 		p.kafkaCfg.TopicRetention(),
 		p.Logger,
 	)
@@ -111,6 +112,7 @@ func (p *Processor) Init(cfg interface{}) error {
 	callbackProducer, err := kafka.NewProducer(
 		p.kafkaCfg.Brokers,
 		p.kafkaCfg.CallbackTopic,
+		p.kafkaCfg.TopicPartitions(),
 		p.kafkaCfg.TopicRetention(),
 		p.Logger,
 	)

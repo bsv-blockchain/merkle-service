@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
@@ -22,6 +23,14 @@ import (
 // exits unexpectedly. Indirected through a package variable so tests can
 // substitute it without taking down the test runner.
 var exitFunc = func(code int) { os.Exit(code) }
+
+// unknownTopicIDCrashAfter is how long a consumed topic may persistently fail
+// fetches with UNKNOWN_TOPIC_ID before the consumer deliberately crashes the
+// process (see pollLoop). kgo pins a topic's UUID at cursor creation and never
+// adopts the new ID after an out-of-band delete+recreate — the client is in a
+// documented fatal state and only a fresh client recovers. A package variable
+// so tests can shrink the window.
+var unknownTopicIDCrashAfter = 30 * time.Second
 
 // MessageHandler is called for each consumed message.
 type MessageHandler func(ctx context.Context, msg *Message) error
@@ -197,6 +206,15 @@ type Consumer struct {
 	// workers; no mutex needed.
 	resumeAt map[topicPartition]time.Time
 
+	// unknownTopicSince records, per topic, when fetches first failed with
+	// UNKNOWN_TOPIC_ID. kgo never adopts a recreated topic's new UUID, so
+	// once this error persists past unknownTopicIDCrashAfter the client is
+	// unrecoverable and the poll loop exits to trigger the F-053 crash guard
+	// (scale-ovh wedge of 15 Jul 2026: the redpanda operator delete+recreated
+	// every topic under four running consumers, which then heartbeated for an
+	// hour while consuming nothing). Poll-goroutine-owned; no mutex needed.
+	unknownTopicSince map[string]time.Time
+
 	cancelMu   sync.Mutex // teranode #638: guard the cancel func against races
 	cancel     context.CancelFunc
 	consumeCtx context.Context //nolint:containedctx // handed to workers created by rebalance callbacks
@@ -235,14 +253,15 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 	}
 
 	c := &Consumer{
-		groupID:    groupID,
-		topics:     topics,
-		handler:    handler,
-		logger:     logger,
-		ready:      make(chan struct{}),
-		workers:    make(map[topicPartition]*partitionWorker),
-		rewindReqs: make(map[topicPartition]*kgo.Record),
-		resumeAt:   make(map[topicPartition]time.Time),
+		groupID:           groupID,
+		topics:            topics,
+		handler:           handler,
+		logger:            logger,
+		ready:             make(chan struct{}),
+		workers:           make(map[topicPartition]*partitionWorker),
+		rewindReqs:        make(map[topicPartition]*kgo.Record),
+		resumeAt:          make(map[topicPartition]time.Time),
+		unknownTopicSince: make(map[string]time.Time),
 	}
 
 	// Ensure the subscribed topics exist (at their configured partition count)
@@ -356,85 +375,145 @@ func (c *Consumer) pollLoop(ctx context.Context) {
 		fetches := c.client.PollFetches(pollCtx)
 		cancelPoll()
 
-		// teranode #636/#638: client-closed is franz's self-healing reconnect or
-		// our own shutdown — recover, do not treat as a fatal goroutine exit.
-		if fetches.IsClientClosed() {
+		if c.processFetches(ctx, fetches) {
 			return
 		}
+	}
+}
 
-		// A zero-length Fetches is kgo's one poll return that does NOT hold
-		// the rebalance-blocking poller (its fill raced a rebalance that
-		// drained the readied buffers and un-registered the poller), so the
-		// post-poll window is NOT revoke-safe here. Skip rewind application
-		// until the next tick, at most pollTick away.
-		if len(fetches) == 0 {
-			c.signalReady()
-			c.client.AllowRebalance()
+// processFetches handles one PollFetches result: error classification (and
+// the UNKNOWN_TOPIC_ID crash escalation), batch dispatch to the partition
+// workers, rewind application, and the closing AllowRebalance. It returns
+// true when the poll loop must exit (client closed or fatal error). Split
+// from pollLoop so tests can drive it with hand-built Fetches — mixed
+// records-plus-errors polls are timing-dependent to produce via a real
+// broker.
+func (c *Consumer) processFetches(ctx context.Context, fetches kgo.Fetches) bool {
+	// teranode #636/#638: client-closed is franz's self-healing reconnect or
+	// our own shutdown — recover, do not treat as a fatal goroutine exit.
+	if fetches.IsClientClosed() {
+		return true
+	}
+
+	// A zero-length Fetches is kgo's one poll return that does NOT hold
+	// the rebalance-blocking poller (its fill raced a rebalance that
+	// drained the readied buffers and un-registered the poller), so the
+	// post-poll window is NOT revoke-safe here. Skip rewind application
+	// until the next tick, at most pollTick away.
+	if len(fetches) == 0 {
+		c.signalReady()
+		c.client.AllowRebalance()
+		return false
+	}
+
+	if errs := fetches.Errors(); len(errs) > 0 {
+		if c.classifyFetchErrors(errs) {
+			return true
+		}
+	} else {
+		// First healthy poll signals readiness.
+		c.signalReady()
+	}
+
+	fetches.EachPartition(func(p kgo.FetchTopicPartition) {
+		if len(p.Records) == 0 {
+			return
+		}
+		// Records flowing again is proof the topic resolved (a brief
+		// UNKNOWN_TOPIC_ID during create propagation, not a recreation) —
+		// stop the crash countdown.
+		delete(c.unknownTopicSince, p.Topic)
+		w, ok := c.workers[topicPartition{p.Topic, p.Partition}]
+		if !ok {
+			// No worker (partition raced a revoke). Records are
+			// uncommitted, so the new owner redelivers them.
+			return
+		}
+		select {
+		case w.recs <- p.Records:
+		case <-ctx.Done():
+		}
+	})
+
+	// Apply worker-recorded rewinds while rebalances are still blocked
+	// (post-poll, pre-AllowRebalance) — the only window where SetOffsets
+	// cannot race a revoke. See rewindReqs.
+	c.applyRewinds()
+
+	// With BlockRebalanceOnPoll, rebalances wait until we explicitly allow
+	// them — after dispatch, so partitions never move mid-dispatch.
+	c.client.AllowRebalance()
+	return false
+}
+
+// classifyFetchErrors logs and counts one poll's fetch errors, runs the
+// UNKNOWN_TOPIC_ID crash escalation, and reports whether the poll loop must
+// exit (context canceled / client closed). Transient broker errors are left
+// for the client to self-heal; crucially they do NOT stop the caller from
+// dispatching whatever records arrived in the same poll — skipping dispatch
+// on a mixed records-plus-errors poll would permanently drop those records
+// (kgo has already advanced its in-memory fetch positions past them), letting
+// a later commit on the same partition seal the loss (F-030), and would
+// starve every healthy partition for as long as one partition kept erroring
+// (the scale-ovh wedge of 15 Jul 2026).
+func (c *Consumer) classifyFetchErrors(errs []kgo.FetchError) (fatal bool) {
+	var crashTopic string
+	var crashSince time.Time
+	for _, e := range errs {
+		// Our own pollTick deadline: an idle tick, not a broker error.
+		// Only the fake fetch kgo injects for the poll context (no
+		// topic, partition -1) qualifies — a real topic/partition
+		// error that merely wraps DeadlineExceeded (e.g. an
+		// offset-validation timeout) must still be counted and
+		// logged below.
+		if e.Topic == "" && e.Partition < 0 && errors.Is(e.Err, context.DeadlineExceeded) {
 			continue
 		}
-
-		if errs := fetches.Errors(); len(errs) > 0 {
-			fatal := false
-			tickOnly := true
-			for _, e := range errs {
-				// Our own pollTick deadline: an idle tick, not a broker error.
-				// Only the fake fetch kgo injects for the poll context (no
-				// topic, partition -1) qualifies — a real topic/partition
-				// error that merely wraps DeadlineExceeded (e.g. an
-				// offset-validation timeout) must still be counted and
-				// logged below.
-				if e.Topic == "" && e.Partition < 0 && errors.Is(e.Err, context.DeadlineExceeded) {
-					continue
-				}
-				tickOnly = false
-				if errors.Is(e.Err, context.Canceled) || errors.Is(e.Err, kgo.ErrClientClosed) {
-					fatal = true
-					continue
-				}
-				metrics.IncKafkaConsumerError(e.Topic, metrics.KafkaErrorBroker)
-				c.logger.Error("franz fetch error", "topic", e.Topic, "partition", e.Partition, "error", e.Err)
-			}
-			if fatal {
-				return
-			}
-			if !tickOnly {
-				// Transient fetch errors: let the client self-heal and poll again.
-				c.applyRewinds()
-				c.client.AllowRebalance()
-				continue
-			}
-			// Idle tick: fall through — rewind application and AllowRebalance
-			// below still run.
-		} else {
-			// First healthy poll signals readiness.
-			c.signalReady()
+		if errors.Is(e.Err, context.Canceled) || errors.Is(e.Err, kgo.ErrClientClosed) {
+			fatal = true
+			continue
 		}
-
-		fetches.EachPartition(func(p kgo.FetchTopicPartition) {
-			if len(p.Records) == 0 {
-				return
+		metrics.IncKafkaConsumerError(e.Topic, metrics.KafkaErrorBroker)
+		c.logger.Error("franz fetch error", "topic", e.Topic, "partition", e.Partition, "error", e.Err)
+		if errors.Is(e.Err, kerr.UnknownTopicID) {
+			first, seen := c.unknownTopicSince[e.Topic]
+			switch {
+			case !seen:
+				c.unknownTopicSince[e.Topic] = time.Now()
+			case time.Since(first) > unknownTopicIDCrashAfter && crashTopic == "":
+				crashTopic, crashSince = e.Topic, first
 			}
-			w, ok := c.workers[topicPartition{p.Topic, p.Partition}]
-			if !ok {
-				// No worker (partition raced a revoke). Records are
-				// uncommitted, so the new owner redelivers them.
-				return
-			}
-			select {
-			case w.recs <- p.Records:
-			case <-ctx.Done():
-			}
-		})
-
-		// Apply worker-recorded rewinds while rebalances are still blocked
-		// (post-poll, pre-AllowRebalance) — the only window where SetOffsets
-		// cannot race a revoke. See rewindReqs.
-		c.applyRewinds()
-
-		// With BlockRebalanceOnPoll, rebalances wait until we explicitly allow
-		// them — after dispatch, so partitions never move mid-dispatch.
-		c.client.AllowRebalance()
+		}
 	}
+	if fatal {
+		return true
+	}
+	if crashTopic != "" {
+		// The topic was deleted (and possibly recreated) out from under this
+		// client; kgo pins the old UUID and will never consume the topic
+		// again. Crash so the orchestrator restarts the pod: the fresh client
+		// adopts the new topic ID and EnsureTopics re-creates a still-missing
+		// topic.
+		c.logger.Error(
+			"UNKNOWN_TOPIC_ID persisted past recovery window; topic was recreated or deleted out-of-band — crashing so the restarted pod recovers",
+			"group", c.groupID,
+			"topic", crashTopic,
+			"since", crashSince,
+			"window", unknownTopicIDCrashAfter,
+		)
+		exitFunc(1)
+		// exitFunc never returns in production. Under a test stub it does:
+		// initiate the normal shutdown sequence instead of exiting the poll
+		// loop directly — the loop MUST keep polling until the
+		// watcher-initiated close completes or the group leave deadlocks
+		// under BlockRebalanceOnPoll (see Start).
+		c.cancelMu.Lock()
+		if c.cancel != nil {
+			c.cancel()
+		}
+		c.cancelMu.Unlock()
+	}
+	return false
 }
 
 // applyRewinds performs the client side of every pending rewind and resumes

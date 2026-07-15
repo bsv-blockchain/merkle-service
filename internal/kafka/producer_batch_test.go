@@ -90,7 +90,7 @@ func TestPublishBatch_KgoRoundTrip(t *testing.T) {
 	defer cluster.Close()
 	brokers := cluster.ListenAddrs()
 
-	prod, err := NewProducer(brokers, topic, nil, discardLogger())
+	prod, err := NewProducer(brokers, topic, nil, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("creating producer: %v", err)
 	}
