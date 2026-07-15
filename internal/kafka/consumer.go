@@ -40,6 +40,34 @@ const handlerErrorBackoff = 500 * time.Millisecond
 // bounded per-partition message channel that back-pressured the fetcher.
 const workerChannelDepth = 5
 
+// commitEvery is how many records a partition worker handles before it
+// commits the successful prefix of its in-flight batch. Commits used to
+// happen only after an ENTIRE fetched batch completed; under the dev-ovh-1
+// backlog (50k messages, 1-2s per record on DataHub fetches) a single batch
+// took hours, the committed offset stayed frozen for 40+ minutes while
+// workers demonstrably processed work, and every pod restart reprocessed the
+// whole batch from scratch. Committing every commitEvery records bounds the
+// redelivery window to at most commitEvery records per partition without
+// measurably increasing broker commit load (one OffsetCommit per ~50 handler
+// calls). Prefix-commit semantics (F-030) are unchanged: a chunk's commit
+// still only covers records whose handler succeeded, in order.
+const commitEvery = 50
+
+// fetchMaxPartitionBytes / fetchMaxBytes bound how much data one poll may
+// return per partition and in total. kgo's defaults (1 MiB per partition,
+// 50 MiB total) let a deep backlog of small subtree announcements (~250 B
+// each) hand a worker thousands of records in a single batch — hours of work
+// at 1-2s per record. Bounding the fetch keeps dispatched batches to at most
+// a few hundred records so rewinds discard less and buffered memory stays at
+// worst workerChannelDepth x fetchMaxPartitionBytes per partition. A single
+// record/batch larger than the partition cap is still returned whole (kgo
+// guarantees progress), so large callback-topic records cannot wedge a
+// partition.
+const (
+	fetchMaxPartitionBytes int32 = 256 << 10 // 256 KiB
+	fetchMaxBytes          int32 = 8 << 20   // 8 MiB
+)
+
 // pollTick bounds how long a single PollFetches call may block waiting for
 // records. The poll loop must keep turning even when nothing is fetchable —
 // every partition paused mid-rewind, or simply no traffic — because rewind
@@ -79,6 +107,10 @@ func consumerOpts(brokers []string, groupID string, topics []string) []kgo.Opt {
 		kgo.HeartbeatInterval(3 * time.Second),
 		kgo.RebalanceTimeout(60 * time.Second),
 		kgo.FetchMaxWait(100 * time.Millisecond),
+		// Bound per-poll fetch sizes so a deep backlog cannot hand a worker an
+		// hours-long batch (see fetchMaxPartitionBytes).
+		kgo.FetchMaxPartitionBytes(fetchMaxPartitionBytes),
+		kgo.FetchMaxBytes(fetchMaxBytes),
 		// Sarama parity: sarama's default config sets
 		// Metadata.AllowAutoTopicCreation=true, so consumers of a
 		// not-yet-existing topic triggered broker-side auto-creation and
@@ -108,6 +140,11 @@ type Consumer struct {
 	topics  []string
 	handler MessageHandler
 	logger  *slog.Logger
+
+	// commitRecords is the offset-commit seam: kgo.Client.CommitRecords in
+	// production, a capture in unit tests (same indirection pattern as
+	// exitFunc). Partition workers call it for every committed chunk.
+	commitRecords func(ctx context.Context, recs ...*kgo.Record) error
 
 	readyOnce sync.Once
 	ready     chan struct{}
@@ -212,6 +249,7 @@ func NewConsumer(brokers []string, groupID string, topics []string, handler Mess
 		return nil, fmt.Errorf("failed to create consumer group %s: %w", groupID, err)
 	}
 	c.client = client
+	c.commitRecords = client.CommitRecords
 	return c, nil
 }
 
@@ -581,10 +619,19 @@ func (w *partitionWorker) run() {
 	}
 }
 
-// process runs the handler over one in-order batch, commits the successful
-// prefix, and rewinds the partition on the first failure (F-030: a failed
-// record and everything after it in the partition are redelivered; committed
-// offsets never advance past a failure).
+// process runs the handler over one in-order batch in chunks of commitEvery
+// records, committing each chunk's successful prefix as it completes, and
+// rewinds the partition on the first failure (F-030: a failed record and
+// everything after it in the partition are redelivered; committed offsets
+// never advance past a failure).
+//
+// Chunked commits are the fix for the dev-ovh-1 commit freeze (see
+// commitEvery): progress becomes durable DURING a long batch, not only after
+// it, so a restart or rebalance mid-batch redelivers at most the un-committed
+// tail instead of the whole batch. Between chunks the worker also checks for
+// a stop signal (revoke/lost/shutdown) and abandons the remaining chunks —
+// their records are uncommitted and are redelivered to the partition's next
+// owner.
 func (w *partitionWorker) process(recs []*kgo.Record) {
 	if len(recs) == 0 {
 		return
@@ -596,22 +643,55 @@ func (w *partitionWorker) process(recs []*kgo.Record) {
 		w.discardUntil = -1
 	}
 
-	committable, failed := processBatch(w.ctx, recs, w.c.handler, w.c.handleMetrics, w.c.logger, w.c.groupID)
+	for start := 0; start < len(recs); start += commitEvery {
+		end := start + commitEvery
+		if end > len(recs) {
+			end = len(recs)
+		}
 
-	if len(committable) > 0 {
-		if err := w.c.client.CommitRecords(w.ctx, committable...); err != nil {
-			// Commit failure leaves offsets uncommitted; on the next
-			// rebalance/restart the group resumes from the last committed
-			// offset, so already-handled records are simply redelivered
-			// (at-least-once; handlers are idempotent).
-			if !errors.Is(err, context.Canceled) {
-				w.c.logger.Error("offset commit failed",
-					"group", w.c.groupID, "topic", w.tp.topic, "partition", w.tp.partition, "error", err)
-			}
+		committable, failed := processBatch(w.ctx, recs[start:end], w.c.handler, w.c.handleMetrics, w.c.logger, w.c.groupID)
+
+		if len(committable) > 0 {
+			w.commit(committable)
+		}
+		if failed != nil {
+			w.rewind(failed)
+			return // later chunks are redelivered after the rewind
+		}
+
+		// Stop between chunks when the worker is quitting: the uncommitted
+		// tail is redelivered, and the revoke/shutdown that signaled us is
+		// not held for the rest of a potentially huge batch.
+		select {
+		case <-w.quit:
+			return
+		case <-w.ctx.Done():
+			return
+		default:
 		}
 	}
-	if failed != nil {
-		w.rewind(failed)
+}
+
+// commit commits one in-order chunk of successfully-handled records. A commit
+// failure leaves the offsets uncommitted; on the next rebalance/restart the
+// group resumes from the last committed offset, so already-handled records
+// are simply redelivered (at-least-once; handlers are idempotent). That makes
+// a failed commit WARN-worthy, not fatal — but it MUST be visible: on
+// dev-ovh-1, members fenced during slow processing kept working partitions
+// they no longer owned and their rejected commits were the only signal.
+func (w *partitionWorker) commit(recs []*kgo.Record) {
+	if err := w.c.commitRecords(w.ctx, recs...); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return // shutdown/lost-partition teardown, not a broker rejection
+		}
+		w.c.logger.Warn("offset commit failed; records will be redelivered",
+			"group", w.c.groupID,
+			"topic", w.tp.topic,
+			"partition", w.tp.partition,
+			"firstOffset", recs[0].Offset,
+			"lastOffset", recs[len(recs)-1].Offset,
+			"error", err,
+		)
 	}
 }
 
