@@ -440,6 +440,24 @@ type BlockConfig struct {
 	// can fire — at that point arcade will see a missing STUMP for that subtree
 	// and surface it as a BUMP build error rather than silently going stale.
 	MaxAttempts int `yaml:"maxAttempts" mapstructure:"maxattempts"`
+	// RetryBackoffBaseMs is the base delay before a transiently-failed subtree
+	// work item is re-published to subtree-work; it doubles per attempt and is
+	// capped at 5s (deliberately below the fetcher's 30s — the worker's
+	// 10-attempt budget would live at a higher cap and a failing 50-record
+	// consumer chunk would sleep past the group's 5m rebalance timeout).
+	// Without it the whole MaxAttempts budget burned in milliseconds per item,
+	// which is how the 2026-07-15 scale-ovh DataHub-404 storm was amplified
+	// ~10x by immediate republishes. Default 1000. 0 disables the backoff
+	// (unit tests; not recommended in production).
+	RetryBackoffBaseMs int `yaml:"retryBackoffBaseMs" mapstructure:"retrybackoffbasems"`
+	// NotFoundMaxAttempts caps the retry budget for work items whose failure
+	// is a DataHub 404 (datahub.ErrNotFound). Worker subtrees provably existed
+	// at announcement time, but teranode's asset cache prunes subtree data
+	// after ~2h — a late 404 is effectively permanent, and burning the full
+	// MaxAttempts budget on it only amplified the scale-ovh 404 storm.
+	// MaxAttempts remains a hard ceiling regardless of this value. Default 3.
+	// <= 0 selects the default.
+	NotFoundMaxAttempts int `yaml:"notFoundMaxAttempts" mapstructure:"notfoundmaxattempts"`
 	// RegCacheMaxMB sizes the in-process registration deduplication cache used
 	// by block-time subtree processing. Same shape as Subtree.CacheMaxMB but
 	// independent so all-in-one and microservice topologies behave identically.
@@ -649,6 +667,12 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("block.postminettlsec", 1800)
 	v.SetDefault("block.dedupcachesize", 10000)
 	v.SetDefault("block.maxattempts", 10)
+	// 1s base, doubling per attempt (cap 5s): a 10-attempt budget spans ~37s
+	// of deliberate wait (plus per-republish backlog traversal) instead of
+	// milliseconds — see BlockConfig.RetryBackoffBaseMs.
+	v.SetDefault("block.retrybackoffbasems", 1000)
+	// Reduced budget for DataHub 404s (see BlockConfig.NotFoundMaxAttempts).
+	v.SetDefault("block.notfoundmaxattempts", 3)
 	v.SetDefault("block.regcachemaxmb", 64)
 	v.SetDefault("block.batchgetconcurrency", 4)
 
@@ -808,6 +832,8 @@ func bindEnvVars(v *viper.Viper) {
 		"block.postminettlsec":      "BLOCK_POST_MINE_TTL_SEC",
 		"block.dedupcachesize":      "BLOCK_DEDUP_CACHE_SIZE",
 		"block.maxattempts":         "BLOCK_MAX_ATTEMPTS",
+		"block.retrybackoffbasems":  "BLOCK_RETRY_BACKOFF_BASE_MS",
+		"block.notfoundmaxattempts": "BLOCK_NOT_FOUND_MAX_ATTEMPTS",
 		"block.regcachemaxmb":       "BLOCK_REG_CACHE_MAX_MB",
 		"block.batchgetconcurrency": "BLOCK_BATCH_GET_CONCURRENCY",
 

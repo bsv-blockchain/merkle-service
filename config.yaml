@@ -347,6 +347,24 @@ block:
   # Env: BLOCK_MAX_ATTEMPTS
   maxAttempts: 10
 
+  # Base delay (ms) before a transiently-failed subtree work item is
+  # re-published for retry; doubles per attempt, capped at 5s (deliberately
+  # below the fetcher's 30s cap — see subtree.retryBackoffBaseMs — so a
+  # failing 50-record consumer chunk cannot sleep past the group's 5m
+  # rebalance timeout). Without it the whole maxAttempts budget burns in
+  # milliseconds per item, amplifying dependency outages with immediate
+  # republish storms. 0 disables the backoff (not recommended in production).
+  # Env: BLOCK_RETRY_BACKOFF_BASE_MS
+  retryBackoffBaseMs: 1000
+
+  # Reduced retry budget for work items failing with a DataHub 404. Worker
+  # subtrees existed at announcement time, but teranode's asset cache prunes
+  # subtree data after ~2h, so a late 404 is effectively permanent — it DLQs
+  # after this many attempts instead of burning the full maxAttempts budget.
+  # maxAttempts remains a hard ceiling regardless.
+  # Env: BLOCK_NOT_FOUND_MAX_ATTEMPTS
+  notFoundMaxAttempts: 3
+
   # Memory (MB) for the block-time registration deduplication cache. Same
   # shape as subtree.cacheMaxMB but independent so all-in-one and microservice
   # topologies behave identically. 0 disables.

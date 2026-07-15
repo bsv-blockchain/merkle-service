@@ -39,6 +39,7 @@ func clearConfigEnv(t *testing.T) {
 		"SUBTREE_STORAGE_MODE", "SUBTREE_DAH_OFFSET", "SUBTREE_CACHE_MAX_MB",
 		"SUBTREE_MAX_ATTEMPTS",
 		"BLOCK_WORKER_POOL_SIZE", "BLOCK_POST_MINE_TTL_SEC",
+		"BLOCK_RETRY_BACKOFF_BASE_MS", "BLOCK_NOT_FOUND_MAX_ATTEMPTS",
 		"CALLBACK_MAX_RETRIES", "CALLBACK_BACKOFF_BASE_SEC",
 		"CALLBACK_TIMEOUT_SEC", "CALLBACK_SEEN_THRESHOLD",
 		"BLOB_STORE_URL",
@@ -141,6 +142,12 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Block.PostMineTTLSec != 1800 {
 		t.Errorf("Block.PostMineTTLSec: expected 1800, got %d", cfg.Block.PostMineTTLSec)
 	}
+	if cfg.Block.RetryBackoffBaseMs != 1000 {
+		t.Errorf("Block.RetryBackoffBaseMs: expected 1000, got %d", cfg.Block.RetryBackoffBaseMs)
+	}
+	if cfg.Block.NotFoundMaxAttempts != 3 {
+		t.Errorf("Block.NotFoundMaxAttempts: expected 3, got %d", cfg.Block.NotFoundMaxAttempts)
+	}
 
 	// Callback defaults
 	if cfg.Callback.MaxRetries != 5 {
@@ -194,6 +201,8 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	_ = os.Setenv("SUBTREE_MAX_ATTEMPTS", "7")
 	_ = os.Setenv("BLOCK_WORKER_POOL_SIZE", "32")
 	_ = os.Setenv("BLOCK_POST_MINE_TTL_SEC", "3600")
+	_ = os.Setenv("BLOCK_RETRY_BACKOFF_BASE_MS", "250")
+	_ = os.Setenv("BLOCK_NOT_FOUND_MAX_ATTEMPTS", "5")
 	_ = os.Setenv("CALLBACK_MAX_RETRIES", "10")
 	_ = os.Setenv("CALLBACK_BACKOFF_BASE_SEC", "60")
 	_ = os.Setenv("CALLBACK_TIMEOUT_SEC", "20")
@@ -251,6 +260,12 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 	if cfg.Block.WorkerPoolSize != 32 {
 		t.Errorf("Block.WorkerPoolSize: expected 32, got %d", cfg.Block.WorkerPoolSize)
+	}
+	if cfg.Block.RetryBackoffBaseMs != 250 {
+		t.Errorf("Block.RetryBackoffBaseMs: expected 250, got %d", cfg.Block.RetryBackoffBaseMs)
+	}
+	if cfg.Block.NotFoundMaxAttempts != 5 {
+		t.Errorf("Block.NotFoundMaxAttempts: expected 5, got %d", cfg.Block.NotFoundMaxAttempts)
 	}
 	if cfg.Callback.MaxRetries != 10 {
 		t.Errorf("Callback.MaxRetries: expected 10, got %d", cfg.Callback.MaxRetries)

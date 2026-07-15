@@ -13,6 +13,8 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/logfields"
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
+	"github.com/bsv-blockchain/merkle-service/internal/retryutil"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -186,6 +188,8 @@ func (s *SubtreeWorkerService) Init(_ interface{}) error {
 		"subtreeWorkTopic", s.kafkaCfg.SubtreeWorkTopic,
 		"subtreeWorkDLQTopic", dlqTopic,
 		"maxAttempts", s.maxAttempts(),
+		"retryBackoffBaseMs", s.blockCfg.RetryBackoffBaseMs,
+		"notFoundMaxAttempts", s.notFoundMaxAttempts(),
 		"regCacheEnabled", s.regCache != nil,
 		"regCacheMaxMB", s.blockCfg.RegCacheMaxMB,
 		"batchGetConcurrency", s.blockCfg.BatchGetConcurrency,
@@ -242,6 +246,42 @@ func (s *SubtreeWorkerService) maxAttempts() int {
 		return s.blockCfg.MaxAttempts
 	}
 	return 10
+}
+
+// notFoundMaxAttempts is the reduced retry budget for DataHub 404s (see
+// BlockConfig.NotFoundMaxAttempts): teranode's asset cache prunes subtree
+// data after ~2h, so a late 404 is effectively permanent and burning the full
+// maxAttempts budget on it only amplifies the outage. Mirrors maxAttempts'
+// zero-value handling so struct-literal test configs get the default.
+func (s *SubtreeWorkerService) notFoundMaxAttempts() int {
+	if s.blockCfg.NotFoundMaxAttempts > 0 {
+		return s.blockCfg.NotFoundMaxAttempts
+	}
+	return 3
+}
+
+// workerRetryBackoffCap bounds the worker's exponential retry backoff at 5s —
+// deliberately below the fetcher's 30s cap (internal/subtree). Two reasons:
+// the fetcher's default 3-attempt budget never reaches its cap (schedule tops
+// out at 4s) while the worker's 10-attempt budget would LIVE at one; and the
+// consumer's processBatch runs 50-record chunks with no intra-chunk quit
+// check, draining the whole in-flight chunk on graceful revoke without ctx
+// cancellation — at 30s/record a chunk of failing records sleeps ~25 minutes
+// against rebalanceTimeout=5m and the member is fenced, unobservably so,
+// because partitionsLost runs on the poll goroutine, which is blocked
+// dispatching into the sleeping partition's depth-5 channel. At 5s the
+// worst-case chunk is ~4.2 minutes, under the rebalance window.
+const workerRetryBackoffCap = 5 * time.Second
+
+// retryBackoff returns how long to wait before retry attempt `attempt`
+// (1-based): Block.RetryBackoffBaseMs doubling per attempt, capped at
+// workerRetryBackoffCap. 0 when the backoff is disabled (base <= 0, or a
+// struct-literal test cfg). At the default base the 10-attempt budget spans
+// ~37s of deliberate wait (1s/2s/4s/5s/5s…) plus one backlog traversal per
+// republish — during the 2026-07-15 scale-ovh incident the same budget
+// burned in milliseconds, amplifying the DataHub-404 storm ~10x.
+func (s *SubtreeWorkerService) retryBackoff(attempt int) time.Duration {
+	return retryutil.Backoff(s.blockCfg.RetryBackoffBaseMs, attempt, workerRetryBackoffCap)
 }
 
 // handleMessage consumes a single SubtreeWorkMessage.
@@ -394,11 +434,25 @@ func isPermanentFetchErr(err error) bool {
 	return errors.Is(err, ssrfguard.ErrInvalidURL) || errors.Is(err, ssrfguard.ErrBlockedAddress)
 }
 
-// handleTransientFailure either re-publishes the work item to subtree-work for
-// retry or, once max attempts is reached OR the failure is permanent for the
-// work item's DataHub URL (isPermanentFetchErr), parks it on subtree-work-dlq
-// and decrements the counter so BLOCK_PROCESSED can still fire (with a missing
+// handleTransientFailure either re-publishes the work item to subtree-work
+// for retry (after an exponential backoff — see retryBackoff) or, once max
+// attempts is reached OR the DataHub-404 budget is exhausted
+// (notFoundMaxAttempts) OR the failure is permanent for the work item's
+// DataHub URL (isPermanentFetchErr), parks it on subtree-work-dlq and
+// decrements the counter so BLOCK_PROCESSED can still fire (with a missing
 // STUMP that arcade will surface as a BUMP build error rather than silent loss).
+//
+// Full-disk failures are the exception to all of the above: they are an
+// operational condition, not bad data, so they never consume the retry
+// budget, never decrement the counter, and never route to the DLQ (which has
+// no replay — the fetcher learned this on dev-ovh-1, where a 15-minute
+// ENOSPC window dead-lettered 1,406 subtrees). Instead the work item is
+// PARKED: an error is returned, the consumer doesn't advance past the
+// record, and topic retention keeps it safe in Kafka until the disk
+// recovers. Caveat: an outage longer than aerospike.subtreeCounterTTLSec
+// expires the per-block counter, and recovery then hits the
+// ErrCounterNotFound ACK+ALERT path — those blocks need a /reprocess (see
+// the openspec design doc).
 //
 // On the DLQ branch the counter is decremented BEFORE the DLQ publish. If the
 // decrement fails (counter-store transient hiccup), we return the error so the
@@ -410,19 +464,57 @@ func isPermanentFetchErr(err error) bool {
 // which is deduplicated by the receiver, while the DLQ publish either
 // eventually succeeds or surfaces as a sustained loud-error log.
 func (s *SubtreeWorkerService) handleTransientFailure(ctx context.Context, workMsg *kafka.SubtreeWorkMessage, cause error) error {
+	if retryutil.IsDiskFull(cause) {
+		s.Logger.Warn(
+			"blob store full; parking subtree work item in Kafka until space recovers (never DLQ)",
+			logfields.SubtreeHash(workMsg.SubtreeHash),
+			logfields.BlockHash(workMsg.BlockHash),
+			logfields.SubtreeIndex(workMsg.SubtreeIndex),
+			"attemptCount", workMsg.AttemptCount,
+			"error", cause,
+		)
+		metrics.IncSubtreeWork(metrics.OutcomeParkedDiskFull)
+		// Throttle the redelivery loop; AttemptCount is not bumped (the
+		// message is never re-published), so this stays near the base delay
+		// per redelivery on top of the consumer's own rewind backoff.
+		_ = retryutil.Wait(ctx, s.retryBackoff(workMsg.AttemptCount+1))
+		return fmt.Errorf("blob store full, parking subtree work item for redelivery: %w", cause)
+	}
+
 	nextAttempt := workMsg.AttemptCount + 1
 	maxAttempts := s.maxAttempts()
+	// DataHub 404s get a REDUCED budget rather than the fetcher's immediate
+	// DLQ: worker subtrees provably existed at announcement time (the block
+	// referenced them), so a short retry can outlive a single peer's cache
+	// prune — but teranode's asset cache drops subtree data after ~2h, so a
+	// persistent 404 is permanent and must not burn the full budget.
+	// maxAttempts below stays an independent clause: a misconfigured
+	// notFoundMaxAttempts > maxAttempts can never EXTEND the budget.
+	notFoundExhausted := errors.Is(cause, datahub.ErrNotFound) && nextAttempt >= s.notFoundMaxAttempts()
 
-	if nextAttempt >= maxAttempts || isPermanentFetchErr(cause) {
+	if nextAttempt >= maxAttempts || notFoundExhausted || isPermanentFetchErr(cause) {
+		var reason string
+		switch {
+		case isPermanentFetchErr(cause):
+			reason = "permanent_fetch_error"
+		case notFoundExhausted:
+			reason = "not_found_attempts_exhausted"
+		default:
+			reason = "max_attempts"
+		}
 		s.Logger.Error(
-			"subtree work item exceeded max attempts, routing to DLQ",
+			"subtree work item retries exhausted, routing to DLQ",
 			logfields.SubtreeHash(workMsg.SubtreeHash),
 			logfields.BlockHash(workMsg.BlockHash),
 			logfields.SubtreeIndex(workMsg.SubtreeIndex),
 			"attemptCount", workMsg.AttemptCount,
 			"maxAttempts", maxAttempts,
+			"reason", reason,
 			"error", cause,
 		)
+		// This branch is terminal and deliberately sleep-free: backing off
+		// before a DLQ hand-off would only delay BLOCK_PROCESSED.
+		//
 		// Decrement FIRST so a counter-store hiccup aborts before we publish to
 		// the DLQ — otherwise every redelivery while the counter store is
 		// degraded would publish another DLQ duplicate.
@@ -452,9 +544,11 @@ func (s *SubtreeWorkerService) handleTransientFailure(ctx context.Context, workM
 		if pubErr := s.dlqProducer.PublishWithHashKey(context.WithoutCancel(ctx), workMsg.SubtreeHash, data); pubErr != nil {
 			return fmt.Errorf("publishing subtree work message to DLQ: %w", pubErr)
 		}
+		metrics.IncSubtreeWork(metrics.OutcomeDLQ)
 		return nil
 	}
 
+	backoff := s.retryBackoff(nextAttempt)
 	s.Logger.Warn(
 		"subtree work item transient failure, re-publishing for retry",
 		logfields.SubtreeHash(workMsg.SubtreeHash),
@@ -462,8 +556,17 @@ func (s *SubtreeWorkerService) handleTransientFailure(ctx context.Context, workM
 		logfields.SubtreeIndex(workMsg.SubtreeIndex),
 		"attemptCount", workMsg.AttemptCount,
 		"nextAttempt", nextAttempt,
+		"backoffMs", backoff.Milliseconds(),
 		"error", cause,
 	)
+	// Wait BEFORE the hand-off so the retry budget spans real time (1s/2s/4s/
+	// 5s… rather than back-to-back republish→refetch cycles). An interrupted
+	// wait (shutdown, lost partition) returns an error without publishing: the
+	// unacked original is redelivered, so nothing is lost, duplicated, or
+	// double-counted by aborting here.
+	if waitErr := retryutil.Wait(ctx, backoff); waitErr != nil {
+		return fmt.Errorf("interrupted while backing off before subtree work retry: %w", waitErr)
+	}
 	workMsg.AttemptCount = nextAttempt
 	data, encErr := workMsg.Encode()
 	if encErr != nil {
@@ -480,6 +583,7 @@ func (s *SubtreeWorkerService) handleTransientFailure(ctx context.Context, workM
 	if pubErr := s.retryProducer.PublishWithHashKey(context.WithoutCancel(ctx), workMsg.SubtreeHash, data); pubErr != nil {
 		return fmt.Errorf("re-publishing subtree work message for retry: %w", pubErr)
 	}
+	metrics.IncSubtreeWork(metrics.OutcomeRetried)
 	// Intentionally do NOT decrement on retry — only success or DLQ counts.
 	return nil
 }

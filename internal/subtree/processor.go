@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
-	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -17,6 +15,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/logfields"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
+	"github.com/bsv-blockchain/merkle-service/internal/retryutil"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/ssrfguard"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -443,54 +442,23 @@ const subtreeRetryBackoffCap = 30 * time.Second
 // ~300ms against a disk that stayed full for 15 minutes — retries must span
 // real time to have any chance of outliving the condition they're retrying.
 func (p *Processor) retryBackoff(attempt int) time.Duration {
-	if p.cfg == nil || p.cfg.Subtree.RetryBackoffBaseMs <= 0 {
+	if p.cfg == nil {
 		return 0
 	}
-	base := time.Duration(p.cfg.Subtree.RetryBackoffBaseMs) * time.Millisecond
-	if attempt < 1 {
-		attempt = 1
-	}
-	// Doubling past attempt ~32 overflows the shift; anything that far in is
-	// at the cap regardless.
-	if attempt > 30 {
-		return subtreeRetryBackoffCap
-	}
-	d := base << uint(attempt-1)
-	if d > subtreeRetryBackoffCap || d <= 0 {
-		return subtreeRetryBackoffCap
-	}
-	return d
+	return retryutil.Backoff(p.cfg.Subtree.RetryBackoffBaseMs, attempt, subtreeRetryBackoffCap)
 }
 
 // waitBackoff sleeps for d, returning early with ctx.Err() when the context
 // dies first (shutdown, lost partition — see the kafka consumer's
 // partitions-lost cancellation). d <= 0 returns immediately.
 func waitBackoff(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return retryutil.Wait(ctx, d)
 }
 
 // isDiskFull reports whether err is a full-filesystem condition: ENOSPC (via
 // the wrapped errno chain) or a quota/space error that only survived as text.
 func isDiskFull(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, syscall.ENOSPC) {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no space left on device") ||
-		strings.Contains(msg, "disk quota exceeded")
+	return retryutil.IsDiskFull(err)
 }
 
 // handleTransientFailure bumps AttemptCount and either re-publishes the
