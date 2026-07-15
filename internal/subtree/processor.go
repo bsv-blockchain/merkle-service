@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -184,6 +186,7 @@ func (p *Processor) Init(_ interface{}) error {
 		"subtreeDLQTopic", p.cfg.Kafka.SubtreeDLQTopic,
 		"callbackTopic", p.cfg.Kafka.CallbackTopic,
 		"maxAttempts", p.cfg.Subtree.MaxAttempts,
+		"retryBackoffBaseMs", p.cfg.Subtree.RetryBackoffBaseMs,
 		"cacheEnabled", p.regCache != nil,
 	)
 
@@ -421,12 +424,99 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	return nil
 }
 
+// subtreeRetryBackoffCap bounds the exponential retry backoff (see
+// retryBackoff) so a high AttemptCount can never park a partition worker for
+// minutes at a time.
+const subtreeRetryBackoffCap = 30 * time.Second
+
+// retryBackoff returns how long to wait before retry attempt `attempt`
+// (1-based): RetryBackoffBaseMs doubling per attempt, capped at
+// subtreeRetryBackoffCap. 0 when the backoff is disabled (base <= 0, or a
+// struct-literal test cfg). On dev-ovh-1 the whole 3-attempt budget burned in
+// ~300ms against a disk that stayed full for 15 minutes — retries must span
+// real time to have any chance of outliving the condition they're retrying.
+func (p *Processor) retryBackoff(attempt int) time.Duration {
+	if p.cfg == nil || p.cfg.Subtree.RetryBackoffBaseMs <= 0 {
+		return 0
+	}
+	base := time.Duration(p.cfg.Subtree.RetryBackoffBaseMs) * time.Millisecond
+	if attempt < 1 {
+		attempt = 1
+	}
+	// Doubling past attempt ~32 overflows the shift; anything that far in is
+	// at the cap regardless.
+	if attempt > 30 {
+		return subtreeRetryBackoffCap
+	}
+	d := base << uint(attempt-1)
+	if d > subtreeRetryBackoffCap || d <= 0 {
+		return subtreeRetryBackoffCap
+	}
+	return d
+}
+
+// waitBackoff sleeps for d, returning early with ctx.Err() when the context
+// dies first (shutdown, lost partition — see the kafka consumer's
+// partitions-lost cancellation). d <= 0 returns immediately.
+func waitBackoff(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// isDiskFull reports whether err is a full-filesystem condition: ENOSPC (via
+// the wrapped errno chain) or a quota/space error that only survived as text.
+func isDiskFull(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no space left on device") ||
+		strings.Contains(msg, "disk quota exceeded")
+}
+
 // handleTransientFailure bumps AttemptCount and either re-publishes the
-// message to the subtree topic or, once MaxAttempts has been reached, parks
-// it on subtree-dlq. Returns nil on successful hand-off so the consumer acks
-// the original offset; returns an error only when the producer itself is
-// broken (partition stall is preferable to silent loss in that case).
+// message to the subtree topic (after an exponential backoff — see
+// retryBackoff) or, once MaxAttempts has been reached, parks it on
+// subtree-dlq. Returns nil on successful hand-off so the consumer acks the
+// original offset; returns an error only when the producer itself is broken
+// (partition stall is preferable to silent loss in that case).
+//
+// Full-disk failures are the exception to all of the above: they are an
+// operational condition, not bad data, so they never consume the retry
+// budget and never route to the DLQ (which has no replay — on dev-ovh-1 a
+// 15-minute ENOSPC window dead-lettered 1,406 subtrees, permanently losing
+// every registered tx's callbacks). Instead the message is PARKED: an error
+// is returned, the consumer doesn't advance past the record, and topic
+// retention keeps it safe in Kafka until the disk recovers.
 func (p *Processor) handleTransientFailure(ctx context.Context, subtreeMsg *kafka.SubtreeMessage, stage string, cause error, start time.Time) error {
+	if isDiskFull(cause) {
+		p.Logger.Warn(
+			"blob store full; parking subtree message in Kafka until space recovers (never DLQ)",
+			logfields.SubtreeHash(subtreeMsg.Hash),
+			"stage", stage,
+			"attemptCount", subtreeMsg.AttemptCount,
+			"error", cause,
+		)
+		metrics.ObserveSubtreeProcessing(metrics.OutcomeParkedDiskFull, time.Since(start))
+		// Throttle the redelivery loop; AttemptCount is not bumped (the
+		// message is never re-published), so this stays near the base delay
+		// per redelivery on top of the consumer's own rewind backoff.
+		_ = waitBackoff(ctx, p.retryBackoff(subtreeMsg.AttemptCount+1))
+		return fmt.Errorf("%s: blob store full, parking message for redelivery: %w", stage, cause)
+	}
+
 	nextAttempt := subtreeMsg.AttemptCount + 1
 	maxAttempts := p.cfg.Subtree.MaxAttempts
 	if maxAttempts <= 0 {
@@ -450,14 +540,23 @@ func (p *Processor) handleTransientFailure(ctx context.Context, subtreeMsg *kafk
 		return nil
 	}
 
+	backoff := p.retryBackoff(nextAttempt)
 	p.Logger.Warn(
 		"subtree message transient failure, re-publishing for retry",
 		logfields.SubtreeHash(subtreeMsg.Hash),
 		"stage", stage,
 		"attemptCount", subtreeMsg.AttemptCount,
 		"nextAttempt", nextAttempt,
+		"backoffMs", backoff.Milliseconds(),
 		"error", cause,
 	)
+	// Wait BEFORE the hand-off so the retry budget spans real time (1s/2s/4s…
+	// rather than back-to-back republish→refetch cycles). An interrupted wait
+	// returns an error without publishing: the unacked original is redelivered,
+	// so nothing is lost or duplicated by aborting here.
+	if waitErr := waitBackoff(ctx, backoff); waitErr != nil {
+		return fmt.Errorf("interrupted while backing off before subtree retry: %w", waitErr)
+	}
 	subtreeMsg.AttemptCount = nextAttempt
 	data, encErr := subtreeMsg.Encode()
 	if encErr != nil {

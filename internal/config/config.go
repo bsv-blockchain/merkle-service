@@ -366,6 +366,13 @@ type SubtreeConfig struct {
 	// permanently-failing subtree (e.g. DataHub 404) stalled the partition
 	// forever because the consumer doesn't MarkMessage on handler error.
 	MaxAttempts int `yaml:"maxAttempts" mapstructure:"maxattempts"`
+	// RetryBackoffBaseMs is the base delay before a transient subtree failure
+	// is re-published for retry; it doubles per attempt and is capped at 30s.
+	// Without it the whole MaxAttempts budget burned in ~300ms on dev-ovh-1
+	// (blob-store ENOSPC), turning a 15-minute disk incident into 1,406
+	// permanent dead letters. Default 1000. 0 disables the backoff (unit
+	// tests; not recommended in production).
+	RetryBackoffBaseMs int `yaml:"retryBackoffBaseMs" mapstructure:"retrybackoffbasems"`
 	// SeenTxidLogMax caps how many matched txids are included (as logfields.TxIDs)
 	// on the Info log emitted for each SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES
 	// batch published to a callback URL. 0 disables the txids array entirely
@@ -581,6 +588,10 @@ func registerDefaults(v *viper.Viper) {
 	// (initial + 2 retries) gives us recovery from transient blips without
 	// turning into a self-inflicted DoS.
 	v.SetDefault("subtree.maxattempts", 3)
+	// 1s base, doubling per attempt (cap 30s): 3 attempts span ~3s of real
+	// time instead of ~300ms, giving transient blob-store/DataHub conditions
+	// a chance to clear before the DLQ.
+	v.SetDefault("subtree.retrybackoffbasems", 1000)
 	v.SetDefault("subtree.seentxidlogmax", 1000)
 
 	// Block
@@ -731,13 +742,14 @@ func bindEnvVars(v *viper.Viper) {
 		"p2p.msgbus.enablemdns":     "P2P_ENABLE_MDNS",
 
 		// Subtree
-		"subtree.storagemode":    "SUBTREE_STORAGE_MODE",
-		"subtree.dahoffset":      "SUBTREE_DAH_OFFSET",
-		"subtree.stumpdahoffset": "SUBTREE_STUMP_DAH_OFFSET",
-		"subtree.cachemaxmb":     "SUBTREE_CACHE_MAX_MB",
-		"subtree.dedupcachesize": "SUBTREE_DEDUP_CACHE_SIZE",
-		"subtree.maxattempts":    "SUBTREE_MAX_ATTEMPTS",
-		"subtree.seentxidlogmax": "SUBTREE_SEEN_TXID_LOG_MAX",
+		"subtree.storagemode":        "SUBTREE_STORAGE_MODE",
+		"subtree.dahoffset":          "SUBTREE_DAH_OFFSET",
+		"subtree.stumpdahoffset":     "SUBTREE_STUMP_DAH_OFFSET",
+		"subtree.cachemaxmb":         "SUBTREE_CACHE_MAX_MB",
+		"subtree.dedupcachesize":     "SUBTREE_DEDUP_CACHE_SIZE",
+		"subtree.maxattempts":        "SUBTREE_MAX_ATTEMPTS",
+		"subtree.retrybackoffbasems": "SUBTREE_RETRY_BACKOFF_BASE_MS",
+		"subtree.seentxidlogmax":     "SUBTREE_SEEN_TXID_LOG_MAX",
 
 		// Block
 		"block.workerpoolsize":      "BLOCK_WORKER_POOL_SIZE",

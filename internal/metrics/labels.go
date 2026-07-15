@@ -33,6 +33,11 @@ const (
 	OutcomeHandlerError     = "handler_error"
 	OutcomeRejectedURL      = "rejected_url"
 	OutcomePublished        = "published"
+	// OutcomeParkedDiskFull counts subtree messages parked in Kafka (handler
+	// error, no ack, no DLQ) because the blob store reported a full
+	// filesystem — an operational condition that retention-protected Kafka
+	// rides out, unlike the un-replayable DLQ.
+	OutcomeParkedDiskFull = "parked_disk_full"
 )
 
 // Unknown is the fallback label value when an input cannot be classified
