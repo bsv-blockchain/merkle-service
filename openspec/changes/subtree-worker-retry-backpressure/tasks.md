@@ -15,12 +15,12 @@
 
 ## 4. Worker retry path
 
-- [ ] 4.1 `workerRetryBackoffCap = 5s` const + `retryBackoff(attempt)` / `notFoundMaxAttempts()` helpers on `SubtreeWorkerService`; log both new settings from `Init`
-- [ ] 4.2 Park branch at the top of `handleTransientFailure`: `retryutil.IsDiskFull(cause)` → WARN + `parked_disk_full` + throttle wait + return error (no AttemptCount bump, no decrement, no DLQ)
-- [ ] 4.3 DLQ condition gains `notFoundExhausted` (`errors.Is(cause, datahub.ErrNotFound) && nextAttempt >= notFoundMaxAttempts()`) as an independent clause alongside `maxAttempts` and `isPermanentFetchErr`; add a `reason` field to the DLQ log; branch body (decrement-before-DLQ) unchanged and sleep-free
-- [ ] 4.4 Retry branch waits `retryutil.Wait(ctx, retryBackoff(nextAttempt))` BEFORE the AttemptCount bump/encode/publish; interrupted wait returns an error without publishing; add `backoffMs` to the retry WARN log
+- [x] 4.1 `workerRetryBackoffCap = 5s` const + `retryBackoff(attempt)` / `notFoundMaxAttempts()` helpers on `SubtreeWorkerService`; log both new settings from `Init`
+- [x] 4.2 Park branch at the top of `handleTransientFailure`: `retryutil.IsDiskFull(cause)` → WARN + `parked_disk_full` + throttle wait + return error (no AttemptCount bump, no decrement, no DLQ)
+- [x] 4.3 DLQ condition gains `notFoundExhausted` (`errors.Is(cause, datahub.ErrNotFound) && nextAttempt >= notFoundMaxAttempts()`) as an independent clause alongside `maxAttempts` and `isPermanentFetchErr`; add a `reason` field to the DLQ log; branch body (decrement-before-DLQ) unchanged and sleep-free
+- [x] 4.4 Retry branch waits `retryutil.Wait(ctx, retryBackoff(nextAttempt))` BEFORE the AttemptCount bump/encode/publish; interrupted wait returns an error without publishing; add `backoffMs` to the retry WARN log
 
 ## 5. Tests
 
-- [ ] 5.1 `internal/block/subtree_worker_backpressure_test.go`: backoff schedule pins the 5s cap; wall-clock backoff-before-retry; ctx-cancel abort; ENOSPC + quota-text parking (no DLQ, no decrement, AttemptCount unchanged, metric delta); e2e disk-full park via `stubStumpStore{putErr: enospcErr()}`; not-found reduced-budget DLQ + below-budget retry + budget capped by maxAttempts
-- [ ] 5.2 Existing worker tests pass unmodified (zero-value config disables backoff); `go build ./...`, `go test ./... -count=1`, `-race` on internal/kafka + internal/block + internal/subtree, `golangci-lint run` all green
+- [x] 5.1 `internal/block/subtree_worker_backpressure_test.go`: backoff schedule pins the 5s cap; wall-clock backoff-before-retry; ctx-cancel abort; ENOSPC + quota-text parking (no DLQ, no decrement, AttemptCount unchanged, metric delta); e2e disk-full park via `stubStumpStore{putErr: enospcErr()}`; not-found reduced-budget DLQ + below-budget retry + budget capped by maxAttempts
+- [x] 5.2 Existing worker tests pass unmodified (zero-value config disables backoff); `go build ./...`, `go test ./... -count=1`, `-race` on internal/kafka + internal/block + internal/subtree, `golangci-lint run` all green
