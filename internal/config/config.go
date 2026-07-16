@@ -572,6 +572,19 @@ type PeerHealthConfig struct {
 	// threshold is reached. Expiry is checked lazily on the next
 	// IsHealthy call.
 	CooldownSec int `yaml:"cooldownSec" mapstructure:"cooldownsec"`
+
+	// Stale404GraceSec is the announcement age (seconds, measured from the
+	// subtree message's AnnouncedAtUnixMs stamp) beyond which a DataHub 404
+	// is attributed to our own consumer lag instead of the peer: teranode's
+	// asset cache retains subtree data for a bounded window (~2h), so a 404
+	// on an announcement that sat in Kafka past this grace says nothing
+	// about the peer's honesty and is not counted against its health. The
+	// message itself still routes to the DLQ as a permanent failure — only
+	// the peer attribution changes. Messages without a stamp are treated
+	// as fresh (404 counted). Default 3600 (see the 2026-07-15 dev-ovh-1
+	// incident: lag-aged 404s re-tripped the breaker after every cooldown,
+	// ack-and-dropping 100% of announcements in a single-peer topology).
+	Stale404GraceSec int `yaml:"stale404GraceSec" mapstructure:"stale404gracesec"`
 }
 
 // registerDefaults sets all default values in the Viper instance.
@@ -721,6 +734,9 @@ func registerDefaults(v *viper.Viper) {
 	// Peer-health tracker defaults: 3 consecutive failures → 5m unhealthy.
 	v.SetDefault("datahub.peerhealth.failurethreshold", 3)
 	v.SetDefault("datahub.peerhealth.cooldownsec", 300)
+	// 404s on announcements older than an hour are our consumer lag, not a
+	// lying peer (teranode's asset cache holds ~2h) — don't count them.
+	v.SetDefault("datahub.peerhealth.stale404gracesec", 3600)
 
 	// Registry
 	v.SetDefault("registry.maxcallbackspertxid", 10)
@@ -873,6 +889,7 @@ func bindEnvVars(v *viper.Viper) {
 		"datahub.fallbackurls":                "DATAHUB_FALLBACK_URLS",
 		"datahub.peerhealth.failurethreshold": "DATAHUB_PEER_HEALTH_FAILURE_THRESHOLD",
 		"datahub.peerhealth.cooldownsec":      "DATAHUB_PEER_HEALTH_COOLDOWN_SEC",
+		"datahub.peerhealth.stale404gracesec": "DATAHUB_PEER_HEALTH_STALE404_GRACE_SEC",
 
 		// Registry
 		"registry.maxcallbackspertxid": "REGISTRY_MAX_CALLBACKS_PER_TXID",

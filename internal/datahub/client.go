@@ -109,11 +109,33 @@ type Client struct {
 }
 
 // SetPeerHealth attaches a PeerHealth tracker. After this call, every
-// Fetch* invocation records success or failure against the tracker
-// before returning. Passing nil disables tracking. Safe to call once at
+// Fetch* invocation records success or failure against the tracker before
+// returning — unless the caller's ctx is already dead at record time
+// (cancellation says nothing about the peer; see recordPeerOutcome) or the
+// call site opted out via WithoutPeerRecording to classify and record the
+// outcome itself. Passing nil disables tracking. Safe to call once at
 // startup; not safe to call concurrently with in-flight requests.
 func (c *Client) SetPeerHealth(p *PeerHealth) {
 	c.peerHealth = p
+}
+
+// FetchOption customizes a single fetch call. Currently only used to opt a
+// call site out of the client's internal peer-health recording.
+type FetchOption func(*fetchOptions)
+
+type fetchOptions struct {
+	skipPeerRecording bool
+}
+
+// WithoutPeerRecording disables the client's internal peer-health recording
+// for one fetch. Call sites that can classify outcomes better than the
+// client — the subtree processor knows the announcement's age and can tell
+// a stale-announcement 404 (our consumer lag) from a peer lying about fresh
+// data — use this and record against Client.PeerHealth() themselves.
+func WithoutPeerRecording() FetchOption {
+	return func(o *fetchOptions) {
+		o.skipPeerRecording = true
+	}
 }
 
 // PeerHealth returns the attached tracker, or nil if none was set. Call
@@ -256,14 +278,22 @@ type BlockMetadata struct {
 // FetchSubtreeRaw fetches raw binary subtree data from a DataHub endpoint.
 // dataHubURL is treated as untrusted (it flows from peer-controlled P2P
 // announcements) and is validated against the SSRF predicate before any
-// network I/O happens.
-func (c *Client) FetchSubtreeRaw(ctx context.Context, dataHubURL, hash string) ([]byte, error) {
+// network I/O happens. Pass WithoutPeerRecording to suppress the client's
+// internal peer-health recording for this call (the subtree processor does,
+// so it can classify 404s by announcement age before recording).
+func (c *Client) FetchSubtreeRaw(ctx context.Context, dataHubURL, hash string, opts ...FetchOption) ([]byte, error) {
+	var o fetchOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	if err := c.validateDataHubURL(dataHubURL); err != nil {
 		return nil, err
 	}
 	url := fmt.Sprintf("%s/subtree/%s", dataHubURL, hash)
 	data, err := c.doGetWithRetry(ctx, url, c.maxSubtreeBytes)
-	c.recordPeerOutcome(dataHubURL, err)
+	if !o.skipPeerRecording {
+		c.recordPeerOutcome(ctx, dataHubURL, err)
+	}
 	return data, err
 }
 
@@ -371,7 +401,7 @@ func (c *Client) FetchBlockMetadata(ctx context.Context, dataHubURL, hash string
 	url := fmt.Sprintf("%s/block/%s", dataHubURL, hash)
 	data, err := c.doGetWithRetry(ctx, url, c.maxBlockBytes)
 	if err != nil {
-		c.recordPeerOutcome(dataHubURL, err)
+		c.recordPeerOutcome(ctx, dataHubURL, err)
 		return nil, fmt.Errorf("fetching block metadata %s: %w", hash, err)
 	}
 
@@ -380,28 +410,51 @@ func (c *Client) FetchBlockMetadata(ctx context.Context, dataHubURL, hash string
 		// Parse failure is a peer-side issue (malformed response): the
 		// transport succeeded but the body the peer returned cannot be
 		// trusted. Count it against the peer.
-		c.recordPeerOutcome(dataHubURL, err)
+		c.recordPeerOutcome(ctx, dataHubURL, err)
 		return nil, fmt.Errorf("parsing block metadata %s: %w", hash, err)
 	}
 
-	c.recordPeerOutcome(dataHubURL, nil)
+	c.recordPeerOutcome(ctx, dataHubURL, nil)
 	return meta, nil
 }
 
 // recordPeerOutcome forwards a fetch outcome to the attached PeerHealth
-// tracker, if any. A nil err counts as a success and resets the peer's
+// tracker, if any.
+//
+// Cancellation-neutral: when the CALLER's ctx is already dead at record
+// time, nothing is recorded — neither failure nor success. A pod shutdown,
+// consumer rebalance, or partition loss aborting an in-flight fetch says
+// nothing about the peer, and on dev-ovh-1 (2026-07-15) exactly those
+// context.Canceled errors tripped the breaker on fresh pods within minutes
+// of a rollout. The client's OWN HTTP timeout firing while the caller ctx
+// is alive still records a failure: peer slowness is peer-attributable.
+// The two cases are distinguished via ctx.Err(), never by error string.
+//
+// Otherwise a nil err counts as a success and resets the peer's
 // consecutive-failure counter; a non-nil err counts as a failure regardless
 // of category (404, 5xx, timeout, network, parse) so a peer that lies
-// about the data it has is treated as unhealthy.
-func (c *Client) recordPeerOutcome(dataHubURL string, err error) {
+// about the data it has is treated as unhealthy. A breaker-opening failure
+// is WARN-logged here with the breaker parameters.
+func (c *Client) recordPeerOutcome(ctx context.Context, dataHubURL string, err error) {
 	if c.peerHealth == nil {
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	if err == nil {
 		c.peerHealth.RecordSuccess(dataHubURL)
 		return
 	}
-	c.peerHealth.RecordFailure(dataHubURL)
+	if tripped := c.peerHealth.RecordFailure(dataHubURL); tripped {
+		c.logger.Warn(
+			"DataHub peer marked unhealthy: consecutive-failure threshold reached",
+			logfields.DataHubURL(dataHubURL),
+			"failureThreshold", c.peerHealth.Threshold(),
+			"cooldown", c.peerHealth.Cooldown().String(),
+			"error", err,
+		)
+	}
 }
 
 // dataHubURLValidationTTL bounds how long a successful SSRF validation of a

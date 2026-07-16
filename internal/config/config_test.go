@@ -506,6 +506,57 @@ func TestLoad_LogLevelEnvOverride(t *testing.T) {
 	}
 }
 
+// TestLoad_DataHubPeerHealthDefaults pins the peer-health breaker defaults,
+// including the stale-404 grace added after the 2026-07-15 dev-ovh-1
+// incident (consumer lag aged announcements past teranode's ~2h asset-cache
+// retention; every resulting 404 re-tripped the breaker after each
+// cooldown even though the peer was fine).
+func TestLoad_DataHubPeerHealthDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if cfg.DataHub.PeerHealth.FailureThreshold != 3 {
+		t.Errorf("DataHub.PeerHealth.FailureThreshold: expected 3, got %d", cfg.DataHub.PeerHealth.FailureThreshold)
+	}
+	if cfg.DataHub.PeerHealth.CooldownSec != 300 {
+		t.Errorf("DataHub.PeerHealth.CooldownSec: expected 300, got %d", cfg.DataHub.PeerHealth.CooldownSec)
+	}
+	if cfg.DataHub.PeerHealth.Stale404GraceSec != 3600 {
+		t.Errorf("DataHub.PeerHealth.Stale404GraceSec: expected 3600, got %d", cfg.DataHub.PeerHealth.Stale404GraceSec)
+	}
+}
+
+// TestLoad_DataHubPeerHealthEnvBinding proves the bindEnvVars entries for
+// the datahub.peerhealth keys — a missing binding would silently leave the
+// env var ignored.
+func TestLoad_DataHubPeerHealthEnvBinding(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	t.Setenv("DATAHUB_PEER_HEALTH_FAILURE_THRESHOLD", "5")
+	t.Setenv("DATAHUB_PEER_HEALTH_COOLDOWN_SEC", "120")
+	t.Setenv("DATAHUB_PEER_HEALTH_STALE404_GRACE_SEC", "900")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if cfg.DataHub.PeerHealth.FailureThreshold != 5 {
+		t.Errorf("DataHub.PeerHealth.FailureThreshold: expected 5, got %d", cfg.DataHub.PeerHealth.FailureThreshold)
+	}
+	if cfg.DataHub.PeerHealth.CooldownSec != 120 {
+		t.Errorf("DataHub.PeerHealth.CooldownSec: expected 120, got %d", cfg.DataHub.PeerHealth.CooldownSec)
+	}
+	if cfg.DataHub.PeerHealth.Stale404GraceSec != 900 {
+		t.Errorf("DataHub.PeerHealth.Stale404GraceSec: expected 900, got %d", cfg.DataHub.PeerHealth.Stale404GraceSec)
+	}
+}
+
 func TestLoad_TelemetryDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")

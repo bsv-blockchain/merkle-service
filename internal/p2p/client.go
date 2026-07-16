@@ -540,6 +540,11 @@ func (c *Client) handleSubtreeMessage(ctx context.Context, msg teranode.SubtreeM
 		DataHubURL: msg.DataHubURL,
 		PeerID:     msg.PeerID,
 		ClientName: msg.ClientName,
+		// Stamp the announcement time so the subtree-fetcher can classify a
+		// later DataHub 404: consumer lag can age a message past teranode's
+		// ~2h asset-cache retention, and a 404 on such a stale announcement
+		// is our lag — it must not count against the peer's health.
+		AnnouncedAtUnixMs: time.Now().UnixMilli(),
 	}
 
 	encoded, err := kafkaMsg.Encode()

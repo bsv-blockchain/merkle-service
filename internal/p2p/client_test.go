@@ -128,6 +128,38 @@ func TestHandleSubtreeMessage_ValidMessage(t *testing.T) {
 	}
 }
 
+// TestHandleSubtreeMessage_StampsAnnouncedAt verifies the P2P client stamps
+// AnnouncedAtUnixMs at publish time, so the subtree-fetcher can tell a
+// stale-announcement 404 (our consumer lag) from a peer 404 on fresh data.
+func TestHandleSubtreeMessage_StampsAnnouncedAt(t *testing.T) {
+	client, mockProducer, _ := newTestClient(t)
+
+	msg := teranode.SubtreeMessage{
+		Hash:       "subtree-stamped",
+		DataHubURL: "https://datahub.example.com/subtree/abc",
+		PeerID:     "peer1",
+	}
+
+	before := time.Now().UnixMilli()
+	if err := client.handleSubtreeMessage(context.Background(), msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	after := time.Now().UnixMilli()
+
+	published := mockProducer.getMessages()
+	if len(published) != 1 {
+		t.Fatalf("expected 1 published message, got %d", len(published))
+	}
+	decoded, err := kafka.DecodeSubtreeMessage(published[0].Value)
+	if err != nil {
+		t.Fatalf("failed to decode published subtree message: %v", err)
+	}
+	if decoded.AnnouncedAtUnixMs < before || decoded.AnnouncedAtUnixMs > after {
+		t.Errorf("announcedAtUnixMs %d outside publish window [%d, %d]",
+			decoded.AnnouncedAtUnixMs, before, after)
+	}
+}
+
 func TestHandleSubtreeMessage_EmptyHash(t *testing.T) {
 	client, mockProducer, _ := newTestClient(t)
 

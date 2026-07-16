@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bsv-blockchain/merkle-service/internal/metrics"
 )
 
 // DefaultPeerHealthFailureThreshold is the number of consecutive failures
@@ -15,6 +17,14 @@ const DefaultPeerHealthFailureThreshold = 3
 // unhealthy after crossing the failure threshold. Cooldown expiry is
 // checked lazily on the next IsHealthy call.
 const DefaultPeerHealthCooldown = 5 * time.Minute
+
+// DefaultStale404Grace is the default announcement age beyond which a 404
+// on a subtree fetch is attributed to our own consumer lag rather than the
+// announcing peer (config key datahub.peerhealth.stale404GraceSec).
+// Teranode's asset cache retains subtree data for a bounded window (~2h);
+// an announcement that sat in Kafka for over an hour can legitimately 404
+// on an honest peer, so such a 404 must not feed the peer-health breaker.
+const DefaultStale404Grace = time.Hour
 
 // PeerHealth tracks consecutive-failure state per DataHub peer so call
 // sites (block-processor metadata fetch, /reprocess probe loop) can skip
@@ -66,9 +76,30 @@ func NewPeerHealth(threshold int, cooldown time.Duration) *PeerHealth {
 	}
 }
 
+// Threshold returns the consecutive-failure threshold. Zero for a nil
+// receiver. Exposed so trip-logging call sites can include the breaker
+// parameters in their WARN line.
+func (p *PeerHealth) Threshold() int {
+	if p == nil {
+		return 0
+	}
+	return p.threshold
+}
+
+// Cooldown returns how long a peer stays unhealthy once tripped. Zero for
+// a nil receiver.
+func (p *PeerHealth) Cooldown() time.Duration {
+	if p == nil {
+		return 0
+	}
+	return p.cooldown
+}
+
 // IsHealthy reports whether rawURL's host is currently considered healthy.
 // An unknown peer is healthy by default. An unhealthy entry whose cooldown
-// has elapsed is auto-cleared and reported healthy.
+// has elapsed is auto-cleared and reported healthy. The per-peer health
+// gauge is refreshed on every call so first sight and lazy cooldown-expiry
+// recovery are both visible in metrics.
 func (p *PeerHealth) IsHealthy(rawURL string) bool {
 	if p == nil {
 		return true
@@ -81,28 +112,37 @@ func (p *PeerHealth) IsHealthy(rawURL string) bool {
 	defer p.mu.Unlock()
 	st, ok := p.state[key]
 	if !ok {
+		metrics.SetPeerHealthy(rawURL, true)
 		return true
 	}
 	if st.unhealthyUntil.IsZero() {
+		metrics.SetPeerHealthy(rawURL, true)
 		return true
 	}
 	if !p.now().Before(st.unhealthyUntil) {
 		st.unhealthyUntil = time.Time{}
 		st.consecutiveFailures = 0
+		metrics.SetPeerHealthy(rawURL, true)
 		return true
 	}
+	metrics.SetPeerHealthy(rawURL, false)
 	return false
 }
 
-// RecordFailure increments rawURL's consecutive-failure counter and
-// marks the peer unhealthy once Threshold is reached.
-func (p *PeerHealth) RecordFailure(rawURL string) {
+// RecordFailure increments rawURL's consecutive-failure counter and marks
+// the peer unhealthy once Threshold is reached. It reports whether THIS
+// call transitioned the peer from healthy to unhealthy — true exactly once
+// per breaker opening (a peer whose cooldown has lapsed counts as healthy
+// again, so re-tripping after expiry reports a new transition). Callers
+// use the signal to WARN-log breaker openings; the transition counter and
+// health gauge are updated here so every caller is covered.
+func (p *PeerHealth) RecordFailure(rawURL string) bool {
 	if p == nil {
-		return
+		return false
 	}
 	key := peerKey(rawURL)
 	if key == "" {
-		return
+		return false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -111,14 +151,25 @@ func (p *PeerHealth) RecordFailure(rawURL string) {
 		st = &peerState{}
 		p.state[key] = st
 	}
+	now := p.now()
+	wasUnhealthy := !st.unhealthyUntil.IsZero() && now.Before(st.unhealthyUntil)
 	st.consecutiveFailures++
+	tripped := false
 	if st.consecutiveFailures >= p.threshold {
-		st.unhealthyUntil = p.now().Add(p.cooldown)
+		st.unhealthyUntil = now.Add(p.cooldown)
+		tripped = !wasUnhealthy
 	}
+	if tripped {
+		metrics.IncPeerUnhealthyTransition(rawURL)
+	}
+	stillHealthy := st.unhealthyUntil.IsZero() || !now.Before(st.unhealthyUntil)
+	metrics.SetPeerHealthy(rawURL, stillHealthy)
+	return tripped
 }
 
 // RecordSuccess clears any unhealthy flag and resets the consecutive
-// failure counter for rawURL.
+// failure counter for rawURL, and refreshes the health gauge (first sight
+// of a peer via a successful fetch also registers it as healthy).
 func (p *PeerHealth) RecordSuccess(rawURL string) {
 	if p == nil {
 		return
@@ -129,6 +180,7 @@ func (p *PeerHealth) RecordSuccess(rawURL string) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	metrics.SetPeerHealthy(rawURL, true)
 	st, ok := p.state[key]
 	if !ok {
 		return

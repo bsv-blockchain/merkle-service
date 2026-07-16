@@ -38,6 +38,55 @@ func TestSubtreeMessage_EncodeDecode(t *testing.T) {
 	}
 }
 
+// TestSubtreeMessage_AnnouncedAtRoundTrip pins the announcement-time stamp
+// the subtree-fetcher uses for stale-404 peer-health attribution: the field
+// must survive an encode/decode round trip (including through the retry
+// republish path, which re-encodes the same struct).
+func TestSubtreeMessage_AnnouncedAtRoundTrip(t *testing.T) {
+	announced := time.Now().Add(-2 * time.Hour).UnixMilli()
+	msg := &SubtreeMessage{
+		Hash:              "subtree-hash-123",
+		DataHubURL:        "https://datahub.example.com/subtree/123",
+		AnnouncedAtUnixMs: announced,
+	}
+
+	data, err := msg.Encode()
+	if err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	decoded, err := DecodeSubtreeMessage(data)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if decoded.AnnouncedAtUnixMs != announced {
+		t.Errorf("announcedAtUnixMs: expected %d, got %d", announced, decoded.AnnouncedAtUnixMs)
+	}
+}
+
+// TestSubtreeMessage_AnnouncedAtBackwardCompatible pins wire compatibility
+// with in-flight messages produced before the stamp existed: decoding JSON
+// without the field yields zero ("age unknown"), and encoding a zero stamp
+// omits the field entirely so older consumers see an unchanged payload.
+func TestSubtreeMessage_AnnouncedAtBackwardCompatible(t *testing.T) {
+	legacy := []byte(`{"hash":"h1","dataHubUrl":"https://dh.example/api","peerId":"p","clientName":"c"}`)
+	decoded, err := DecodeSubtreeMessage(legacy)
+	if err != nil {
+		t.Fatalf("decode legacy payload failed: %v", err)
+	}
+	if decoded.AnnouncedAtUnixMs != 0 {
+		t.Errorf("legacy payload should decode with zero announcedAtUnixMs, got %d", decoded.AnnouncedAtUnixMs)
+	}
+
+	msg := &SubtreeMessage{Hash: "h1", DataHubURL: "https://dh.example/api"}
+	data, err := msg.Encode()
+	if err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	if strings.Contains(string(data), "announcedAtUnixMs") {
+		t.Errorf("zero announcedAtUnixMs must be omitted from JSON, got %s", data)
+	}
+}
+
 func TestBlockMessage_EncodeDecode(t *testing.T) {
 	msg := &BlockMessage{
 		Hash:       "blockhash123",
