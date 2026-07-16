@@ -40,6 +40,7 @@ func clearConfigEnv(t *testing.T) {
 		"SUBTREE_MAX_ATTEMPTS",
 		"BLOCK_WORKER_POOL_SIZE", "BLOCK_POST_MINE_TTL_SEC",
 		"BLOCK_RETRY_BACKOFF_BASE_MS", "BLOCK_NOT_FOUND_MAX_ATTEMPTS",
+		"BLOCK_EMIT_EXPECTED_STUMP_SET",
 		"CALLBACK_MAX_RETRIES", "CALLBACK_BACKOFF_BASE_SEC",
 		"CALLBACK_TIMEOUT_SEC", "CALLBACK_SEEN_THRESHOLD",
 		"BLOB_STORE_URL", "BLOB_STORE_SWEEP_INTERVAL_SEC", "BLOB_STORE_SWEEP_MAX_AGE_SEC",
@@ -764,5 +765,73 @@ func TestParseLogLevel(t *testing.T) {
 				t.Errorf("ParseLogLevel(%q): expected %v, got %v", tt.input, tt.expected, got)
 			}
 		})
+	}
+}
+
+// TestLoad_EmitExpectedStumpSet_DefaultTrue pins the default-on semantics of
+// the expected-STUMP set flag: a clean Load() yields a non-nil pointer (the
+// registered default) and the feature reports enabled. Default TRUE is a
+// deliberate divergence from docs/block-processed-completeness.md's original
+// "default off" rollout plan — the feature shipped always-on in v0.4.5, so the
+// flag is an emergency off-switch, not a rollout gate.
+func TestLoad_EmitExpectedStumpSet_DefaultTrue(t *testing.T) {
+	clearConfigEnv(t)
+	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.Block.EmitExpectedStumpSet == nil {
+		t.Fatal("Block.EmitExpectedStumpSet: expected non-nil after Load() (default registered), got nil")
+	}
+	if !cfg.Block.EmitExpectedStumpSetEnabled() {
+		t.Error("Block.EmitExpectedStumpSetEnabled(): expected true by default, got false")
+	}
+}
+
+// TestLoad_EmitExpectedStumpSet_EnvOverride proves the *bool field decodes
+// from the environment through viper's WeaklyTypedInput pipeline: an explicit
+// "false" is the only way to disable, and an explicit "true" round-trips.
+func TestLoad_EmitExpectedStumpSet_EnvOverride(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVal  string
+		enabled bool
+	}{
+		{"explicit false disables", "false", false},
+		{"explicit true enables", envTrue, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+			_ = os.Setenv("BLOCK_EMIT_EXPECTED_STUMP_SET", tt.envVal)
+			defer clearConfigEnv(t)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() failed: %v", err)
+			}
+			if cfg.Block.EmitExpectedStumpSet == nil {
+				t.Fatal("Block.EmitExpectedStumpSet: expected non-nil when env var is set, got nil")
+			}
+			if got := cfg.Block.EmitExpectedStumpSetEnabled(); got != tt.enabled {
+				t.Errorf("EmitExpectedStumpSetEnabled() with env=%q: expected %v, got %v", tt.envVal, tt.enabled, got)
+			}
+		})
+	}
+}
+
+// TestBlockConfig_EmitExpectedStumpSetEnabled_ZeroValue locks in the
+// nil-means-enabled contract: a zero-valued BlockConfig (direct struct
+// construction, no Load()) behaves like production, so services built in
+// tests keep recording and attaching the expected-STUMP set unless a test
+// explicitly opts out with a false pointer.
+func TestBlockConfig_EmitExpectedStumpSetEnabled_ZeroValue(t *testing.T) {
+	var cfg BlockConfig
+	if !cfg.EmitExpectedStumpSetEnabled() {
+		t.Error("zero-valued BlockConfig: EmitExpectedStumpSetEnabled() expected true (nil means enabled), got false")
 	}
 }

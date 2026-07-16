@@ -377,6 +377,19 @@ block:
   # Env: BLOCK_BATCH_GET_CONCURRENCY
   batchGetConcurrency: 4
 
+  # Record the per-(block, callbackURL) set of subtree indices that produced a
+  # STUMP and attach it to BLOCK_PROCESSED as expectedSubtreeIndices, so the
+  # receiver can detect a missing STUMP (docs/block-processed-completeness.md).
+  # Default TRUE — deliberately diverging from that doc's original "default
+  # off" rollout plan: the feature has been unconditionally live in production
+  # since v0.4.5 and its write load is already absorbed, so this flag is an
+  # emergency off-switch, not a rollout gate. Disabling turns off BOTH the
+  # recording and the attach together — attaching a set that was never written
+  # would be an empty set, telling the receiver to expect zero STUMPs (silent
+  # loss).
+  # Env: BLOCK_EMIT_EXPECTED_STUMP_SET
+  emitExpectedStumpSet: true
+
 # ---------------------------------------------------------------------------
 # Callback Delivery
 # ---------------------------------------------------------------------------

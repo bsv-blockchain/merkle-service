@@ -400,7 +400,10 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 		// best-effort: an under-counted set would let arcade under-expect STUMPs
 		// and silently miss one — so a failure re-drives the (idempotent) work
 		// item, exactly like the counter decrement below.
-		if s.expectedStumps != nil {
+		// Gated by the block.emitExpectedStumpSet off-switch; the attach path in
+		// emitBlockProcessed is gated in tandem (see there for why both must
+		// switch together).
+		if s.expectedStumps != nil && s.blockCfg.EmitExpectedStumpSetEnabled() {
 			urls := make([]string, 0, len(result.CallbackGroups))
 			for callbackURL := range result.CallbackGroups {
 				urls = append(urls, callbackURL)
@@ -759,7 +762,18 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(ctx context.Context, work
 // emit fires again; duplicate BLOCK_PROCESSED messages are deduplicated at
 // the callback delivery service (keyed by blockHash + callbackURL + type).
 func (s *SubtreeWorkerService) emitBlockProcessed(ctx context.Context, blockHash, overrideURL, overrideToken string, blockData *store.BlockProcessedData) error {
-	return emitBlockProcessedCallbacks(ctx, s.Logger, s.urlRegistry, s.expectedStumps, s.callbackProducer, blockHash, overrideURL, overrideToken, blockData)
+	// Resolve the expected-STUMP store through the block.emitExpectedStumpSet
+	// off-switch: flag off must suppress the attach entirely (nil store → no
+	// read, no expectedSubtreeIndices field), NOT ship an empty set — an empty
+	// set tells the receiver to expect zero STUMPs, silently disabling
+	// missing-STUMP detection for the block. The write path in handleMessage is
+	// gated in tandem, which is exactly why attaching-while-not-writing (or
+	// vice versa) must never happen.
+	expectedStumps := s.expectedStumps
+	if !s.blockCfg.EmitExpectedStumpSetEnabled() {
+		expectedStumps = nil
+	}
+	return emitBlockProcessedCallbacks(ctx, s.Logger, s.urlRegistry, expectedStumps, s.callbackProducer, blockHash, overrideURL, overrideToken, blockData)
 }
 
 // callbackPublisher is the narrow surface emitBlockProcessedCallbacks needs.

@@ -467,6 +467,35 @@ type BlockConfig struct {
 	// announcement can fire one BatchGet per subtree (up to 30+) in parallel
 	// and exhaust the Aerospike connection pool.
 	BatchGetConcurrency int `yaml:"batchGetConcurrency" mapstructure:"batchgetconcurrency"`
+	// EmitExpectedStumpSet controls whether the subtree worker records the
+	// per-(block, callbackURL) set of subtree indices that produced a STUMP and
+	// attaches it to BLOCK_PROCESSED as expectedSubtreeIndices, so the receiver
+	// can detect a missing STUMP (docs/block-processed-completeness.md).
+	//
+	// Default TRUE — deliberately diverging from that doc's original "default
+	// off" rollout plan: the feature shipped unconditionally in v0.4.5 (#162)
+	// before this flag existed, so its Aerospike write load on the MINED hot
+	// path is already absorbed in production. The flag is an emergency
+	// off-switch, not a rollout gate.
+	//
+	// A *bool so that nil (unset) means enabled: zero-valued BlockConfigs built
+	// directly in tests keep production semantics; only an explicit false
+	// disables. Use EmitExpectedStumpSetEnabled to read it.
+	//
+	// Disabling turns off BOTH the recording (write) and the attach (read)
+	// together. Gating only the write while still attaching would ship an
+	// EMPTY expected set, telling the receiver to expect zero STUMPs — which
+	// reintroduces the exact silent-loss bug the feature exists to fix.
+	EmitExpectedStumpSet *bool `yaml:"emitExpectedStumpSet" mapstructure:"emitexpectedstumpset"`
+}
+
+// EmitExpectedStumpSetEnabled reports whether the expected-STUMP set is
+// recorded and attached to BLOCK_PROCESSED. nil (unset) means enabled: the
+// default is true, so a zero-valued BlockConfig behaves like production. Only
+// an explicit false disables. See BlockConfig.EmitExpectedStumpSet for the
+// default-true rationale and the write+attach-gated-together requirement.
+func (b BlockConfig) EmitExpectedStumpSetEnabled() bool {
+	return b.EmitExpectedStumpSet == nil || *b.EmitExpectedStumpSet
 }
 
 // CallbackConfig holds callback delivery configuration.
@@ -696,6 +725,8 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("block.notfoundmaxattempts", 3)
 	v.SetDefault("block.regcachemaxmb", 64)
 	v.SetDefault("block.batchgetconcurrency", 4)
+	// Off-switch, not a rollout gate — see BlockConfig.EmitExpectedStumpSet.
+	v.SetDefault("block.emitexpectedstumpset", true)
 
 	// Callback
 	v.SetDefault("callback.maxretries", 5)
@@ -856,14 +887,15 @@ func bindEnvVars(v *viper.Viper) {
 		"subtree.seentxidlogmax":     "SUBTREE_SEEN_TXID_LOG_MAX",
 
 		// Block
-		"block.workerpoolsize":      "BLOCK_WORKER_POOL_SIZE",
-		"block.postminettlsec":      "BLOCK_POST_MINE_TTL_SEC",
-		"block.dedupcachesize":      "BLOCK_DEDUP_CACHE_SIZE",
-		"block.maxattempts":         "BLOCK_MAX_ATTEMPTS",
-		"block.retrybackoffbasems":  "BLOCK_RETRY_BACKOFF_BASE_MS",
-		"block.notfoundmaxattempts": "BLOCK_NOT_FOUND_MAX_ATTEMPTS",
-		"block.regcachemaxmb":       "BLOCK_REG_CACHE_MAX_MB",
-		"block.batchgetconcurrency": "BLOCK_BATCH_GET_CONCURRENCY",
+		"block.workerpoolsize":       "BLOCK_WORKER_POOL_SIZE",
+		"block.postminettlsec":       "BLOCK_POST_MINE_TTL_SEC",
+		"block.dedupcachesize":       "BLOCK_DEDUP_CACHE_SIZE",
+		"block.maxattempts":          "BLOCK_MAX_ATTEMPTS",
+		"block.retrybackoffbasems":   "BLOCK_RETRY_BACKOFF_BASE_MS",
+		"block.notfoundmaxattempts":  "BLOCK_NOT_FOUND_MAX_ATTEMPTS",
+		"block.regcachemaxmb":        "BLOCK_REG_CACHE_MAX_MB",
+		"block.batchgetconcurrency":  "BLOCK_BATCH_GET_CONCURRENCY",
+		"block.emitexpectedstumpset": "BLOCK_EMIT_EXPECTED_STUMP_SET",
 
 		// Callback
 		"callback.maxretries":          "CALLBACK_MAX_RETRIES",
