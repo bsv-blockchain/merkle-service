@@ -35,6 +35,16 @@ func main() {
 	}
 	defer func() { _ = registry.Close() }()
 
+	// Blob-store age sweeper: backstop GC for subtree blobs whose
+	// delete-at-height never fires (subtree-work item trimmed, parked, or
+	// crashed — dev-ovh-1, 2026-07-15). Runs here ONLY: the block-processor
+	// is the single replica that already executes DAH prunes on the shared
+	// volume, so one sweeper covers every service without a per-replica
+	// stampede. Sweeps once at startup, then every interval; no-op for
+	// memory stores or when disabled via config.
+	stopSweeper := store.StartAgeSweeperFromConfig(registry.Blob, cfg.BlobStore, logger)
+	defer stopSweeper()
+
 	processor := block.NewProcessor(
 		cfg.Kafka, cfg.Block, cfg.DataHub,
 		registry.Registration, registry.Subtree, registry.CallbackURLRegistry, registry.DataHubRegistry, registry.SubtreeCounter,

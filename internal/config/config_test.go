@@ -42,7 +42,7 @@ func clearConfigEnv(t *testing.T) {
 		"BLOCK_RETRY_BACKOFF_BASE_MS", "BLOCK_NOT_FOUND_MAX_ATTEMPTS",
 		"CALLBACK_MAX_RETRIES", "CALLBACK_BACKOFF_BASE_SEC",
 		"CALLBACK_TIMEOUT_SEC", "CALLBACK_SEEN_THRESHOLD",
-		"BLOB_STORE_URL",
+		"BLOB_STORE_URL", "BLOB_STORE_SWEEP_INTERVAL_SEC", "BLOB_STORE_SWEEP_MAX_AGE_SEC",
 		envTelemetryEnabled, "TELEMETRY_ENDPOINT", envTelemetryProtocol,
 		"TELEMETRY_INSECURE", "TELEMETRY_SERVICE_NAME", "TELEMETRY_NAMESPACE",
 		"TELEMETRY_TRACES", "TELEMETRY_METRICS", "TELEMETRY_SAMPLE_RATIO",
@@ -161,14 +161,16 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.BlobStore.URL != "file:///tmp/merkle-subtrees" {
 		t.Errorf("BlobStore.URL: expected %q, got %q", "file:///tmp/merkle-subtrees", cfg.BlobStore.URL)
 	}
-	// Orphan sweeper: on by default with a generous window — it is the
-	// backstop for blobs whose height is never learned (announced but never
-	// mined), which delete-at-height pruning cannot reach.
-	if cfg.BlobStore.OrphanMaxAgeSec != 86400 {
-		t.Errorf("BlobStore.OrphanMaxAgeSec: expected 86400, got %d", cfg.BlobStore.OrphanMaxAgeSec)
+	// Age sweeper: on by default and aggressive — subtree blobs are a
+	// re-fetchable cache (DataHub re-serves them), and the 2026-07-15
+	// dev-ovh-1 incident showed orphans filling a 1TiB volume in ~3h.
+	// 1800s ≈ 3 blocks at ~10min cadence; 300s interval bounds orphan
+	// buildup to a small fraction of steady state.
+	if cfg.BlobStore.SweepIntervalSec != 300 {
+		t.Errorf("BlobStore.SweepIntervalSec: expected 300, got %d", cfg.BlobStore.SweepIntervalSec)
 	}
-	if cfg.BlobStore.SweepIntervalSec != 3600 {
-		t.Errorf("BlobStore.SweepIntervalSec: expected 3600, got %d", cfg.BlobStore.SweepIntervalSec)
+	if cfg.BlobStore.SweepMaxAgeSec != 1800 {
+		t.Errorf("BlobStore.SweepMaxAgeSec: expected 1800, got %d", cfg.BlobStore.SweepMaxAgeSec)
 	}
 }
 
@@ -208,6 +210,8 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	_ = os.Setenv("CALLBACK_TIMEOUT_SEC", "20")
 	_ = os.Setenv("CALLBACK_SEEN_THRESHOLD", "5")
 	_ = os.Setenv("BLOB_STORE_URL", "s3://my-bucket")
+	_ = os.Setenv("BLOB_STORE_SWEEP_INTERVAL_SEC", "120")
+	_ = os.Setenv("BLOB_STORE_SWEEP_MAX_AGE_SEC", "900")
 
 	defer clearConfigEnv(t)
 
@@ -272,6 +276,78 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 	if cfg.BlobStore.URL != "s3://my-bucket" {
 		t.Errorf("BlobStore.URL: expected %q, got %q", "s3://my-bucket", cfg.BlobStore.URL)
+	}
+	if cfg.BlobStore.SweepIntervalSec != 120 {
+		t.Errorf("BlobStore.SweepIntervalSec: expected 120, got %d", cfg.BlobStore.SweepIntervalSec)
+	}
+	if cfg.BlobStore.SweepMaxAgeSec != 900 {
+		t.Errorf("BlobStore.SweepMaxAgeSec: expected 900, got %d", cfg.BlobStore.SweepMaxAgeSec)
+	}
+}
+
+// TestLoad_BlobStoreSweepValidation pins the sweep-age floor: a nonzero
+// blobStore.sweepMaxAgeSec below 600s (~1 block interval) could delete the
+// in-flight block's subtree blobs mid-processing, so Load must reject it.
+// 0 stays legal — it disables age-based sweeping entirely.
+func TestLoad_BlobStoreSweepValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		env       map[string]string
+		wantError bool
+	}{
+		{
+			name:      "defaults are valid",
+			env:       nil,
+			wantError: false,
+		},
+		{
+			name:      "max age at the 600s floor is accepted",
+			env:       map[string]string{"BLOB_STORE_SWEEP_MAX_AGE_SEC": "600"},
+			wantError: false,
+		},
+		{
+			name:      "max age below the floor is rejected",
+			env:       map[string]string{"BLOB_STORE_SWEEP_MAX_AGE_SEC": "599"},
+			wantError: true,
+		},
+		{
+			name:      "max age 0 disables the sweeper and is accepted",
+			env:       map[string]string{"BLOB_STORE_SWEEP_MAX_AGE_SEC": "0"},
+			wantError: false,
+		},
+		{
+			name:      "negative max age is rejected",
+			env:       map[string]string{"BLOB_STORE_SWEEP_MAX_AGE_SEC": "-1"},
+			wantError: true,
+		},
+		{
+			name:      "interval 0 disables the sweeper and is accepted",
+			env:       map[string]string{"BLOB_STORE_SWEEP_INTERVAL_SEC": "0"},
+			wantError: false,
+		},
+		{
+			name:      "negative interval is rejected",
+			env:       map[string]string{"BLOB_STORE_SWEEP_INTERVAL_SEC": "-1"},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+
+			_, err := Load()
+			if tt.wantError && err == nil {
+				t.Fatal("expected Load() to return an error, got nil")
+			}
+			if !tt.wantError && err != nil {
+				t.Fatalf("expected Load() to succeed, got error: %v", err)
+			}
+		})
 	}
 }
 

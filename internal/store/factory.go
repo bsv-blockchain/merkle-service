@@ -127,6 +127,7 @@ func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Lo
 		),
 		Subtree: NewSubtreeStore(blob, uint64(cfg.Subtree.DAHOffset), logger),    //nolint:gosec // config-validated int
 		Stump:   NewStumpStore(blob, uint64(cfg.Subtree.StumpDAHOffset), logger), //nolint:gosec // config-validated int
+		Blob:    blob,
 		CallbackDedup: NewCallbackDedupStore(
 			asClient, cfg.Aerospike.CallbackDedupSet,
 			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
@@ -160,11 +161,6 @@ func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Lo
 		Health: asClient,
 	}
 	r.AddCloser(func() error { asClient.Close(); return nil })
-
-	// Backstop for blobs whose height is never learned (announced but never
-	// mined) — see StartBlobSweeperFromConfig. No-op for memory stores.
-	stopSweeper := StartBlobSweeperFromConfig(blob, cfg.BlobStore, logger)
-	r.AddCloser(func() error { stopSweeper(); return nil })
 
 	return r, nil
 }

@@ -16,6 +16,13 @@ type Registry struct {
 	SubtreeCounter      SubtreeCounterStore
 	ExpectedStump       ExpectedStumpStore
 
+	// Blob is the raw blob store backing Stump and Subtree. Exposed so the
+	// block-processor — the single replica that already executes DAH prunes
+	// on the shared volume — can run the age sweeper on it (see
+	// StartAgeSweeperFromConfig); services should otherwise use the typed
+	// Stump/Subtree stores.
+	Blob BlobStore
+
 	// Health reports backend reachability for the API health endpoint. May be
 	// nil for backends that don't need a liveness probe (e.g., an in-memory
 	// test backend).

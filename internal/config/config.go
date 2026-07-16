@@ -495,16 +495,24 @@ type CallbackConfig struct {
 // BlobStoreConfig holds blob store configuration.
 type BlobStoreConfig struct {
 	URL string `yaml:"url" mapstructure:"url"`
-	// OrphanMaxAgeSec is the age after which a blob file with no fired
-	// delete-at-height schedule is removed by the background sweeper — the
-	// backstop for subtrees announced but never mined (their height is never
-	// learned, so height-based pruning cannot reach them) and for files
-	// orphaned by a crash between write and schedule. Must comfortably
-	// exceed the longest plausible announcement-to-mine gap. 0 disables the
-	// sweeper.
-	OrphanMaxAgeSec int `yaml:"orphanMaxAgeSec" mapstructure:"orphanmaxagesec"`
-	// SweepIntervalSec is how often the orphan sweeper walks the store.
+	// SweepIntervalSec is how often the age sweeper walks a file:// store.
+	// The sweep runs in the block-processor only (single replica — a
+	// per-replica sweep would stampede the shared volume). 0 disables the
+	// sweeper. Default 300.
 	SweepIntervalSec int `yaml:"sweepIntervalSec" mapstructure:"sweepintervalsec"`
+	// SweepMaxAgeSec is the age after which a top-level subtree blob (a
+	// 64-lowercase-hex file at the store root) is removed by the sweeper —
+	// the backstop for blobs whose subtree-work item never completes
+	// (trimmed queues, long parking, crashes), which the delete-at-height
+	// path can never reach. Subtree blobs are a re-fetchable cache (DataHub
+	// re-serves them), so an aggressive age is safe; STUMP blobs (under
+	// stump/) and .dah/ bookkeeping are never age-swept. Default 1800
+	// (~3 blocks at ~10min cadence). Nonzero values below 600 are rejected
+	// at startup: a sweep age under one block interval could delete the
+	// in-flight block's blobs mid-processing. 0 disables age sweeping.
+	// Rationale: 2026-07-15 dev-ovh-1 incident — orphaned subtree blobs
+	// filled a 1TiB volume in ~3h while steady state is ~2 blocks ≈ 26GB.
+	SweepMaxAgeSec int `yaml:"sweepMaxAgeSec" mapstructure:"sweepmaxagesec"`
 }
 
 // DataHubConfig holds DataHub HTTP client configuration.
@@ -689,8 +697,12 @@ func registerDefaults(v *viper.Viper) {
 
 	// BlobStore
 	v.SetDefault("blobstore.url", "file:///tmp/merkle-subtrees")
-	v.SetDefault("blobstore.orphanmaxagesec", 86400)
-	v.SetDefault("blobstore.sweepintervalsec", 3600)
+	// Age sweeper: aggressive by design. Subtree blobs are a re-fetchable
+	// cache, and the 2026-07-15 dev-ovh-1 incident filled a 1TiB volume in
+	// ~3h with orphans the DAH path could never reach. 1800s ≈ 3 blocks at
+	// ~10min cadence; a 300s interval bounds orphan buildup between sweeps.
+	v.SetDefault("blobstore.sweepintervalsec", 300)
+	v.SetDefault("blobstore.sweepmaxagesec", 1800)
 
 	// DataHub
 	// Defaults tuned so a known-bad peer is dropped in seconds, not minutes.
@@ -848,7 +860,9 @@ func bindEnvVars(v *viper.Viper) {
 		"callback.allowprivateips":     "CALLBACK_ALLOW_PRIVATE_IPS",
 
 		// BlobStore
-		"blobstore.url": "BLOB_STORE_URL",
+		"blobstore.url":              "BLOB_STORE_URL",
+		"blobstore.sweepintervalsec": "BLOB_STORE_SWEEP_INTERVAL_SEC",
+		"blobstore.sweepmaxagesec":   "BLOB_STORE_SWEEP_MAX_AGE_SEC",
 
 		// DataHub
 		"datahub.timeoutsec":                  "DATAHUB_TIMEOUT_SEC",
@@ -943,6 +957,18 @@ func Load() (*Config, error) {
 	// becomes a permanent record that the sweeper never reclaims.
 	if cfg.Aerospike.SubtreeCounterTTLSec <= 0 {
 		return nil, fmt.Errorf("invalid aerospike.subtreeCounterTTLSec %d: must be > 0", cfg.Aerospike.SubtreeCounterTTLSec)
+	}
+
+	// Blob-store sweeper validation. The age floor is the safety property:
+	// the sweeper deletes by mtime, and a nonzero max age below one block
+	// interval (~600s) could remove the in-flight block's subtree blobs
+	// while the block-processor is still assembling STUMPs from them. 0 is
+	// legal for both keys — it disables the sweeper outright.
+	if cfg.BlobStore.SweepIntervalSec < 0 {
+		return nil, fmt.Errorf("invalid blobStore.sweepIntervalSec %d: must be >= 0 (0 disables the sweeper)", cfg.BlobStore.SweepIntervalSec)
+	}
+	if cfg.BlobStore.SweepMaxAgeSec != 0 && cfg.BlobStore.SweepMaxAgeSec < 600 {
+		return nil, fmt.Errorf("invalid blobStore.sweepMaxAgeSec %d: must be 0 (disabled) or >= 600 — a sweep age below one block interval could delete the in-flight block's subtree blobs", cfg.BlobStore.SweepMaxAgeSec)
 	}
 
 	// Telemetry validation. telemetry.endpoint is intentionally NOT required

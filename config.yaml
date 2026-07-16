@@ -442,14 +442,31 @@ blobStore:
   # Env: BLOB_STORE_URL
   url: file:///mnt/nvme/merkle-subtreestore
 
-  # Orphan sweeper (file:// stores only). Blobs whose block height becomes
-  # known are pruned by delete-at-height schedules; blobs that are announced
-  # but never mined have no height and would otherwise live forever. The
-  # sweeper deletes blob files older than orphanMaxAgeSec — set it well above
-  # the longest plausible announcement-to-mine gap. 0 disables the sweeper.
-  orphanMaxAgeSec: 86400
-  # How often the sweeper walks the store.
-  sweepIntervalSec: 3600
+  # Age sweeper (file:// stores only; runs in the block-processor ONLY — the
+  # single replica that already executes delete-at-height prunes on the
+  # shared volume, so one sweeper covers every service without a per-replica
+  # stampede). A subtree blob only gets a delete-at-height schedule when its
+  # subtree-work item completes; items that never complete (queue trimmed
+  # during incident recovery, long-term parking, crash between store and
+  # schedule) orphan their blobs FOREVER. On dev-ovh-1 (2026-07-15) those
+  # orphans plus zero-byte ENOSPC litter filled a 1TiB volume in ~3h while
+  # steady state holds ~2 blocks ≈ 26GB. Subtree blobs are a re-fetchable
+  # cache (DataHub re-serves them; the miss path carried a whole block at
+  # 100% miss rate), so aggressive age GC is safe — the sweeper removes ONLY
+  # top-level 64-lowercase-hex subtree blobs plus zero-byte litter older
+  # than ~5min. STUMP blobs (under stump/) are never age-swept: callback
+  # delivery reads them at delivery time with retry windows up to ~1h.
+  # .dah/ bookkeeping is never touched.
+  #
+  # How often the sweeper walks the store. 0 disables the sweeper.
+  # Env: BLOB_STORE_SWEEP_INTERVAL_SEC
+  sweepIntervalSec: 300
+  # Age after which an orphaned subtree blob is removed. Default 1800 ≈ 3
+  # blocks at ~10min cadence. Nonzero values below 600 are rejected at
+  # startup — a sweep age under one block interval could delete the
+  # in-flight block's blobs mid-processing. 0 disables age sweeping.
+  # Env: BLOB_STORE_SWEEP_MAX_AGE_SEC
+  sweepMaxAgeSec: 1800
 
 # ---------------------------------------------------------------------------
 # DataHub — HTTP client for fetching subtree/block data from Teranode
