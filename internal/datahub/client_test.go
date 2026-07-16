@@ -3,6 +3,7 @@ package datahub
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -566,6 +567,128 @@ func TestFetch_RecordsPeerHealth(t *testing.T) {
 	}
 	if !ph.IsHealthy(server.URL) {
 		t.Fatal("success should restore peer health")
+	}
+}
+
+// TestRecordPeerOutcome_CanceledContextRecordsNothing pins the
+// cancellation-neutral contract at the recording chokepoint: when the
+// caller's ctx is already dead at record time, NOTHING is recorded —
+// neither a failure (a pod shutdown/rebalance aborting an in-flight fetch
+// says nothing about the peer; on dev-ovh-1 one rollout tripped the breaker
+// on fresh pods within minutes) nor a success (a dead ctx must not reset a
+// genuinely failing peer's counter either).
+func TestRecordPeerOutcome_CanceledContextRecordsNothing(t *testing.T) {
+	client := NewClient(5, 0, testLogger())
+	ph := NewPeerHealth(3, 10*time.Minute)
+	client.SetPeerHealth(ph)
+	url := "https://cancel-neutral.example.com/api"
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	live := context.Background()
+
+	// Failure with a dead ctx: not recorded, even many times over threshold.
+	for i := 0; i < 5; i++ {
+		client.recordPeerOutcome(canceled, url, errors.New("connection reset"))
+	}
+	if !ph.IsHealthy(url) {
+		t.Fatal("failures recorded under a canceled ctx must not count against the peer")
+	}
+
+	// Success with a dead ctx: not recorded either. Two live failures, a
+	// canceled-ctx success, then a third live failure must still trip —
+	// proving the success did not reset the consecutive-failure counter.
+	client.recordPeerOutcome(live, url, errors.New("boom"))
+	client.recordPeerOutcome(live, url, errors.New("boom"))
+	client.recordPeerOutcome(canceled, url, nil)
+	client.recordPeerOutcome(live, url, errors.New("boom"))
+	if ph.IsHealthy(url) {
+		t.Fatal("a canceled-ctx success must not reset the failure counter")
+	}
+}
+
+// TestFetchSubtreeRaw_CallerCancellationNotRecorded drives the incident path
+// end to end: a caller ctx canceled mid-fetch (shutdown, rebalance,
+// partition loss) aborts the request, and the resulting error must not be
+// attributed to the peer.
+func TestFetchSubtreeRaw_CallerCancellationNotRecorded(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // hold the request open until the client has gone away
+	}))
+	defer server.Close()
+	defer close(release)
+
+	client := NewClient(5, 0, testLogger())
+	ph := NewPeerHealth(1, 10*time.Minute) // a single counted failure would trip
+	client.SetPeerHealth(ph)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	if _, err := client.FetchSubtreeRaw(ctx, server.URL, "abc123"); err == nil {
+		t.Fatal("expected an error from the canceled fetch")
+	}
+	if !ph.IsHealthy(server.URL) {
+		t.Fatal("caller cancellation must not be recorded as a peer failure")
+	}
+}
+
+// TestFetchSubtreeRaw_ClientTimeoutRecordsFailure pins the flip side of
+// cancellation neutrality: when the client's own HTTP timeout fires while
+// the caller ctx is still alive, the peer really was too slow — that IS
+// peer-attributable and must count. The two cases are distinguished by
+// ctx.Err(), never by matching error strings.
+func TestFetchSubtreeRaw_ClientTimeoutRecordsFailure(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // slower than the client timeout below
+	}))
+	defer server.Close()
+	defer close(release)
+
+	client := NewClient(5, 0, testLogger())
+	client.httpClient.Timeout = 50 * time.Millisecond
+	ph := NewPeerHealth(1, 10*time.Minute)
+	client.SetPeerHealth(ph)
+
+	if _, err := client.FetchSubtreeRaw(context.Background(), server.URL, "abc123"); err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if ph.IsHealthy(server.URL) {
+		t.Fatal("client HTTP timeout with a live caller ctx must count against the peer")
+	}
+}
+
+// TestFetchSubtreeRaw_WithoutPeerRecording verifies the opt-out the subtree
+// processor uses to take over recording: with the option the client records
+// neither success nor failure, and without it the default recording path is
+// unchanged.
+func TestFetchSubtreeRaw_WithoutPeerRecording(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewClient(5, 0, testLogger())
+	ph := NewPeerHealth(1, 10*time.Minute)
+	client.SetPeerHealth(ph)
+
+	_, err := client.FetchSubtreeRaw(context.Background(), server.URL, "abc123", WithoutPeerRecording())
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	if !ph.IsHealthy(server.URL) {
+		t.Fatal("WithoutPeerRecording must suppress the client's internal failure recording")
+	}
+
+	// Default path (no option) still records.
+	_, _ = client.FetchSubtreeRaw(context.Background(), server.URL, "abc123")
+	if ph.IsHealthy(server.URL) {
+		t.Fatal("default FetchSubtreeRaw must still record the failure")
 	}
 }
 

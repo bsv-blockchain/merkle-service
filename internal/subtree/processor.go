@@ -101,8 +101,10 @@ func (p *Processor) Init(_ interface{}) error {
 	// operator opts in via DataHub.AllowPrivateIPs (F-028). A PeerHealth
 	// tracker is attached so subtree fetch outcomes feed into the same
 	// "is this peer dead?" signal /reprocess uses — note the subtree
-	// processor does not skip peers itself (the announced URL is
-	// authoritative for which peer has the subtree), it only records.
+	// processor does not fail over to other peers itself (the announced
+	// URL is authoritative for which peer has the subtree); it gates on
+	// IsHealthy and records outcomes after classifying them by ctx state
+	// and announcement age (see recordPeerFetchOutcome).
 	p.dataHubClient = datahub.NewClientWithSSRFGuard(
 		p.cfg.DataHub.TimeoutSec,
 		p.cfg.DataHub.MaxRetries,
@@ -348,17 +350,25 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		return nil
 	}
 
-	// 3.2: Fetch binary subtree data from DataHub.
+	// 3.2: Fetch binary subtree data from DataHub. The client's internal
+	// peer-health recording is suppressed for this call site: only the
+	// processor knows the announcement's age, so it classifies the outcome
+	// and records explicitly (see recordPeerFetchOutcome) — a blanket
+	// "any error is a peer failure" rule is exactly what poisoned the
+	// breaker on dev-ovh-1 (caller cancellations and lag-aged 404s).
 	fetchStart := time.Now()
-	rawData, err := p.dataHubClient.FetchSubtreeRaw(ctx, subtreeMsg.DataHubURL, subtreeMsg.Hash)
+	rawData, err := p.dataHubClient.FetchSubtreeRaw(ctx, subtreeMsg.DataHubURL, subtreeMsg.Hash, datahub.WithoutPeerRecording())
 	metrics.ObserveSubtreeDataHubFetch(subtreeMsg.DataHubURL, time.Since(fetchStart), len(rawData), err)
+	p.recordPeerFetchOutcome(ctx, subtreeMsg, err)
 	if err != nil {
 		// A 404 from the announcing peer is permanent for that peer: subtrees
 		// are content-addressable, so retrying the same URL cannot recover.
-		// Route straight to DLQ; the peer-health tracker has already counted
-		// this failure and will cause subsequent announcements of any hash
-		// from the same host to short-circuit at the IsHealthy gate above
-		// once the threshold is reached.
+		// Route straight to DLQ. Peer-health attribution happened in
+		// recordPeerFetchOutcome above: only a 404 on a fresh announcement
+		// counts against the peer (and, at the threshold, short-circuits
+		// subsequent announcements from the same host at the IsHealthy gate);
+		// a stale announcement's 404 is our own consumer lag and is not
+		// attributed, though the message still lands here.
 		if errors.Is(err, datahub.ErrNotFound) {
 			return p.handlePermanentFailure(ctx, subtreeMsg, "fetching subtree from DataHub", err, start)
 		}
@@ -428,6 +438,79 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	metrics.ObserveSubtreeAttemptCount(subtreeMsg.AttemptCount)
 	metrics.ObserveSubtreeProcessing(metrics.OutcomeProcessed, time.Since(start))
 	return nil
+}
+
+// recordPeerFetchOutcome records a subtree fetch outcome against the peer
+// health tracker, replacing the client's internal recording (suppressed via
+// WithoutPeerRecording) for this call site. Classification:
+//
+//   - caller ctx dead at record time → record NOTHING, success or failure:
+//     a shutdown/rebalance/partition-loss abort says nothing about the peer
+//     (a rollout used to trip the breaker on fresh pods within minutes);
+//   - success → RecordSuccess;
+//   - 404 on an announcement older than the stale-404 grace → record
+//     NOTHING: consumer lag aged the message past teranode's ~2h
+//     asset-cache retention, so the 404 is our lag, not a lying peer. The
+//     message itself still routes to handlePermanentFailure/DLQ exactly as
+//     before — only the peer attribution changes;
+//   - anything else (404 on fresh or unstamped announcements, transport,
+//     5xx, parse) → RecordFailure: a peer lying about FRESH data is still
+//     unhealthy. A breaker-opening failure is WARN-logged.
+func (p *Processor) recordPeerFetchOutcome(ctx context.Context, subtreeMsg *kafka.SubtreeMessage, fetchErr error) {
+	ph := p.dataHubClient.PeerHealth()
+	if ph == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	if fetchErr == nil {
+		ph.RecordSuccess(subtreeMsg.DataHubURL)
+		return
+	}
+	if errors.Is(fetchErr, datahub.ErrNotFound) &&
+		isStaleAnnouncement(subtreeMsg.AnnouncedAtUnixMs, time.Now(), p.stale404Grace()) {
+		p.Logger.Debug(
+			"suppressing peer-health failure: 404 on a stale announcement is our consumer lag, not the peer",
+			logfields.SubtreeHash(subtreeMsg.Hash),
+			logfields.DataHubURL(subtreeMsg.DataHubURL),
+			"announcedAtUnixMs", subtreeMsg.AnnouncedAtUnixMs,
+			"graceSec", int(p.stale404Grace().Seconds()),
+		)
+		return
+	}
+	if tripped := ph.RecordFailure(subtreeMsg.DataHubURL); tripped {
+		p.Logger.Warn(
+			"DataHub peer marked unhealthy: consecutive-failure threshold reached; announcements from this host will be ack-and-dropped until the cooldown expires",
+			logfields.DataHubURL(subtreeMsg.DataHubURL),
+			"failureThreshold", ph.Threshold(),
+			"cooldown", ph.Cooldown().String(),
+			"error", fetchErr,
+		)
+	}
+}
+
+// isStaleAnnouncement reports whether a subtree announcement stamped at
+// announcedAtUnixMs is strictly older than grace at time now. A zero or
+// negative stamp (messages published before the field existed) means "age
+// unknown" and reads as fresh, so their 404s keep counting against the
+// peer — backward compatible in the conservative direction.
+func isStaleAnnouncement(announcedAtUnixMs int64, now time.Time, grace time.Duration) bool {
+	if announcedAtUnixMs <= 0 {
+		return false
+	}
+	return now.Sub(time.UnixMilli(announcedAtUnixMs)) > grace
+}
+
+// stale404Grace returns the configured stale-404 attribution grace. A nil
+// cfg (struct-literal test processors) or a non-positive configured value
+// selects datahub.DefaultStale404Grace — a zero grace would classify every
+// stamped 404 as stale and blind the breaker to genuinely lying peers.
+func (p *Processor) stale404Grace() time.Duration {
+	if p.cfg == nil || p.cfg.DataHub.PeerHealth.Stale404GraceSec <= 0 {
+		return datahub.DefaultStale404Grace
+	}
+	return time.Duration(p.cfg.DataHub.PeerHealth.Stale404GraceSec) * time.Second
 }
 
 // subtreeRetryBackoffCap bounds the exponential retry backoff (see

@@ -495,6 +495,34 @@ datahub:
   # Env: DATAHUB_MAX_SUBTREE_BYTES
   maxSubtreeBytes: 1073741824
 
+  # Peer-health breaker: after failureThreshold consecutive attributed
+  # failures against a peer's host, its announcements are ack-and-dropped
+  # for cooldownSec. Caller cancellations are never attributed, and 404s on
+  # subtree announcements older than stale404GraceSec are attributed to our
+  # own consumer lag (teranode's asset cache holds subtree data ~2h) rather
+  # than the peer — the 2026-07-15 dev-ovh-1 incident showed both
+  # mis-attributions keeping the breaker open indefinitely in a single-peer
+  # topology. Breaker state is visible via merkle_datahub_peer_healthy and
+  # merkle_datahub_peer_unhealthy_transitions_total.
+  peerHealth:
+    # Consecutive attributed failures before a peer host is marked
+    # unhealthy. <= 0 selects the built-in default (3).
+    # Env: DATAHUB_PEER_HEALTH_FAILURE_THRESHOLD
+    failureThreshold: 3
+
+    # Seconds a peer stays unhealthy once tripped; expiry is checked lazily.
+    # <= 0 selects the built-in default (300).
+    # Env: DATAHUB_PEER_HEALTH_COOLDOWN_SEC
+    cooldownSec: 300
+
+    # Announcement age (seconds, from the message's announcedAtUnixMs stamp)
+    # beyond which a subtree-fetch 404 is treated as consumer lag and NOT
+    # counted against the peer. The message still routes to the DLQ; only
+    # peer attribution changes. Unstamped messages are treated as fresh.
+    # <= 0 selects the built-in default (3600).
+    # Env: DATAHUB_PEER_HEALTH_STALE404_GRACE_SEC
+    stale404GraceSec: 3600
+
 # ---------------------------------------------------------------------------
 # Registry — policy for the txid -> callback URL registration store.
 # (applies regardless of whether the backend is Aerospike or SQL)

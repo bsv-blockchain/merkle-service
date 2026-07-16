@@ -25,6 +25,17 @@ type SubtreeMessage struct {
 	PeerID       string `json:"peerId"`
 	ClientName   string `json:"clientName"`
 	AttemptCount int    `json:"attemptCount,omitempty"`
+
+	// AnnouncedAtUnixMs is the wall-clock time (Unix milliseconds) at which
+	// the P2P client observed the announcement and published this message.
+	// The subtree-fetcher uses it to classify a DataHub 404: teranode's
+	// asset cache only retains subtree data for a bounded window (~2h), so
+	// a 404 on a message that sat in Kafka past
+	// datahub.peerhealth.stale404GraceSec is our own consumer lag, not a
+	// lying peer, and must not poison the peer-health breaker. Zero or
+	// missing (messages produced before this field existed, retries of
+	// such messages) means "age unknown" and is treated as fresh.
+	AnnouncedAtUnixMs int64 `json:"announcedAtUnixMs,omitempty"`
 }
 
 // BlockMessage represents a block announcement received from P2P, or an
