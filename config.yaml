@@ -237,7 +237,10 @@ kafka:
   # increase). The 'block' and 'callback' topics are intentionally fixed at 1
   # partition and are not configurable here — 'block' is low-rate, and 'callback'
   # depends on single-partition ordering to keep BLOCK_PROCESSED behind its
-  # STUMPs (see docs/callback-topic-partition-design.md).
+  # STUMPs. Widening 'callback' stays deferred until the expectedSubtreeIndices
+  # completeness check is verified end-to-end in arcade — rollout step 4 of
+  # docs/block-processed-completeness.md (which supersedes the earlier
+  # callback-topic-partition-design.md, no longer in the repo).
   # Env: KAFKA_SUBTREE_PARTITIONS
   subtreePartitions: 12
   # Env: KAFKA_SUBTREE_WORK_PARTITIONS

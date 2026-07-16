@@ -317,8 +317,11 @@ type KafkaConfig struct {
 	//
 	// The 'block' and 'callback' topics are deliberately NOT configurable here and
 	// stay at 1 partition: 'block' is low-rate, and 'callback' relies on
-	// single-partition ordering to keep BLOCK_PROCESSED behind its STUMPs until a
-	// cross-partition delivery barrier exists (see docs/callback-topic-partition-design.md).
+	// single-partition ordering to keep BLOCK_PROCESSED behind its STUMPs.
+	// Widening 'callback' stays deferred until the expectedSubtreeIndices
+	// completeness check is verified end-to-end in arcade — rollout step 4 of
+	// docs/block-processed-completeness.md (which supersedes the earlier
+	// callback-topic-partition-design.md, no longer in the repo).
 	SubtreePartitions     int `yaml:"subtreePartitions"     mapstructure:"subtreepartitions"`
 	SubtreeWorkPartitions int `yaml:"subtreeWorkPartitions" mapstructure:"subtreeworkpartitions"`
 
