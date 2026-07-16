@@ -237,7 +237,10 @@ kafka:
   # increase). The 'block' and 'callback' topics are intentionally fixed at 1
   # partition and are not configurable here — 'block' is low-rate, and 'callback'
   # depends on single-partition ordering to keep BLOCK_PROCESSED behind its
-  # STUMPs (see docs/callback-topic-partition-design.md).
+  # STUMPs. Widening 'callback' stays deferred until the expectedSubtreeIndices
+  # completeness check is verified end-to-end in arcade — rollout step 4 of
+  # docs/block-processed-completeness.md (which supersedes the earlier
+  # callback-topic-partition-design.md, no longer in the repo).
   # Env: KAFKA_SUBTREE_PARTITIONS
   subtreePartitions: 12
   # Env: KAFKA_SUBTREE_WORK_PARTITIONS
@@ -376,6 +379,19 @@ block:
   # parallel and exhaust the Aerospike connection pool. 0 disables the gate.
   # Env: BLOCK_BATCH_GET_CONCURRENCY
   batchGetConcurrency: 4
+
+  # Record the per-(block, callbackURL) set of subtree indices that produced a
+  # STUMP and attach it to BLOCK_PROCESSED as expectedSubtreeIndices, so the
+  # receiver can detect a missing STUMP (docs/block-processed-completeness.md).
+  # Default TRUE — deliberately diverging from that doc's original "default
+  # off" rollout plan: the feature has been unconditionally live in production
+  # since v0.4.5 and its write load is already absorbed, so this flag is an
+  # emergency off-switch, not a rollout gate. Disabling turns off BOTH the
+  # recording and the attach together — attaching a set that was never written
+  # would be an empty set, telling the receiver to expect zero STUMPs (silent
+  # loss).
+  # Env: BLOCK_EMIT_EXPECTED_STUMP_SET
+  emitExpectedStumpSet: true
 
 # ---------------------------------------------------------------------------
 # Callback Delivery

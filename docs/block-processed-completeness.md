@@ -73,11 +73,20 @@ This reuses the patterns we already trust:
   exactly like the subtree counter.
 
 **Cost and gating.** Recording an index per (subtree, matched-URL) adds Aerospike
-write load on the MINED hot path. Because arcade can't use the field until its
-side ships, this is behind a config flag (`block.emitExpectedStumpSet`,
-**default off**). Operators turn it on once arcade is ready. The writes are
-batched per subtree (one operation across that subtree's matched URLs), not one
-at a time.
+write load on the MINED hot path. The writes are batched per subtree (one
+operation across that subtree's matched URLs), not one at a time.
+
+The gating shipped differently from the plan above: the feature went live
+**unconditionally** in v0.4.5 (#162), before any flag existed, and its write
+load has been absorbed in production since. The flag was added retroactively as
+`block.emitExpectedStumpSet` (env `BLOCK_EMIT_EXPECTED_STUMP_SET`), **default
+on** — deliberately diverging from the original "default off" rollout gate: it
+is an emergency off-switch for the hot-path write load, not an enablement lever.
+Disabling it turns off **both** the recording and the attach together. That
+coupling is a correctness requirement, not a convenience: attaching a set that
+was never written would ship an *empty* expected set, telling the receiver to
+expect zero STUMPs — which reintroduces the exact silent-loss bug this feature
+exists to fix.
 
 ### Arcade side (separate, owned by the arcade team)
 
@@ -114,9 +123,19 @@ at a time.
 
 ## Rollout
 
-1. Ship the merkle field + aggregation behind `block.emitExpectedStumpSet=false`.
-   No behaviour change, no added load, until enabled.
-2. Arcade ships detection + grace-wait + reprocess recovery, consuming the field.
-3. Enable the flag in an environment where both sides are deployed; verify arcade
-   detects and recovers an injected missing STUMP.
-4. Only then, widen `callback` (separate change) for delivery throughput.
+1. Ship the merkle field + aggregation. — **Shipped** in v0.4.5 (#162),
+   always-on (the planned flag was not implemented at the time). The
+   `block.emitExpectedStumpSet` flag was added retroactively as a
+   **default-true off-switch**; see "Cost and gating" above for the
+   divergence rationale.
+2. Arcade ships detection + grace-wait + reprocess recovery, consuming the
+   field. — **Shipped** in arcade v0.9.10 (reads the field, defers
+   finalization when the STUMP set is incomplete).
+   Skip-the-grace-window-when-complete is **in progress**.
+3. Enable the flag in an environment where both sides are deployed; verify
+   arcade detects and recovers an injected missing STUMP. — **Overtaken by
+   events**: the merkle side has been effectively enabled everywhere since
+   v0.4.5, and the retroactive flag defaults on.
+4. Only then, widen `callback` (separate change) for delivery throughput. —
+   **Still deferred** until step 2's skip-grace change is verified in
+   production.
