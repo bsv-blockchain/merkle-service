@@ -503,7 +503,7 @@ func TestLiftedSubtreeRoots_Guards(t *testing.T) {
 
 // buildTailFixture builds a single-subtree block scenario with a VALID
 // ready-made coinbase BUMP (what teranode ships in the block binary tail).
-func buildTailFixture(t *testing.T, height uint32) (meta *datahub.BlockMetadata, headerHex string, tailHex string) {
+func buildTailFixture(t *testing.T, height uint32) (meta *datahub.BlockMetadata, headerHex, tailHex string) {
 	t.Helper()
 	coinbaseRaw, err := hex.DecodeString(genesisCoinbaseHex)
 	if err != nil {

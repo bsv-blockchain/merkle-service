@@ -813,7 +813,8 @@ func (w *partitionWorker) commit(recs []*kgo.Record) {
 		if errors.Is(err, context.Canceled) {
 			return // shutdown/lost-partition teardown, not a broker rejection
 		}
-		w.c.logger.Warn("offset commit failed; records will be redelivered",
+		w.c.logger.Warn(
+			"offset commit failed; records will be redelivered",
 			"group", w.c.groupID,
 			"topic", w.tp.topic,
 			"partition", w.tp.partition,

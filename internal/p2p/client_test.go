@@ -12,7 +12,6 @@ import (
 	"time"
 
 	teranode "github.com/bsv-blockchain/teranode/services/p2p"
-
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"

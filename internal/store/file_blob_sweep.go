@@ -150,7 +150,8 @@ func (f *FileBlobStore) StartAgeSweeper(interval, maxAge time.Duration, logger *
 			return
 		}
 		if files > 0 {
-			logger.Info("blob age sweep removed stale blobs",
+			logger.Info(
+				"blob age sweep removed stale blobs",
 				"dir", f.dir,
 				"files", files,
 				"bytes", bytes,

@@ -32,12 +32,30 @@ func subtreeKey(b string) string {
 	return strings.Repeat(b, 32)
 }
 
+// requireCaseSensitiveFS skips the test when dir lives on a case-insensitive
+// filesystem (macOS APFS/HFS+ by default). Tests that assert lowercase-hex keys
+// are swept while their uppercase twins survive are meaningless there: the two
+// keys collide onto a single inode, so removing one removes both. CI runs on
+// case-sensitive Linux, where the discrimination is real.
+func requireCaseSensitiveFS(t *testing.T, dir string) {
+	t.Helper()
+	lower := filepath.Join(dir, ".case-probe")
+	if err := os.WriteFile(lower, nil, 0o600); err != nil {
+		t.Fatalf("case-probe write: %v", err)
+	}
+	defer func() { _ = os.Remove(lower) }()
+	if _, err := os.Stat(filepath.Join(dir, ".CASE-PROBE")); err == nil {
+		t.Skip("filesystem is case-insensitive; lowercase/uppercase keys collide")
+	}
+}
+
 // TestFileBlobStore_SweepOlderThanDeletesOnlyOldSubtreeBlobs pins the core
 // contract: top-level 64-lowercase-hex files older than maxAge are removed
 // (with their byte size accounted), while fresh subtree blobs, STUMP blobs of
 // any age, non-subtree-shaped names, and .dah manifests are never touched.
 func TestFileBlobStore_SweepOlderThanDeletesOnlyOldSubtreeBlobs(t *testing.T) {
 	dir := t.TempDir()
+	requireCaseSensitiveFS(t, dir)
 	bs, err := NewFileBlobStore(dir)
 	if err != nil {
 		t.Fatalf("NewFileBlobStore: %v", err)

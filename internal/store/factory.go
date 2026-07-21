@@ -86,7 +86,8 @@ func newRegistryWithRetry(ctx context.Context, attempts int, baseDelay time.Dura
 		if attempt == attempts {
 			break
 		}
-		logger.Warn("failed to build store registry; backing off before retry",
+		logger.Warn(
+			"failed to build store registry; backing off before retry",
 			"attempt", attempt,
 			"maxAttempts", attempts,
 			"retryIn", delay.String(),

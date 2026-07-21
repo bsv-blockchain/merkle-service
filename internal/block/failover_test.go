@@ -236,7 +236,8 @@ func TestFetchSubtreeRawWithFailover_PrunedPreferredPeer(t *testing.T) {
 	p := buildProcessorWithRegistry(t, &failingSyncProducer{failAt: -1}, reg)
 
 	raw, resolved, err := p.fetchSubtreeRawWithFailover(
-		context.Background(), "blk-pruned", subtreeHash, pruned.URL)
+		context.Background(), "blk-pruned", subtreeHash, pruned.URL,
+	)
 	if err != nil {
 		t.Fatalf("expected failover to the registry peer, got error: %v", err)
 	}
@@ -271,7 +272,8 @@ func TestFetchSubtreeRawWithFailover_PreferredServes(t *testing.T) {
 	p := buildProcessorWithRegistry(t, &failingSyncProducer{failAt: -1}, reg)
 
 	raw, resolved, err := p.fetchSubtreeRawWithFailover(
-		context.Background(), "blk", subtreeHash, good.URL)
+		context.Background(), "blk", subtreeHash, good.URL,
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -299,7 +301,8 @@ func TestFetchSubtreeRawWithFailover_AllPeersMissing(t *testing.T) {
 	p := buildProcessorWithRegistry(t, &failingSyncProducer{failAt: -1}, reg)
 
 	_, _, err := p.fetchSubtreeRawWithFailover(
-		context.Background(), "blk", testSubtreeHash, a.URL)
+		context.Background(), "blk", testSubtreeHash, a.URL,
+	)
 	if err == nil {
 		t.Fatal("expected error when every peer 404s")
 	}
@@ -346,7 +349,8 @@ func TestFetchSubtreeRawWithFailover_ContentMismatchFailsOver(t *testing.T) {
 	p := buildProcessorWithRegistry(t, &failingSyncProducer{failAt: -1}, reg)
 
 	raw, resolved, err := p.fetchSubtreeRawWithFailover(
-		context.Background(), "blk-liar", subtreeHash, liar.URL)
+		context.Background(), "blk-liar", subtreeHash, liar.URL,
+	)
 	if err != nil {
 		t.Fatalf("expected failover past the lying peer, got: %v", err)
 	}
