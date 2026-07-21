@@ -24,7 +24,7 @@ func (s *blockAttributionStore) TryAttribute(hash, prevHash, peerID string, heig
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	qIns := fmt.Sprintf( //nolint:gosec
+	qIns := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholders, no user input
 		"INSERT INTO block_attributions (block_hash, prev_hash, height, peer_id, created_at) VALUES (%s, %s, %s, %s, %s)%s",
 		s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3), s.d.placeholder(4), s.d.now, s.d.onConflictDoNothing,
 	)
@@ -37,7 +37,7 @@ func (s *blockAttributionStore) TryAttribute(hash, prevHash, peerID string, heig
 		return peerID, true, nil
 	}
 
-	qGet := fmt.Sprintf("SELECT peer_id FROM block_attributions WHERE block_hash = %s", s.d.placeholder(1)) //nolint:gosec
+	qGet := fmt.Sprintf("SELECT peer_id FROM block_attributions WHERE block_hash = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from dialect
 	var stored string
 	if err := s.db.QueryRowContext(ctx, qGet, hash).Scan(&stored); err != nil {
 		return "", false, fmt.Errorf("read block attribution: %w", err)
@@ -53,7 +53,7 @@ func (s *blockAttributionStore) ListAll() ([]storepkg.BlockAttribution, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list block attributions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []storepkg.BlockAttribution
 	for rows.Next() {
@@ -62,7 +62,11 @@ func (s *blockAttributionStore) ListAll() ([]storepkg.BlockAttribution, error) {
 		if err := rows.Scan(&a.Hash, &a.PrevHash, &height, &a.PeerID); err != nil {
 			return nil, err
 		}
-		a.Height = uint32(height) //nolint:gosec
+		// Heights are chain heights and always fit in uint32 for BSV.
+		if height < 0 || height > int64(^uint32(0)) {
+			return nil, fmt.Errorf("block height out of range: %d", height)
+		}
+		a.Height = uint32(height)
 		out = append(out, a)
 	}
 	return out, rows.Err()
@@ -75,7 +79,7 @@ func (s *blockAttributionStore) DeleteHashes(hashes []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	for _, h := range hashes {
-		q := fmt.Sprintf("DELETE FROM block_attributions WHERE block_hash = %s", s.d.placeholder(1)) //nolint:gosec
+		q := fmt.Sprintf("DELETE FROM block_attributions WHERE block_hash = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from dialect
 		if _, err := s.db.ExecContext(ctx, q, h); err != nil {
 			return fmt.Errorf("delete block attribution %s: %w", h, err)
 		}

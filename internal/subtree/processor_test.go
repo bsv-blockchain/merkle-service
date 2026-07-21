@@ -2150,14 +2150,14 @@ func TestHandleMessage_SeenCounterIncrementFailure_RoutesToRetryAndSkipsDedup(t 
 				StorageMode: "stream", // skip blob store
 			},
 		},
-		registrationStore:  regStore,
-		seenCounterStore:   sc,
-		nodeRegistry:       &mockReadyNodes{weight: 51},
-		callbackProducer:   kafka.NewTestProducer(cbMock, "callback-test", logger),
-		retryProducer:      kafka.NewTestProducer(retryMock, "subtree-test", logger),
-		dlqProducer:        kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
-		dataHubClient:      datahub.NewClient(5, 0, logger),
-		dedupCache:         dedup,
+		registrationStore: regStore,
+		seenCounterStore:  sc,
+		nodeRegistry:      &mockReadyNodes{weight: 51},
+		callbackProducer:  kafka.NewTestProducer(cbMock, "callback-test", logger),
+		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		dataHubClient:     datahub.NewClient(5, 0, logger),
+		dedupCache:        dedup,
 	}
 	p.InitBase("subtree-counter-fail-test")
 	p.Logger = logger

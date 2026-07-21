@@ -12,11 +12,11 @@ type Registry struct {
 	CallbackURLRegistry CallbackURLRegistry
 	DataHubRegistry     DataHubRegistry
 	CallbackAccumulator CallbackAccumulatorStore
-	SeenCounter          SeenCounterStore
-	SubtreeCounter       SubtreeCounterStore
-	ExpectedStump        ExpectedStumpStore
-	BlockAttribution     BlockAttributionStore
-	SubtreeAttribution   SubtreeAttributionStore
+	SeenCounter         SeenCounterStore
+	SubtreeCounter      SubtreeCounterStore
+	ExpectedStump       ExpectedStumpStore
+	BlockAttribution    BlockAttributionStore
+	SubtreeAttribution  SubtreeAttributionStore
 
 	// Blob is the raw blob store backing Stump and Subtree. Exposed so the
 	// block-processor — the single replica that already executes DAH prunes

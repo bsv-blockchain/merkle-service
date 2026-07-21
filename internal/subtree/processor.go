@@ -66,11 +66,11 @@ type RegCache interface {
 type Processor struct {
 	service.BaseService
 
-	cfg               *config.Config
-	consumer          *kafka.Consumer
-	callbackProducer  *kafka.Producer
-	retryProducer     *kafka.Producer // re-publishes to the subtree topic on transient failure
-	dlqProducer       *kafka.Producer // publishes to subtree-dlq when MaxAttempts is exceeded
+	cfg                *config.Config
+	consumer           *kafka.Consumer
+	callbackProducer   *kafka.Producer
+	retryProducer      *kafka.Producer // re-publishes to the subtree topic on transient failure
+	dlqProducer        *kafka.Producer // publishes to subtree-dlq when MaxAttempts is exceeded
 	registrationStore  RegistrationGetter
 	seenCounterStore   SeenCounter
 	subtreeStore       store.SubtreeStore

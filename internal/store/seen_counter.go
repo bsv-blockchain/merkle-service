@@ -296,8 +296,15 @@ func asInt(v interface{}) int {
 	case int:
 		return n
 	case int64:
+		if n > int64(^uint(0)>>1) || n < 0 {
+			return 0
+		}
 		return int(n)
 	case uint64:
+		// Peer weights and block heights are small; reject absurd values.
+		if n > uint64(^uint(0)>>1) {
+			return 0
+		}
 		return int(n)
 	default:
 		return 0

@@ -37,7 +37,11 @@ func (s *aerospikeSubtreeAttributionStore) TryAttribute(subtreeHash, peerID stri
 	}
 	wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
 	wp.RecordExistsAction = as.CREATE_ONLY
-	wp.Expiration = uint32(s.ttlSec) //nolint:gosec
+	// TTL seconds are config-bounded; Aerospike Expiration is uint32 seconds.
+	if s.ttlSec < 0 {
+		s.ttlSec = 0
+	}
+	wp.Expiration = uint32(s.ttlSec) //nolint:gosec // ttlSec non-negative after clamp
 	err = s.client.Client().Put(wp, key, as.BinMap{subtreeAttrPeerBin: peerID})
 	if err == nil {
 		return peerID, true, nil

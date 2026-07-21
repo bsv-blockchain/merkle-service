@@ -64,7 +64,7 @@ func (s *seenCounter) AddPeer(txid, peerID string, weight int) (*storepkg.Increm
 		return nil, fmt.Errorf("insert seen_counters: %w", err)
 	}
 
-	qPeer := fmt.Sprintf( //nolint:gosec
+	qPeer := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholders, no user input
 		"INSERT INTO seen_counter_peers (txid, peer_id, weight) VALUES (%s, %s, %s)%s",
 		s.d.placeholder(1), s.d.placeholder(2), s.d.placeholder(3), s.d.onConflictDoNothing,
 	)
@@ -73,7 +73,7 @@ func (s *seenCounter) AddPeer(txid, peerID string, weight int) (*storepkg.Increm
 		return nil, fmt.Errorf("insert seen_counter_peers: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
-		qBump := fmt.Sprintf( //nolint:gosec
+		qBump := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholders, no user input
 			"UPDATE seen_counters SET score = score + %s WHERE txid = %s",
 			s.d.placeholder(1), s.d.placeholder(2),
 		)
@@ -82,7 +82,7 @@ func (s *seenCounter) AddPeer(txid, peerID string, weight int) (*storepkg.Increm
 		}
 	}
 
-	qScore := fmt.Sprintf("SELECT score FROM seen_counters WHERE txid = %s", s.d.placeholder(1)) //nolint:gosec
+	qScore := fmt.Sprintf("SELECT score FROM seen_counters WHERE txid = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from dialect
 	var score int
 	if err = tx.QueryRowContext(ctx, qScore, txid).Scan(&score); err != nil {
 		return nil, fmt.Errorf("read score: %w", err)
@@ -104,7 +104,7 @@ func (s *seenCounter) AddPeer(txid, peerID string, weight int) (*storepkg.Increm
 
 func (s *seenCounter) tryFireThreshold(ctx context.Context, tx *sql.Tx, txid string) (bool, error) {
 	if isPostgres(s.d) {
-		q := fmt.Sprintf( //nolint:gosec
+		q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholders, no user input
 			`UPDATE seen_counters
             SET threshold_fired = 1
             WHERE txid = %s AND threshold_fired = 0
@@ -121,7 +121,7 @@ func (s *seenCounter) tryFireThreshold(ctx context.Context, tx *sql.Tx, txid str
 		return true, nil
 	}
 
-	q := fmt.Sprintf( //nolint:gosec
+	q := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholders, no user input
 		`UPDATE seen_counters
         SET threshold_fired = 1
         WHERE txid = %s AND threshold_fired = 0`, s.d.placeholder(1),

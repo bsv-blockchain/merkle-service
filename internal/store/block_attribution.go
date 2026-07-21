@@ -93,7 +93,15 @@ func (s *aerospikeBlockAttributionStore) ListAll() ([]BlockAttribution, error) {
 		if v, ok := rec.Bins[blockAttrPeerBin].(string); ok {
 			attr.PeerID = v
 		}
-		attr.Height = uint32(asInt(rec.Bins[blockAttrHeightBin])) //nolint:gosec
+		// Heights are chain heights and always fit in uint32 for BSV.
+		h := asInt(rec.Bins[blockAttrHeightBin])
+		if h < 0 {
+			h = 0
+		}
+		if h > int(^uint32(0)) {
+			h = int(^uint32(0))
+		}
+		attr.Height = uint32(h)
 		out = append(out, attr)
 	}
 	return out, nil

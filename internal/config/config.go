@@ -190,7 +190,7 @@ type AerospikeConfig struct {
 	// SubtreeAttributionSet stores first-seen peer per subtree hash.
 	SubtreeAttributionSet string `yaml:"subtreeAttributionSet" mapstructure:"subtreeattributionset"`
 	MaxRetries            int    `yaml:"maxRetries"  mapstructure:"maxretries"`
-	RetryBaseMs           int `yaml:"retryBaseMs" mapstructure:"retrybasems"`
+	RetryBaseMs           int    `yaml:"retryBaseMs" mapstructure:"retrybasems"`
 	// ConnectionQueueSize is the per-node connection pool size. The Aerospike
 	// Go client default is 100; under bursty BatchGet load (e.g. 14+ subtrees
 	// processed in parallel during block-time, each fanning out thousands of
@@ -917,18 +917,18 @@ func bindEnvVars(v *viper.Viper) {
 		"block.emitexpectedstumpset": "BLOCK_EMIT_EXPECTED_STUMP_SET",
 
 		// Callback
-		"callback.maxretries":          "CALLBACK_MAX_RETRIES",
-		"callback.backoffbasesec":      "CALLBACK_BACKOFF_BASE_SEC",
-		"callback.timeoutsec":          "CALLBACK_TIMEOUT_SEC",
-		"callback.seenthreshold":            "CALLBACK_SEEN_THRESHOLD", // deprecated
-		"callback.seenwindowblocks":         "CALLBACK_SEEN_WINDOW_BLOCKS",
-		"callback.seenscorethreshold":       "CALLBACK_SEEN_SCORE_THRESHOLD",
-		"aerospike.blockattributionset":     "AEROSPIKE_BLOCK_ATTRIBUTION_SET",
-		"aerospike.subtreeattributionset":   "AEROSPIKE_SUBTREE_ATTRIBUTION_SET",
-		"callback.dedupttlsec":         "CALLBACK_DEDUP_TTL_SEC",
-		"callback.maxconnsperhost":     "CALLBACK_MAX_CONNS_PER_HOST",
-		"callback.maxidleconnsperhost": "CALLBACK_MAX_IDLE_CONNS_PER_HOST",
-		"callback.allowprivateips":     "CALLBACK_ALLOW_PRIVATE_IPS",
+		"callback.maxretries":             "CALLBACK_MAX_RETRIES",
+		"callback.backoffbasesec":         "CALLBACK_BACKOFF_BASE_SEC",
+		"callback.timeoutsec":             "CALLBACK_TIMEOUT_SEC",
+		"callback.seenthreshold":          "CALLBACK_SEEN_THRESHOLD", // deprecated
+		"callback.seenwindowblocks":       "CALLBACK_SEEN_WINDOW_BLOCKS",
+		"callback.seenscorethreshold":     "CALLBACK_SEEN_SCORE_THRESHOLD",
+		"aerospike.blockattributionset":   "AEROSPIKE_BLOCK_ATTRIBUTION_SET",
+		"aerospike.subtreeattributionset": "AEROSPIKE_SUBTREE_ATTRIBUTION_SET",
+		"callback.dedupttlsec":            "CALLBACK_DEDUP_TTL_SEC",
+		"callback.maxconnsperhost":        "CALLBACK_MAX_CONNS_PER_HOST",
+		"callback.maxidleconnsperhost":    "CALLBACK_MAX_IDLE_CONNS_PER_HOST",
+		"callback.allowprivateips":        "CALLBACK_ALLOW_PRIVATE_IPS",
 
 		// BlobStore
 		"blobstore.url":              "BLOB_STORE_URL",

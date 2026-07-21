@@ -23,9 +23,11 @@ func (f *fakeSeenCounter) Threshold() int { return 3 }
 func (f *fakeSeenCounter) AddPeer(txid, peerID string, weight int) (*store.IncrementResult, error) {
 	return &store.IncrementResult{}, nil
 }
+
 func (f *fakeSeenCounter) BatchAddPeer(txids []string, peerID string, weight int) (map[string]*store.IncrementResult, error) {
 	return map[string]*store.IncrementResult{}, nil
 }
+
 func (f *fakeSeenCounter) BatchDelete(txids []string) error {
 	cp := make([]string, len(txids))
 	copy(cp, txids)

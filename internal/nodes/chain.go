@@ -146,10 +146,18 @@ func (c *Chain) PruneBelow(retainDepth int) int {
 		retainDepth = 2 * c.window
 	}
 	tip := c.blocks[c.tip]
-	if tip.Height < uint32(retainDepth) {
+	// retainDepth is bounded by config (window*2). Compare in uint64 to avoid
+	// int→uint32 conversion warnings from gosec G115.
+	rd := retainDepth
+	if rd < 0 {
+		rd = 0
+	}
+	tipH := uint64(tip.Height)
+	rdU := uint64(rd)
+	if tipH < rdU {
 		return 0
 	}
-	minHeight := tip.Height - uint32(retainDepth)
+	minHeight := tipH - rdU
 	keep := c.windowPathSet()
 	// Also keep full tip path beyond window for parent walks.
 	for _, h := range c.tipPathUncapped() {
@@ -160,7 +168,7 @@ func (c *Chain) PruneBelow(retainDepth int) int {
 		if keep[h] {
 			continue
 		}
-		if a.Height < minHeight {
+		if uint64(a.Height) < minHeight {
 			delete(c.blocks, h)
 			removed++
 		}

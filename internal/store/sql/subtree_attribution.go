@@ -28,7 +28,7 @@ func (s *subtreeAttributionStore) TryAttribute(subtreeHash, peerID string) (stri
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	qIns := fmt.Sprintf( //nolint:gosec
+	qIns := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholders, no user input
 		"INSERT INTO subtree_attributions (subtree_hash, peer_id, created_at, expires_at) VALUES (%s, %s, %s, %s)%s",
 		s.d.placeholder(1), s.d.placeholder(2), s.d.now, s.d.intervalSeconds(s.ttlSec), s.d.onConflictDoNothing,
 	)
@@ -41,7 +41,7 @@ func (s *subtreeAttributionStore) TryAttribute(subtreeHash, peerID string) (stri
 		return peerID, true, nil
 	}
 
-	qGet := fmt.Sprintf("SELECT peer_id FROM subtree_attributions WHERE subtree_hash = %s", s.d.placeholder(1)) //nolint:gosec
+	qGet := fmt.Sprintf("SELECT peer_id FROM subtree_attributions WHERE subtree_hash = %s", s.d.placeholder(1)) //nolint:gosec // placeholder from dialect
 	var stored string
 	if err := s.db.QueryRowContext(ctx, qGet, subtreeHash).Scan(&stored); err != nil {
 		return "", false, fmt.Errorf("read subtree attribution: %w", err)

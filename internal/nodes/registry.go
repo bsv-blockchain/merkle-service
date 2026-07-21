@@ -65,7 +65,8 @@ func NewRegistry(attrStore store.BlockAttributionStore, window int, logger *slog
 		}
 		r.chain.Load(fromStoreAttrs(attrs))
 		r.publishView()
-		r.logger.Info("node registry loaded",
+		r.logger.Info(
+			"node registry loaded",
 			"blocks", r.chain.Len(),
 			"tip", r.chain.TipHash(),
 			"ready", r.chain.Ready(),
@@ -134,7 +135,8 @@ func (r *Registry) RecordBlock(hash string, height uint32, headerHex, peerID str
 
 	prevHash, err := ParsePrevHash(headerHex)
 	if err != nil {
-		r.logger.Warn("failed to parse block header for node registry; recording without prevHash",
+		r.logger.Warn(
+			"failed to parse block header for node registry; recording without prevHash",
 			"hash", hash,
 			"error", err,
 		)
@@ -160,7 +162,8 @@ func (r *Registry) RecordBlock(hash string, height uint32, headerHex, peerID str
 	first, orphaned := r.chain.Record(attr)
 	if first {
 		if len(orphaned) > 0 {
-			r.logger.Info("node registry tip path changed (reorg or extension)",
+			r.logger.Info(
+				"node registry tip path changed (reorg or extension)",
 				"tip", r.chain.TipHash(),
 				"orphanedFromWindow", len(orphaned),
 			)

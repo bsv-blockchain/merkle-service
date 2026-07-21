@@ -209,9 +209,9 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	// First-seen peer attribution for the node registry (shared store).
 	// Run before work-path dedup so the first announce always wins.
 	if p.nodeRegistry != nil && blockMsg.PeerID != "" && blockMsg.Hash != "" {
-		if _, err := p.nodeRegistry.RecordBlock(blockMsg.Hash, blockMsg.Height, blockMsg.Header, blockMsg.PeerID); err != nil {
+		if _, recErr := p.nodeRegistry.RecordBlock(blockMsg.Hash, blockMsg.Height, blockMsg.Header, blockMsg.PeerID); recErr != nil {
 			p.Logger.Warn("failed to record block peer for node registry",
-				logfields.BlockHash(blockMsg.Hash), "peerId", blockMsg.PeerID, "error", err)
+				logfields.BlockHash(blockMsg.Hash), "peerId", blockMsg.PeerID, "error", recErr)
 		}
 	}
 
