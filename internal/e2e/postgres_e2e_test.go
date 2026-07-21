@@ -82,7 +82,7 @@ func newSQLConfig(t *testing.T, dsn string) *config.Config {
 			SeenWindowBlocks:   100,
 			SeenScoreThreshold: 3, // fire after 3 peers at weight 1 in this e2e
 			SeenThreshold:      3,
-			DedupTTLSec:   3600,
+			DedupTTLSec:        3600,
 		},
 		Aerospike: config.AerospikeConfig{
 			SubtreeCounterTTLSec:      600,

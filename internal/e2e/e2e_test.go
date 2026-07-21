@@ -178,12 +178,12 @@ func startDeliveryService(t *testing.T, callbackTopic string) (*callback.Deliver
 			ConsumerGroup:    fmt.Sprintf("e2e-test-%d", time.Now().UnixNano()),
 		},
 		Callback: config.CallbackConfig{
-			MaxRetries:     3,
-			BackoffBaseSec: 1,
-			TimeoutSec:     5,
-			SeenWindowBlocks: 100,
+			MaxRetries:         3,
+			BackoffBaseSec:     1,
+			TimeoutSec:         5,
+			SeenWindowBlocks:   100,
 			SeenScoreThreshold: 51,
-			SeenThreshold:  3,
+			SeenThreshold:      3,
 		},
 	}
 

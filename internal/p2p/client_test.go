@@ -537,10 +537,12 @@ func TestSignalFatal_PropagatesToRun(t *testing.T) {
 
 	// Pretend Start has run (so Run does not try to spin up a real libp2p host).
 	client.SetStarted(true)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// Also wire a cancel function so signalFatal's cancel call is a no-op-safe.
-	client.cancel = cancel
+	// Mirror production Start: client.cancel is a *child* cancel, independent of
+	// the parent ctx Run selects on. Wiring the same cancel races fatalErr vs
+	// ctx.Done() in Run's select.
+	ctx := context.Background()
+	_, clientCancel := context.WithCancel(context.Background())
+	client.cancel = clientCancel
 
 	go func() {
 		// Simulate a publish loop hitting exhaustion.
