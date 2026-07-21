@@ -98,26 +98,40 @@ func (m *mockRegStore) Get(txid string) ([]store.CallbackEntry, error) {
 
 type mockSeenCounter struct{}
 
-func (m *mockSeenCounter) Increment(txid, subtreeID string) (*store.IncrementResult, error) {
-	return &store.IncrementResult{NewCount: 1, ThresholdReached: false}, nil
+func (m *mockSeenCounter) AddPeer(txid, peerID string, weight int) (*store.IncrementResult, error) {
+	return &store.IncrementResult{NewCount: weight, ThresholdReached: false}, nil
 }
 
-func (m *mockSeenCounter) BatchIncrement(txids []string, subtreeID string) (map[string]*store.IncrementResult, error) {
-	return batchViaIncrement(m.Increment, txids, subtreeID)
+func (m *mockSeenCounter) BatchAddPeer(txids []string, peerID string, weight int) (map[string]*store.IncrementResult, error) {
+	return batchViaAddPeer(m.AddPeer, txids, peerID, weight)
 }
 
-// batchViaIncrement implements the BatchIncrement partial-success contract on
-// top of a mock's Increment so each fake's behavior (failure injection,
-// idempotency tracking) carries over to the batched path unchanged.
-func batchViaIncrement(
-	inc func(txid, subtreeID string) (*store.IncrementResult, error),
+// mockReadyNodes always reports ready with fixed weight so multi-node scoring runs in tests.
+type mockReadyNodes struct{ weight int }
+
+func (m *mockReadyNodes) Ready() bool { return true }
+func (m *mockReadyNodes) Weight(peerID string) int {
+	if peerID == "" {
+		return 0
+	}
+	if m.weight > 0 {
+		return m.weight
+	}
+	return 1
+}
+
+// batchViaAddPeer implements the BatchAddPeer partial-success contract on
+// top of a mock's AddPeer so each fake's behavior carries over to the batched path.
+func batchViaAddPeer(
+	inc func(txid, peerID string, weight int) (*store.IncrementResult, error),
 	txids []string,
-	subtreeID string,
+	peerID string,
+	weight int,
 ) (map[string]*store.IncrementResult, error) {
 	results := make(map[string]*store.IncrementResult, len(txids))
 	var firstErr error
 	for _, txid := range txids {
-		res, err := inc(txid, subtreeID)
+		res, err := inc(txid, peerID, weight)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -684,7 +698,13 @@ func newMockIdempotentSeenCounter(threshold int) *mockIdempotentSeenCounter {
 	}
 }
 
-func (m *mockIdempotentSeenCounter) Increment(txid, subtreeID string) (*store.IncrementResult, error) {
+func (m *mockIdempotentSeenCounter) AddPeer(txid, peerID string, weight int) (*store.IncrementResult, error) {
+	_ = weight
+	subtreeID := peerID
+	return m.incrementLegacy(txid, subtreeID)
+}
+
+func (m *mockIdempotentSeenCounter) incrementLegacy(txid, subtreeID string) (*store.IncrementResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -708,14 +728,14 @@ func (m *mockIdempotentSeenCounter) Increment(txid, subtreeID string) (*store.In
 	}, nil
 }
 
-func (m *mockIdempotentSeenCounter) BatchIncrement(txids []string, subtreeID string) (map[string]*store.IncrementResult, error) {
-	return batchViaIncrement(m.Increment, txids, subtreeID)
+func (m *mockIdempotentSeenCounter) BatchAddPeer(txids []string, peerID string, weight int) (map[string]*store.IncrementResult, error) {
+	return batchViaAddPeer(m.AddPeer, txids, peerID, weight)
 }
 
 func TestIdempotentSeenCounter_FirstSubtreeIncrements(t *testing.T) {
 	sc := newMockIdempotentSeenCounter(3)
 
-	result, err := sc.Increment("txid-1", "subtree-A")
+	result, err := sc.AddPeer("txid-1", "subtree-A", 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -731,10 +751,10 @@ func TestIdempotentSeenCounter_DuplicateSubtreeDoesNotIncrement(t *testing.T) {
 	sc := newMockIdempotentSeenCounter(3)
 
 	// First call with subtree-A.
-	_, _ = sc.Increment("txid-1", "subtree-A")
+	_, _ = sc.AddPeer("txid-1", "subtree-A", 1)
 
 	// Duplicate call with same subtree-A.
-	result, _ := sc.Increment("txid-1", "subtree-A")
+	result, _ := sc.AddPeer("txid-1", "subtree-A", 1)
 	if result.NewCount != 1 {
 		t.Errorf("expected count=1 after duplicate, got %d", result.NewCount)
 	}
@@ -746,11 +766,11 @@ func TestIdempotentSeenCounter_DuplicateSubtreeDoesNotIncrement(t *testing.T) {
 func TestIdempotentSeenCounter_ThresholdFiresOnce(t *testing.T) {
 	sc := newMockIdempotentSeenCounter(3)
 
-	_, _ = sc.Increment("txid-1", "subtree-A")
-	_, _ = sc.Increment("txid-1", "subtree-B")
+	_, _ = sc.AddPeer("txid-1", "subtree-A", 1)
+	_, _ = sc.AddPeer("txid-1", "subtree-B", 1)
 
 	// Third unique subtree should trigger threshold.
-	result, _ := sc.Increment("txid-1", "subtree-C")
+	result, _ := sc.AddPeer("txid-1", "subtree-C", 1)
 	if result.NewCount != 3 {
 		t.Errorf("expected count=3, got %d", result.NewCount)
 	}
@@ -759,7 +779,7 @@ func TestIdempotentSeenCounter_ThresholdFiresOnce(t *testing.T) {
 	}
 
 	// Fourth unique subtree — threshold should NOT fire again.
-	result, _ = sc.Increment("txid-1", "subtree-D")
+	result, _ = sc.AddPeer("txid-1", "subtree-D", 1)
 	if result.NewCount != 4 {
 		t.Errorf("expected count=4, got %d", result.NewCount)
 	}
@@ -771,10 +791,10 @@ func TestIdempotentSeenCounter_ThresholdFiresOnce(t *testing.T) {
 func TestIdempotentSeenCounter_ThresholdDoesNotFireOnDuplicates(t *testing.T) {
 	sc := newMockIdempotentSeenCounter(2)
 
-	_, _ = sc.Increment("txid-1", "subtree-A")
+	_, _ = sc.AddPeer("txid-1", "subtree-A", 1)
 
 	// Duplicate of subtree-A — count stays 1, no threshold.
-	result, _ := sc.Increment("txid-1", "subtree-A")
+	result, _ := sc.AddPeer("txid-1", "subtree-A", 1)
 	if result.NewCount != 1 {
 		t.Errorf("expected count=1, got %d", result.NewCount)
 	}
@@ -783,7 +803,7 @@ func TestIdempotentSeenCounter_ThresholdDoesNotFireOnDuplicates(t *testing.T) {
 	}
 
 	// Now a truly new subtree triggers threshold.
-	result, _ = sc.Increment("txid-1", "subtree-B")
+	result, _ = sc.AddPeer("txid-1", "subtree-B", 1)
 	if result.NewCount != 2 {
 		t.Errorf("expected count=2, got %d", result.NewCount)
 	}
@@ -792,7 +812,7 @@ func TestIdempotentSeenCounter_ThresholdDoesNotFireOnDuplicates(t *testing.T) {
 	}
 
 	// Re-send subtree-A — should NOT fire threshold.
-	result, _ = sc.Increment("txid-1", "subtree-A")
+	result, _ = sc.AddPeer("txid-1", "subtree-A", 1)
 	if result.ThresholdReached {
 		t.Error("threshold should not fire again on re-sent subtree")
 	}
@@ -801,12 +821,12 @@ func TestIdempotentSeenCounter_ThresholdDoesNotFireOnDuplicates(t *testing.T) {
 func TestIdempotentSeenCounter_IndependentPerTxid(t *testing.T) {
 	sc := newMockIdempotentSeenCounter(2)
 
-	_, _ = sc.Increment("txid-1", "subtree-A")
-	_, _ = sc.Increment("txid-2", "subtree-A")
+	_, _ = sc.AddPeer("txid-1", "subtree-A", 1)
+	_, _ = sc.AddPeer("txid-2", "subtree-A", 1)
 
 	// Same subtreeID for different txids should be independent.
-	result1, _ := sc.Increment("txid-1", "subtree-B")
-	result2, _ := sc.Increment("txid-2", "subtree-B")
+	result1, _ := sc.AddPeer("txid-1", "subtree-B", 1)
+	result2, _ := sc.AddPeer("txid-2", "subtree-B", 1)
 
 	if !result1.ThresholdReached {
 		t.Error("txid-1 threshold should fire")
@@ -880,7 +900,7 @@ func TestIntegration_SeenCounterIdempotency(t *testing.T) {
 	var thresholdCount int
 
 	for _, st := range subtrees {
-		result, err := sc.Increment("txid-1", st)
+		result, err := sc.AddPeer("txid-1", st, 1)
 		if err != nil {
 			t.Fatalf("Increment error: %v", err)
 		}
@@ -895,7 +915,7 @@ func TestIntegration_SeenCounterIdempotency(t *testing.T) {
 
 	// Now replay all subtrees (duplicates).
 	for _, st := range subtrees {
-		result, _ := sc.Increment("txid-1", st)
+		result, _ := sc.AddPeer("txid-1", st, 1)
 		if result.ThresholdReached {
 			t.Errorf("threshold should not fire on duplicate subtree %s", st)
 		}
@@ -1027,6 +1047,7 @@ func newTestProcessor(t *testing.T, regStore RegistrationGetter, seenCounter See
 	p := &Processor{
 		registrationStore: regStore,
 		seenCounterStore:  seenCounter,
+		nodeRegistry:      &mockReadyNodes{weight: 51},
 		callbackProducer:  kafka.NewTestProducer(mockProducer, "callback-test", logger),
 	}
 	p.InitBase("subtree-test")
@@ -1046,7 +1067,7 @@ func TestBatchedSeenCallbacks_SingleCallbackURL(t *testing.T) {
 		"tx3":   {"http://arcade.example.com/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1086,7 +1107,7 @@ func TestBatchedSeenCallbacks_MultipleCallbackURLs(t *testing.T) {
 		"tx3":   {"http://url-A/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1125,7 +1146,7 @@ func TestBatchedSeenCallbacks_PropagatesCallbackToken(t *testing.T) {
 		testTx1: {url},
 		testTx2: {url},
 	}
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, map[string]string{url: token}), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, map[string]string{url: token}), "subtree-A", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1144,7 +1165,7 @@ func TestBatchedSeenCallbacks_NoRegistered(t *testing.T) {
 	regStore := &mockRegStore{registrations: map[string][]string{}}
 	p, mockProd := newTestProcessor(t, regStore, &mockSeenCounter{})
 
-	if err := p.emitBatchedSeenCallbacks(context.Background(), map[string][]store.CallbackEntry{}, "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), map[string][]store.CallbackEntry{}, "subtree-A", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1165,7 +1186,7 @@ func TestBatchedSeenCallbacks_SeenMultipleNodesThreshold(t *testing.T) {
 		testTx2: {"http://arcade/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1196,7 +1217,7 @@ func TestBatchedSeenCallbacks_SeenMultipleNodesThreshold(t *testing.T) {
 func TestBatchedSeenCallbacks_PartialThreshold(t *testing.T) {
 	// Threshold=2: tx1 has already been seen once (will reach threshold), tx2 hasn't.
 	sc := newMockIdempotentSeenCounter(2)
-	_, _ = sc.Increment(testTx1, "subtree-PREV") // pre-seen once
+	_, _ = sc.AddPeer(testTx1, "subtree-PREV", 1) // pre-seen once
 
 	regStore := &mockRegStore{registrations: map[string][]string{}}
 	p, mockProd := newTestProcessor(t, regStore, sc)
@@ -1206,7 +1227,7 @@ func TestBatchedSeenCallbacks_PartialThreshold(t *testing.T) {
 		testTx2: {"http://arcade/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1239,7 +1260,7 @@ func TestBatchedSeenCallbacks_ChunksLargeBatch(t *testing.T) {
 		registered[fmt.Sprintf("tx%05d", i)] = []string{"http://arcade/cb"}
 	}
 
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-A", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1288,6 +1309,7 @@ func newTestProcessorWithCfg(t *testing.T, regStore RegistrationGetter, seenCoun
 		cfg:               cfg,
 		registrationStore: regStore,
 		seenCounterStore:  seenCounter,
+		nodeRegistry:      &mockReadyNodes{weight: 51},
 		callbackProducer:  kafka.NewTestProducer(mockProducer, "callback-test", logger),
 	}
 	p.InitBase("subtree-test")
@@ -1333,7 +1355,7 @@ func TestEmitSeenBatch_LogsTxidsCappedAtConfig(t *testing.T) {
 		"tx4": {testSeenBatchCallbackURL},
 		"tx5": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-cap"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-cap", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1379,7 +1401,7 @@ func TestEmitSeenBatch_LogsAllTxidsWhenUnderCap(t *testing.T) {
 		"tx1": {testSeenBatchCallbackURL},
 		"tx2": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-under-cap"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-under-cap", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1416,7 +1438,7 @@ func TestEmitSeenBatch_CountsOnlyWhenLogMaxZero(t *testing.T) {
 		"tx2": {testSeenBatchCallbackURL},
 		"tx3": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-counts-only"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-counts-only", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1450,7 +1472,7 @@ func TestEmitSeenBatch_NilCfgLogsCountsOnly(t *testing.T) {
 	registered := map[string][]string{
 		"tx1": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-nil-cfg"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-nil-cfg", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1479,7 +1501,7 @@ func TestEmitSeenBatch_LogsAllTxidsAtExactCap(t *testing.T) {
 		"tx2": {testSeenBatchCallbackURL},
 		"tx3": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-exact-cap"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-exact-cap", "peer-A"); err != nil {
 		t.Fatalf("emitBatchedSeenCallbacks: %v", err)
 	}
 
@@ -1521,7 +1543,7 @@ func TestEmitSeenBatch_NoSuccessLogOnPublishFailure(t *testing.T) {
 		"tx1": {testSeenBatchCallbackURL},
 		"tx2": {testSeenBatchCallbackURL},
 	}
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-pubfail"); err == nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-pubfail", "peer-A"); err == nil {
 		t.Fatal("expected an error from emitBatchedSeenCallbacks with a failing producer")
 	}
 
@@ -1720,7 +1742,7 @@ func TestEmitBatchedSeenCallbacks_HappyPathReturnsNil(t *testing.T) {
 		testTx2: {"http://url-B/cb"},
 	}
 
-	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-happy"); err != nil {
+	if err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-happy", "peer-A"); err != nil {
 		t.Fatalf("expected nil error on happy path, got: %v", err)
 	}
 	if got := len(mockProd.getMessages()); got != 2 {
@@ -1747,7 +1769,7 @@ func TestEmitBatchedSeenCallbacks_PublishFailureReturnsError(t *testing.T) {
 		testTx2: {"http://url-B/cb"},
 	}
 
-	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-fail")
+	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-fail", "peer-A")
 	if err == nil {
 		t.Fatalf("expected non-nil error when callback publish fails")
 	}
@@ -1782,7 +1804,7 @@ func TestEmitBatchedSeenCallbacks_PartialFailureStillAttemptsOtherURLs(t *testin
 		testTx2: {okURL},
 	}
 
-	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-partial")
+	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-partial", "peer-A")
 	if err == nil {
 		t.Fatalf("expected non-nil error when one callback URL publish fails")
 	}
@@ -2038,7 +2060,7 @@ type failingSeenCounter struct {
 	attempts []string // txids passed to Increment, in call order
 }
 
-func (f *failingSeenCounter) Increment(txid, subtreeID string) (*store.IncrementResult, error) {
+func (f *failingSeenCounter) AddPeer(txid, peerID string, weight int) (*store.IncrementResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempts = append(f.attempts, txid)
@@ -2046,8 +2068,8 @@ func (f *failingSeenCounter) Increment(txid, subtreeID string) (*store.Increment
 	return nil, f.err
 }
 
-func (f *failingSeenCounter) BatchIncrement(txids []string, subtreeID string) (map[string]*store.IncrementResult, error) {
-	return batchViaIncrement(f.Increment, txids, subtreeID)
+func (f *failingSeenCounter) BatchAddPeer(txids []string, peerID string, weight int) (map[string]*store.IncrementResult, error) {
+	return batchViaAddPeer(f.AddPeer, txids, peerID, weight)
 }
 
 // TestEmitBatchedSeenCallbacks_IncrementFailureReturnsError verifies that a
@@ -2065,12 +2087,12 @@ func TestEmitBatchedSeenCallbacks_IncrementFailureReturnsError(t *testing.T) {
 		testTx2: {"http://url-B/cb"},
 	}
 
-	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-counter-fail")
+	err := p.emitBatchedSeenCallbacks(context.Background(), toEntries(registered, nil), "subtree-counter-fail", "peer-A")
 	if err == nil {
 		t.Fatalf("expected non-nil error when seen-counter Increment fails")
 	}
-	if !strings.Contains(err.Error(), "incrementing seen counter") {
-		t.Errorf("expected error to wrap increment context, got: %v", err)
+	if !strings.Contains(err.Error(), "seen counter") {
+		t.Errorf("expected error to wrap seen counter context, got: %v", err)
 	}
 
 	// Both txids should have been attempted (best-effort iteration past
@@ -2128,13 +2150,14 @@ func TestHandleMessage_SeenCounterIncrementFailure_RoutesToRetryAndSkipsDedup(t 
 				StorageMode: "stream", // skip blob store
 			},
 		},
-		registrationStore: regStore,
-		seenCounterStore:  sc,
-		callbackProducer:  kafka.NewTestProducer(cbMock, "callback-test", logger),
-		retryProducer:     kafka.NewTestProducer(retryMock, "subtree-test", logger),
-		dlqProducer:       kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
-		dataHubClient:     datahub.NewClient(5, 0, logger),
-		dedupCache:        dedup,
+		registrationStore:  regStore,
+		seenCounterStore:   sc,
+		nodeRegistry:       &mockReadyNodes{weight: 51},
+		callbackProducer:   kafka.NewTestProducer(cbMock, "callback-test", logger),
+		retryProducer:      kafka.NewTestProducer(retryMock, "subtree-test", logger),
+		dlqProducer:        kafka.NewTestProducer(dlqMock, "subtree-dlq-test", logger),
+		dataHubClient:      datahub.NewClient(5, 0, logger),
+		dedupCache:         dedup,
 	}
 	p.InitBase("subtree-counter-fail-test")
 	p.Logger = logger
@@ -2142,6 +2165,7 @@ func TestHandleMessage_SeenCounterIncrementFailure_RoutesToRetryAndSkipsDedup(t 
 	subtreeMsg := &kafka.SubtreeMessage{
 		Hash:         "subtree-counter-fail",
 		DataHubURL:   dataHubServer.URL,
+		PeerID:       "peer-A",
 		AttemptCount: 0,
 	}
 	value, err := subtreeMsg.Encode()

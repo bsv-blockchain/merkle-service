@@ -313,7 +313,8 @@ func TestProcessor_NewProcessor_WithDataHubRegistry_NoCrashOnNil(t *testing.T) {
 		config.BlockConfig{},
 		config.DataHubConfig{},
 		nil, nil, nil, nil, nil,
-		nil,
+		nil, // nodeRegistry
+		nil, // logger
 	)
 	if p == nil {
 		t.Fatal("NewProcessor returned nil")

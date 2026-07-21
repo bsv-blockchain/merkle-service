@@ -536,7 +536,7 @@ func TestSeenCounter_ThresholdFiresOnce(t *testing.T) {
 	var firedCount int
 	// Increment with 5 distinct subtreeIDs.
 	for i := 0; i < 5; i++ {
-		res, err := s.Increment("tx", fmt.Sprintf("st%d", i))
+		res, err := s.AddPeer("tx", fmt.Sprintf("st%d", i), 1)
 		if err != nil {
 			t.Fatalf("Increment %d: %v", i, err)
 		}
@@ -549,7 +549,7 @@ func TestSeenCounter_ThresholdFiresOnce(t *testing.T) {
 	}
 
 	// Duplicate subtreeID shouldn't bump count further.
-	res, err := s.Increment("tx", "st0")
+	res, err := s.AddPeer("tx", "st0", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,7 +598,7 @@ func TestSeenCounter_ConcurrentThresholdFiresOnce(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			res, err := s.Increment("tx-race", fmt.Sprintf("st%d", i))
+			res, err := s.AddPeer("tx-race", fmt.Sprintf("st%d", i), 1)
 			if err != nil {
 				t.Errorf("Increment %d: %v", i, err)
 				return
@@ -1000,7 +1000,7 @@ func TestSeenCounter_BatchIncrement(t *testing.T) {
 	txids := []string{"tx-a", "tx-b", "tx-c"}
 
 	// First subtree: every txid at count 1, none fired.
-	results, err := s.BatchIncrement(txids, "st1")
+	results, err := s.BatchAddPeer(txids, "st1", 1)
 	if err != nil {
 		t.Fatalf("BatchIncrement st1: %v", err)
 	}
@@ -1014,7 +1014,7 @@ func TestSeenCounter_BatchIncrement(t *testing.T) {
 	}
 
 	// Second distinct subtree: every txid crosses threshold=2 exactly once.
-	results, err = s.BatchIncrement(txids, "st2")
+	results, err = s.BatchAddPeer(txids, "st2", 1)
 	if err != nil {
 		t.Fatalf("BatchIncrement st2: %v", err)
 	}
@@ -1025,7 +1025,7 @@ func TestSeenCounter_BatchIncrement(t *testing.T) {
 	}
 
 	// Idempotent re-run of the same batch: counts unchanged, no re-fire.
-	results, err = s.BatchIncrement(txids, "st2")
+	results, err = s.BatchAddPeer(txids, "st2", 1)
 	if err != nil {
 		t.Fatalf("BatchIncrement st2 rerun: %v", err)
 	}
@@ -1047,7 +1047,7 @@ func TestSeenCounter_BatchDelete(t *testing.T) {
 
 	for _, txid := range []string{"tx-a", "tx-b", "tx-keep"} {
 		for i := 0; i < 2; i++ {
-			if _, err := s.Increment(txid, fmt.Sprintf("st%d", i)); err != nil {
+			if _, err := s.AddPeer(txid, fmt.Sprintf("st%d", i), 1); err != nil {
 				t.Fatalf("Increment(%s): %v", txid, err)
 			}
 		}
@@ -1058,7 +1058,7 @@ func TestSeenCounter_BatchDelete(t *testing.T) {
 	}
 
 	// Deleted txids restart from a clean slate.
-	res, err := s.Increment("tx-a", "st-new")
+	res, err := s.AddPeer("tx-a", "st-new", 1)
 	if err != nil {
 		t.Fatalf("Increment after delete: %v", err)
 	}
@@ -1067,7 +1067,7 @@ func TestSeenCounter_BatchDelete(t *testing.T) {
 	}
 
 	// Untouched txid keeps its history.
-	res, err = s.Increment("tx-keep", "st2")
+	res, err = s.AddPeer("tx-keep", "st2", 1)
 	if err != nil {
 		t.Fatalf("Increment(tx-keep): %v", err)
 	}

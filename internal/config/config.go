@@ -184,7 +184,12 @@ type AerospikeConfig struct {
 	// than this are evicted by the per-record TTL. Default 7 days; tune down
 	// for clusters where DataHub fleet membership rotates more aggressively.
 	DataHubRegistryTTLSec int `yaml:"dataHubRegistryTTLSec" mapstructure:"datahubregistryttlsec"`
-	MaxRetries            int `yaml:"maxRetries"  mapstructure:"maxretries"`
+	// BlockAttributionSet stores first-seen peer attributions for block hashes
+	// (node registry cold start / multi-replica).
+	BlockAttributionSet string `yaml:"blockAttributionSet" mapstructure:"blockattributionset"`
+	// SubtreeAttributionSet stores first-seen peer per subtree hash.
+	SubtreeAttributionSet string `yaml:"subtreeAttributionSet" mapstructure:"subtreeattributionset"`
+	MaxRetries            int    `yaml:"maxRetries"  mapstructure:"maxretries"`
 	RetryBaseMs           int `yaml:"retryBaseMs" mapstructure:"retrybasems"`
 	// ConnectionQueueSize is the per-node connection pool size. The Aerospike
 	// Go client default is 100; under bursty BatchGet load (e.g. 14+ subtrees
@@ -503,10 +508,17 @@ func (b BlockConfig) EmitExpectedStumpSetEnabled() bool {
 
 // CallbackConfig holds callback delivery configuration.
 type CallbackConfig struct {
-	MaxRetries          int `yaml:"maxRetries"          mapstructure:"maxretries"`
-	BackoffBaseSec      int `yaml:"backoffBaseSec"      mapstructure:"backoffbasesec"`
-	TimeoutSec          int `yaml:"timeoutSec"          mapstructure:"timeoutsec"`
-	SeenThreshold       int `yaml:"seenThreshold"       mapstructure:"seenthreshold"`
+	MaxRetries     int `yaml:"maxRetries"     mapstructure:"maxretries"`
+	BackoffBaseSec int `yaml:"backoffBaseSec" mapstructure:"backoffbasesec"`
+	TimeoutSec     int `yaml:"timeoutSec"     mapstructure:"timeoutsec"`
+	// SeenThreshold is deprecated. Prefer SeenScoreThreshold (weighted peer score).
+	// Kept for backward-compatible config parsing; ignored at runtime.
+	SeenThreshold int `yaml:"seenThreshold" mapstructure:"seenthreshold"`
+	// SeenWindowBlocks is W: tip-path blocks used for node weights (default 100).
+	SeenWindowBlocks int `yaml:"seenWindowBlocks" mapstructure:"seenwindowblocks"`
+	// SeenScoreThreshold is the minimum weighted score (out of SeenWindowBlocks)
+	// to emit SEEN_MULTIPLE_NODES (default 51).
+	SeenScoreThreshold  int `yaml:"seenScoreThreshold"  mapstructure:"seenscorethreshold"`
 	DedupTTLSec         int `yaml:"dedupTTLSec"         mapstructure:"dedupttlsec"`
 	MaxConnsPerHost     int `yaml:"maxConnsPerHost"     mapstructure:"maxconnsperhost"`
 	MaxIdleConnsPerHost int `yaml:"maxIdleConnsPerHost" mapstructure:"maxidleconnsperhost"`
@@ -736,7 +748,11 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("callback.breakerthreshold", 20)
 	v.SetDefault("callback.backoffbasesec", 30)
 	v.SetDefault("callback.timeoutsec", 10)
-	v.SetDefault("callback.seenthreshold", 3)
+	v.SetDefault("callback.seenthreshold", 3) // deprecated
+	v.SetDefault("callback.seenwindowblocks", 100)
+	v.SetDefault("callback.seenscorethreshold", 51)
+	v.SetDefault("aerospike.blockattributionset", "merkle_block_attributions")
+	v.SetDefault("aerospike.subtreeattributionset", "merkle_subtree_attributions")
 	v.SetDefault("callback.dedupttlsec", 86400)
 	v.SetDefault("callback.maxconnsperhost", 32)
 	v.SetDefault("callback.maxidleconnsperhost", 16)
@@ -904,7 +920,11 @@ func bindEnvVars(v *viper.Viper) {
 		"callback.maxretries":          "CALLBACK_MAX_RETRIES",
 		"callback.backoffbasesec":      "CALLBACK_BACKOFF_BASE_SEC",
 		"callback.timeoutsec":          "CALLBACK_TIMEOUT_SEC",
-		"callback.seenthreshold":       "CALLBACK_SEEN_THRESHOLD",
+		"callback.seenthreshold":            "CALLBACK_SEEN_THRESHOLD", // deprecated
+		"callback.seenwindowblocks":         "CALLBACK_SEEN_WINDOW_BLOCKS",
+		"callback.seenscorethreshold":       "CALLBACK_SEEN_SCORE_THRESHOLD",
+		"aerospike.blockattributionset":     "AEROSPIKE_BLOCK_ATTRIBUTION_SET",
+		"aerospike.subtreeattributionset":   "AEROSPIKE_SUBTREE_ATTRIBUTION_SET",
 		"callback.dedupttlsec":         "CALLBACK_DEDUP_TTL_SEC",
 		"callback.maxconnsperhost":     "CALLBACK_MAX_CONNS_PER_HOST",
 		"callback.maxidleconnsperhost": "CALLBACK_MAX_IDLE_CONNS_PER_HOST",

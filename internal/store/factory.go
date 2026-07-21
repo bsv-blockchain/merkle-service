@@ -148,7 +148,7 @@ func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Lo
 			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
 		),
 		SeenCounter: NewSeenCounterStore(
-			asClient, cfg.Aerospike.SeenSet, cfg.Callback.SeenThreshold,
+			asClient, cfg.Aerospike.SeenSet, cfg.Callback.SeenScoreThreshold,
 			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
 		),
 		SubtreeCounter: NewSubtreeCounterStore(
@@ -157,6 +157,14 @@ func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Lo
 		),
 		ExpectedStump: NewExpectedStumpStore(
 			asClient, cfg.Aerospike.ExpectedStumpSet, cfg.Aerospike.SubtreeCounterTTLSec,
+			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
+		),
+		BlockAttribution: NewBlockAttributionStore(
+			asClient, cfg.Aerospike.BlockAttributionSet,
+			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
+		),
+		SubtreeAttribution: NewSubtreeAttributionStore(
+			asClient, cfg.Aerospike.SubtreeAttributionSet, cfg.Callback.DedupTTLSec,
 			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
 		),
 		Health: asClient,

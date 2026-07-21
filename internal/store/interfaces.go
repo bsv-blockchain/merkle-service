@@ -94,19 +94,22 @@ type CallbackAccumulatorStore interface {
 	ReadAndDelete(blockHash string) (map[string]*AccumulatedCallback, error)
 }
 
-// SeenCounterStore tracks how many distinct subtrees have reported a txid.
-// Increment fires ThresholdReached exactly once — when the unique count first
-// reaches the configured threshold.
+// SeenCounterStore tracks weighted confidence that mining nodes have seen a
+// txid. Each peerID is recorded at most once per txid, contributing its
+// current node weight (blocks in the last-W tip window) to the score.
+// ThresholdReached fires exactly once when the score first reaches the
+// configured threshold (F-045).
 //
-// BatchIncrement applies Increment semantics to many txids of ONE subtree in
-// bulk (the subtree-fetcher hot path). It returns a result per txid that
-// succeeded plus the first error encountered; callers emit callbacks for the
-// returned results and surface the error for redelivery (F-058) — increments
-// are idempotent, so re-running the whole batch is safe. The exactly-once
-// ThresholdReached guarantee (F-045) is identical to Increment's.
+// BatchAddPeer is the subtree-fetcher hot path: one peer observation applied
+// to many registered txids. It returns a result per txid that succeeded plus
+// the first error (F-058 partial-success: emit callbacks for successes,
+// redeliver on error; operations are idempotent under re-runs).
+//
+// The former unique-subtree Increment/BatchIncrement API is replaced by this
+// peer-weighted model.
 type SeenCounterStore interface {
-	Increment(txid, subtreeID string) (*IncrementResult, error)
-	BatchIncrement(txids []string, subtreeID string) (map[string]*IncrementResult, error)
+	AddPeer(txid, peerID string, weight int) (*IncrementResult, error)
+	BatchAddPeer(txids []string, peerID string, weight int) (map[string]*IncrementResult, error)
 	// BatchDelete removes the counters for txids. Called at mine time: a
 	// counter tracks pre-mine propagation, so once its txid is in a block
 	// the record is dead weight — this is the event-driven cleanup that
@@ -114,6 +117,29 @@ type SeenCounterStore interface {
 	// (idempotent, safe on work-item redelivery).
 	BatchDelete(txids []string) error
 	Threshold() int
+}
+
+// SubtreeAttributionStore records the first peer to announce each subtree hash.
+type SubtreeAttributionStore interface {
+	// TryAttribute returns the stored peer for subtreeHash. first is true only
+	// when this call won the first-seen race and inserted peerID.
+	TryAttribute(subtreeHash, peerID string) (attributedPeer string, first bool, err error)
+}
+
+// BlockAttributionStore persists first-seen block→peer attributions for the
+// node registry (shared across k8s replicas).
+type BlockAttributionStore interface {
+	TryAttribute(hash, prevHash, peerID string, height uint32) (attributedPeer string, first bool, err error)
+	ListAll() ([]BlockAttribution, error)
+	DeleteHashes(hashes []string) error
+}
+
+// BlockAttribution is a persisted first-seen block announcement.
+type BlockAttribution struct {
+	Hash     string
+	PrevHash string
+	Height   uint32
+	PeerID   string
 }
 
 // BlockProcessedData is the canonical block-level data the producer attaches

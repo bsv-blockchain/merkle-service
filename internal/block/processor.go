@@ -22,6 +22,11 @@ import (
 // longer than the per-attempt HTTP timeout plus a single backoff.
 const blockFetchPerPeerTimeout = 12 * time.Second
 
+// NodeRecorder attributes first-seen block announcements for the node registry.
+type NodeRecorder interface {
+	RecordBlock(hash string, height uint32, headerHex, peerID string) (ready bool, err error)
+}
+
 // Processor implements the block processor service.
 type Processor struct {
 	service.BaseService
@@ -44,6 +49,7 @@ type Processor struct {
 	urlRegistry      store.CallbackURLRegistry
 	dataHubRegistry  store.DataHubRegistry
 	subtreeCounter   store.SubtreeCounterStore
+	nodeRegistry     NodeRecorder
 	dataHubClient    *datahub.Client
 	dedupCache       *cache.DedupCache
 }
@@ -57,6 +63,7 @@ func NewProcessor(
 	urlRegistry store.CallbackURLRegistry,
 	dataHubRegistry store.DataHubRegistry,
 	subtreeCounter store.SubtreeCounterStore,
+	nodeRegistry NodeRecorder,
 	logger *slog.Logger,
 ) *Processor {
 	p := &Processor{
@@ -68,6 +75,7 @@ func NewProcessor(
 		urlRegistry:     urlRegistry,
 		dataHubRegistry: dataHubRegistry,
 		subtreeCounter:  subtreeCounter,
+		nodeRegistry:    nodeRegistry,
 	}
 	p.InitBase("block-processor")
 	if logger != nil {
@@ -194,8 +202,18 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		logfields.BlockHash(blockMsg.Hash),
 		logfields.BlockHeight(blockMsg.Height),
 		logfields.DataHubURL(blockMsg.DataHubURL),
+		"peerId", blockMsg.PeerID,
 		"reprocess", blockMsg.OverrideCallbackURL != "",
 	)
+
+	// First-seen peer attribution for the node registry (shared store).
+	// Run before work-path dedup so the first announce always wins.
+	if p.nodeRegistry != nil && blockMsg.PeerID != "" && blockMsg.Hash != "" {
+		if _, err := p.nodeRegistry.RecordBlock(blockMsg.Hash, blockMsg.Height, blockMsg.Header, blockMsg.PeerID); err != nil {
+			p.Logger.Warn("failed to record block peer for node registry",
+				logfields.BlockHash(blockMsg.Hash), "peerId", blockMsg.PeerID, "error", err)
+		}
+	}
 
 	// Check dedup cache — skip if already successfully processed. Reprocess
 	// requests (BypassDedup) intentionally skip both the lookup and the later

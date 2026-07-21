@@ -32,12 +32,23 @@ type RegistrationGetter interface {
 	Get(txid string) ([]store.CallbackEntry, error)
 }
 
-// SeenCounter abstracts seen-count tracking for testability. BatchIncrement
-// carries the store.SeenCounterStore partial-success contract: results for
-// every txid that succeeded plus the first error (F-058).
+// SeenCounter abstracts peer-weighted seen scoring for testability.
+// BatchAddPeer carries the store.SeenCounterStore partial-success contract:
+// results for every txid that succeeded plus the first error (F-058).
 type SeenCounter interface {
-	Increment(txid, subtreeID string) (*store.IncrementResult, error)
-	BatchIncrement(txids []string, subtreeID string) (map[string]*store.IncrementResult, error)
+	AddPeer(txid, peerID string, weight int) (*store.IncrementResult, error)
+	BatchAddPeer(txids []string, peerID string, weight int) (map[string]*store.IncrementResult, error)
+}
+
+// NodeWeights provides mining-node weights for SEEN_MULTIPLE_NODES scoring.
+type NodeWeights interface {
+	Ready() bool
+	Weight(peerID string) int
+}
+
+// SubtreeAttributor records first-seen peer per subtree hash.
+type SubtreeAttributor interface {
+	TryAttribute(subtreeHash, peerID string) (attributedPeer string, first bool, err error)
 }
 
 // RegCache abstracts the registration deduplication cache for testability.
@@ -60,12 +71,14 @@ type Processor struct {
 	callbackProducer  *kafka.Producer
 	retryProducer     *kafka.Producer // re-publishes to the subtree topic on transient failure
 	dlqProducer       *kafka.Producer // publishes to subtree-dlq when MaxAttempts is exceeded
-	registrationStore RegistrationGetter
-	seenCounterStore  SeenCounter
-	subtreeStore      store.SubtreeStore
-	regCache          RegCache
-	dedupCache        *cache.DedupCache
-	dataHubClient     *datahub.Client
+	registrationStore  RegistrationGetter
+	seenCounterStore   SeenCounter
+	subtreeStore       store.SubtreeStore
+	nodeRegistry       NodeWeights
+	subtreeAttribution SubtreeAttributor
+	regCache           RegCache
+	dedupCache         *cache.DedupCache
+	dataHubClient      *datahub.Client
 }
 
 // NewProcessor creates a new subtree Processor. logger, when non-nil,
@@ -77,13 +90,17 @@ func NewProcessor(
 	registrationStore RegistrationGetter,
 	seenCounterStore SeenCounter,
 	subtreeStore store.SubtreeStore,
+	nodeRegistry NodeWeights,
+	subtreeAttribution SubtreeAttributor,
 	logger *slog.Logger,
 ) *Processor {
 	p := &Processor{
-		cfg:               cfg,
-		registrationStore: registrationStore,
-		seenCounterStore:  seenCounterStore,
-		subtreeStore:      subtreeStore,
+		cfg:                cfg,
+		registrationStore:  registrationStore,
+		seenCounterStore:   seenCounterStore,
+		subtreeStore:       subtreeStore,
+		nodeRegistry:       nodeRegistry,
+		subtreeAttribution: subtreeAttribution,
 	}
 	p.InitBase("subtree-fetcher")
 	if logger != nil {
@@ -324,15 +341,40 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 		"processing subtree announcement",
 		logfields.SubtreeHash(subtreeMsg.Hash),
 		logfields.DataHubURL(subtreeMsg.DataHubURL),
+		"peerId", subtreeMsg.PeerID,
 		"attemptCount", subtreeMsg.AttemptCount,
 	)
 
-	// Check dedup cache — skip if already successfully processed.
+	// Local dedup FIRST — O(1) memory, no shared-store RTT (high-TPS path).
 	if p.dedupCache != nil && p.dedupCache.Contains(subtreeMsg.Hash) {
 		p.Logger.Debug("skipping duplicate subtree message", logfields.SubtreeHash(subtreeMsg.Hash))
 		metrics.ObserveSubtreeProcessing(metrics.OutcomeDedupHit, time.Since(start))
 		return nil
 	}
+
+	// First-seen peer attribution (shared store). Losers skip heavy work.
+	attributedPeer := subtreeMsg.PeerID
+	if p.subtreeAttribution != nil && subtreeMsg.Hash != "" && subtreeMsg.PeerID != "" {
+		peer, first, attrErr := p.subtreeAttribution.TryAttribute(subtreeMsg.Hash, subtreeMsg.PeerID)
+		if attrErr != nil {
+			p.Logger.Warn("subtree attribution failed; continuing with message peer",
+				logfields.SubtreeHash(subtreeMsg.Hash), "error", attrErr)
+		} else {
+			attributedPeer = peer
+			if !first {
+				p.Logger.Debug("skipping subtree hash owned by first-seen peer",
+					logfields.SubtreeHash(subtreeMsg.Hash), "peerId", peer)
+				if p.dedupCache != nil {
+					p.dedupCache.Add(subtreeMsg.Hash)
+				}
+				metrics.ObserveSubtreeProcessing(metrics.OutcomeDedupHit, time.Since(start))
+				return nil
+			}
+		}
+	}
+	// Stash for emitBatchedSeenCallbacks via message field reuse — re-set PeerID
+	// so downstream scoring uses the attributed peer.
+	subtreeMsg.PeerID = attributedPeer
 
 	// Peer-health gate: if the announcing peer has been failing recently,
 	// skip the fetch and ack-and-drop. SEEN_ON_NETWORK detection is
@@ -426,7 +468,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	// either retried or terminally DLQ'd. Otherwise downstream callback
 	// consumers permanently lose SEEN notifications during a Kafka
 	// callback-topic outage (F-057).
-	if err := p.emitBatchedSeenCallbacks(ctx, registeredTxids, subtreeMsg.Hash); err != nil {
+	if err := p.emitBatchedSeenCallbacks(ctx, registeredTxids, subtreeMsg.Hash, subtreeMsg.PeerID); err != nil {
 		return p.handleTransientFailure(ctx, subtreeMsg, "publishing batched SEEN callbacks", err, start)
 	}
 
@@ -762,7 +804,7 @@ func (p *Processor) findRegisteredTxids(txids []string) (map[string][]store.Call
 // callbacks for the affected txids. Returning the error keeps the dedup
 // cache untouched (handleMessage gates that add on success) and routes the
 // work through handleTransientFailure for redelivery.
-func (p *Processor) emitBatchedSeenCallbacks(ctx context.Context, registeredTxids map[string][]store.CallbackEntry, subtreeID string) error {
+func (p *Processor) emitBatchedSeenCallbacks(ctx context.Context, registeredTxids map[string][]store.CallbackEntry, subtreeID, peerID string) error {
 	if len(registeredTxids) == 0 {
 		return nil
 	}
@@ -796,46 +838,39 @@ func (p *Processor) emitBatchedSeenCallbacks(ctx context.Context, registeredTxid
 		firstErr = err
 	}
 
-	// 4.6: Increment seen counters and collect threshold-reached txids.
-	//
-	// A failure here MUST surface as an error (F-058). Pre-fix this path
-	// logged a warning and continued, while handleMessage still added the
-	// subtree hash to the dedup cache — permanently dropping
-	// SEEN_MULTIPLE_NODES callbacks for the affected txids on redelivery.
-	// BatchIncrement has the same partial-success contract the old per-txid
-	// loop had: results for every txid that succeeded plus the first error;
-	// surface the error so handleMessage re-drives via handleTransientFailure
-	// (which leaves the dedup cache untouched) while threshold callbacks for
-	// the successes still go out on this attempt.
-	//
-	// Batched (throughput review F-4): the previous per-txid Increment loop
-	// cost 2 serial Aerospike RTTs per registered txid (~500-1000 txids/s per
-	// instance); BatchIncrement is 2 batch RTTs per 5000 txids, with the
-	// exactly-once threshold CAS (F-045) run only for the rare crossers.
+	// 4.6: Peer-weighted SEEN_MULTIPLE_NODES scoring.
+	// Warm-up: do not score until the node registry has a full tip window.
+	// Unknown peers (weight 0) do not contribute.
 	thresholdGroups := make(map[string][]string) // callbackURL → threshold-reached txids
-	if len(registeredTxids) > 0 {
-		txids := make([]string, 0, len(registeredTxids))
-		for txid := range registeredTxids {
-			txids = append(txids, txid)
-		}
-		metrics.ObserveDBBatchSize(metrics.StoreSeenCounter, metrics.OpIncrement, len(txids))
-		incStart := time.Now()
-		results, incErr := p.seenCounterStore.BatchIncrement(txids, subtreeID)
-		metrics.ObserveDB(p.backendLabel(), metrics.StoreSeenCounter, metrics.OpIncrement, incStart, incErr)
-		if incErr != nil {
-			p.Logger.Error("failed to batch-increment seen counters",
-				logfields.SubtreeHash(subtreeID), logfields.TxIDCount(len(txids)), "succeeded", len(results), "error", incErr)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("incrementing seen counters for subtree %s: %w", subtreeID, incErr)
+	if p.nodeRegistry != nil && p.nodeRegistry.Ready() {
+		weight := p.nodeRegistry.Weight(peerID)
+		if weight > 0 && len(registeredTxids) > 0 {
+			txids := make([]string, 0, len(registeredTxids))
+			for txid := range registeredTxids {
+				txids = append(txids, txid)
 			}
-		}
-		for txid, result := range results {
-			if result.ThresholdReached {
-				for _, e := range registeredTxids[txid] {
-					thresholdGroups[e.URL] = append(thresholdGroups[e.URL], txid)
+			metrics.ObserveDBBatchSize(metrics.StoreSeenCounter, metrics.OpIncrement, len(txids))
+			incStart := time.Now()
+			results, incErr := p.seenCounterStore.BatchAddPeer(txids, peerID, weight)
+			metrics.ObserveDB(p.backendLabel(), metrics.StoreSeenCounter, metrics.OpIncrement, incStart, incErr)
+			if incErr != nil {
+				p.Logger.Error("failed to batch-add peer to seen counters",
+					logfields.SubtreeHash(subtreeID), "peerId", peerID, logfields.TxIDCount(len(txids)), "succeeded", len(results), "error", incErr)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("adding peer to seen counters for subtree %s: %w", subtreeID, incErr)
+				}
+			}
+			for txid, result := range results {
+				if result.ThresholdReached {
+					for _, e := range registeredTxids[txid] {
+						thresholdGroups[e.URL] = append(thresholdGroups[e.URL], txid)
+					}
 				}
 			}
 		}
+	} else {
+		p.Logger.Debug("skipping SEEN_MULTIPLE_NODES scoring: node registry not ready or peer unknown",
+			"peerId", peerID)
 	}
 
 	// Emit one batched SEEN_MULTIPLE_NODES per callbackURL, chunked to fit

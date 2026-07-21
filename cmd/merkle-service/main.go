@@ -12,6 +12,7 @@ import (
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
 	"github.com/bsv-blockchain/merkle-service/internal/kafka"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
+	"github.com/bsv-blockchain/merkle-service/internal/nodes"
 	"github.com/bsv-blockchain/merkle-service/internal/p2p"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
@@ -84,8 +85,15 @@ func main() {
 		cfg.DataHub.AllowPrivateIPs,
 		logger,
 	)
-	subtreeFetcher := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree, logger)
-	blockProcessor := block.NewProcessor(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.CallbackURLRegistry, registry.DataHubRegistry, registry.SubtreeCounter, logger)
+	nodeRegistry, err := nodes.NewRegistry(registry.BlockAttribution, cfg.Callback.SeenWindowBlocks, logger)
+	if err != nil {
+		log.Fatal("failed to create node registry: ", err)
+	}
+	nodeRegistry.StartBackgroundRefresh(0)
+	defer nodeRegistry.StopBackgroundRefresh()
+
+	subtreeFetcher := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree, nodeRegistry, registry.SubtreeAttribution, logger)
+	blockProcessor := block.NewProcessor(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.CallbackURLRegistry, registry.DataHubRegistry, registry.SubtreeCounter, nodeRegistry, logger)
 	subtreeWorker := block.NewSubtreeWorkerService(cfg.Kafka, cfg.Block, cfg.DataHub, registry.Registration, registry.Subtree, registry.Stump, registry.CallbackURLRegistry, registry.SubtreeCounter, registry.ExpectedStump, registry.SeenCounter, logger)
 	callbackDelivery := callback.NewDeliveryService(cfg, registry.CallbackDedup, registry.Stump, registry.CallbackURLRegistry, logger)
 
