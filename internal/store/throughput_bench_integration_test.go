@@ -76,7 +76,7 @@ func BenchmarkSeenCounter(b *testing.B) {
 			for i := 0; b.Loop(); i++ {
 				txids := benchTxids(fmt.Sprintf("ser%d-%d", size, i), size)
 				for _, txid := range txids {
-					if _, err := sc.Increment(txid, "subtree-bench"); err != nil {
+					if _, err := sc.AddPeer(txid, "subtree-bench", 1); err != nil {
 						b.Fatalf("Increment: %v", err)
 					}
 				}
@@ -87,7 +87,7 @@ func BenchmarkSeenCounter(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; b.Loop(); i++ {
 				txids := benchTxids(fmt.Sprintf("bat%d-%d", size, i), size)
-				results, err := sc.BatchIncrement(txids, "subtree-bench")
+				results, err := sc.BatchAddPeer(txids, "subtree-bench", 1)
 				if err != nil {
 					b.Fatalf("BatchIncrement: %v", err)
 				}
@@ -237,7 +237,7 @@ func TestBatchIncrement_ConcurrentThresholdFiresOnce(t *testing.T) {
 			defer wg.Done()
 			// Every worker reports the same txids from a distinct subtree, all
 			// racing through phase 1 appends and phase 2 CAS at once.
-			results, err := sc.BatchIncrement(txids, fmt.Sprintf("subtree-%d", worker))
+			results, err := sc.BatchAddPeer(txids, fmt.Sprintf("subtree-%d", worker), 1)
 			if err != nil {
 				errCh <- err
 				return
@@ -317,14 +317,14 @@ func TestBatchIncrement_CountIsListSizeAndIdempotent(t *testing.T) {
 	}
 
 	// First distinct subtree -> count 1.
-	r1, err := sc.BatchIncrement(txids, "subtree-A")
+	r1, err := sc.BatchAddPeer(txids, "subtree-A", 1)
 	if err != nil {
 		t.Fatalf("BatchIncrement A: %v", err)
 	}
 	assertCounts("subtree-A", r1, 1)
 
 	// Second distinct subtree -> count 2.
-	r2, err := sc.BatchIncrement(txids, "subtree-B")
+	r2, err := sc.BatchAddPeer(txids, "subtree-B", 1)
 	if err != nil {
 		t.Fatalf("BatchIncrement B: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestBatchIncrement_CountIsListSizeAndIdempotent(t *testing.T) {
 
 	// Repeat of subtree-A (AddUnique|NoFail) -> count stays 2, proving the size
 	// returned by the append reflects the deduplicated list, not a blind +1.
-	r3, err := sc.BatchIncrement(txids, "subtree-A")
+	r3, err := sc.BatchAddPeer(txids, "subtree-A", 1)
 	if err != nil {
 		t.Fatalf("BatchIncrement A repeat: %v", err)
 	}

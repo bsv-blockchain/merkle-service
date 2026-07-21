@@ -23,7 +23,7 @@ func TestSeenCounter_BatchDelete_Aerospike(t *testing.T) {
 
 	for _, txid := range []string{"tx-del-a", "tx-del-b", "tx-del-keep"} {
 		for _, st := range []string{"st1", "st2"} {
-			if _, err := s.Increment(txid, st); err != nil {
+			if _, err := s.AddPeer(txid, st, 1); err != nil {
 				t.Fatalf("Increment(%s, %s): %v", txid, st, err)
 			}
 		}
@@ -33,7 +33,7 @@ func TestSeenCounter_BatchDelete_Aerospike(t *testing.T) {
 		t.Fatalf("BatchDelete: %v", err)
 	}
 
-	res, err := s.Increment("tx-del-a", "st-new")
+	res, err := s.AddPeer("tx-del-a", "st-new", 1)
 	if err != nil {
 		t.Fatalf("Increment after delete: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestSeenCounter_BatchDelete_Aerospike(t *testing.T) {
 		t.Errorf("count after delete+increment = %d, want 1 (fresh counter)", res.NewCount)
 	}
 
-	res, err = s.Increment("tx-del-keep", "st3")
+	res, err = s.AddPeer("tx-del-keep", "st3", 1)
 	if err != nil {
 		t.Fatalf("Increment(tx-del-keep): %v", err)
 	}

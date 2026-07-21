@@ -222,7 +222,7 @@ func TestSeenCounter_IncrementReturnsCorrectCount(t *testing.T) {
 	txid := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 	for i := 1; i <= 5; i++ {
-		result, err := counter.Increment(txid, fmt.Sprintf("subtree-%d", i))
+		result, err := counter.AddPeer(txid, fmt.Sprintf("subtree-%d", i), 1)
 		if err != nil {
 			t.Fatalf("Increment #%d failed: %v", i, err)
 		}
@@ -241,7 +241,7 @@ func TestSeenCounter_ThresholdReachedFiresAtThreshold(t *testing.T) {
 	txid := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 	for i := 1; i <= 5; i++ {
-		result, err := counter.Increment(txid, fmt.Sprintf("subtree-%d", i))
+		result, err := counter.AddPeer(txid, fmt.Sprintf("subtree-%d", i), 1)
 		if err != nil {
 			t.Fatalf("Increment #%d failed: %v", i, err)
 		}
@@ -268,7 +268,7 @@ func TestSeenCounter_AboveThresholdDoesNotReFire(t *testing.T) {
 
 	thresholdFiredCount := 0
 	for i := 1; i <= 10; i++ {
-		result, err := counter.Increment(txid, fmt.Sprintf("subtree-%d", i))
+		result, err := counter.AddPeer(txid, fmt.Sprintf("subtree-%d", i), 1)
 		if err != nil {
 			t.Fatalf("Increment #%d failed: %v", i, err)
 		}
