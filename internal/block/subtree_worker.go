@@ -419,7 +419,7 @@ func (s *SubtreeWorkerService) handleMessage(ctx context.Context, msg *kafka.Mes
 	// so the work item is redelivered and the decrement is re-attempted; we
 	// must not ack with a non-decremented counter, or BLOCK_PROCESSED will
 	// never fire for this block (F-013).
-	if err := s.decrementCounterAndMaybeEmit(ctx, workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken); err != nil {
+	if err := s.decrementCounterAndMaybeEmit(ctx, workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken, workMsg.ReprocessNonce); err != nil {
 		return s.handleTransientFailure(ctx, workMsg, fmt.Errorf("decrementing subtree counter: %w", err))
 	}
 	return nil
@@ -521,7 +521,7 @@ func (s *SubtreeWorkerService) handleTransientFailure(ctx context.Context, workM
 		// Decrement FIRST so a counter-store hiccup aborts before we publish to
 		// the DLQ — otherwise every redelivery while the counter store is
 		// degraded would publish another DLQ duplicate.
-		if decErr := s.decrementCounterAndMaybeEmit(ctx, workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken); decErr != nil {
+		if decErr := s.decrementCounterAndMaybeEmit(ctx, workMsg.BlockHash, workMsg.OverrideCallbackURL, workMsg.OverrideCallbackToken, workMsg.ReprocessNonce); decErr != nil {
 			s.Logger.Error(
 				"ALERT: subtree counter decrement failed on DLQ path; deferring DLQ publish until counter store recovers",
 				logfields.SubtreeHash(workMsg.SubtreeHash),
@@ -612,15 +612,16 @@ func (s *SubtreeWorkerService) handleTransientFailure(ctx context.Context, workM
 //
 // If no counter store is configured (test/dry-run), this is a no-op.
 //
-// overrideURL/overrideToken are propagated from a /reprocess request. When
-// overrideURL is non-empty, the counter is keyed by (blockHash|overrideURL)
-// so reprocess and live processing don't share state, and the
-// BLOCK_PROCESSED emission targets only that one URL/token.
-func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(ctx context.Context, blockHash, overrideURL, overrideToken string) error {
+// overrideURL/overrideToken/reprocessNonce are propagated from a /reprocess
+// request. When overrideURL is non-empty, the counter is keyed by
+// (blockHash|overrideURL|reprocessNonce) so reprocess and live processing —
+// and two concurrent reprocesses of the same (blockHash, overrideURL) — don't
+// share state, and the BLOCK_PROCESSED emission targets only that one URL/token.
+func (s *SubtreeWorkerService) decrementCounterAndMaybeEmit(ctx context.Context, blockHash, overrideURL, overrideToken, reprocessNonce string) error {
 	if s.subtreeCounter == nil {
 		return nil
 	}
-	counterKey := SubtreeCounterKey(blockHash, overrideURL)
+	counterKey := SubtreeCounterKey(blockHash, overrideURL, reprocessNonce)
 	remaining, blockData, err := s.subtreeCounter.Decrement(counterKey)
 	if err != nil {
 		if errors.Is(err, store.ErrCounterNotFound) {

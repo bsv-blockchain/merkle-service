@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -217,6 +219,16 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// randomHex returns a cryptographically-random hex string of nBytes*2 chars.
+// Used to mint the per-reprocess subtree-counter nonce.
+func randomHex(nBytes int) (string, error) {
+	b := make([]byte, nBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // blockHashRegex is the same shape as txidRegex (64-hex) but named for
 // clarity at the /reprocess call site.
 var blockHashRegex = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
@@ -332,6 +344,16 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	// some entries may persist; the next reprocess request will retry.
 	s.clearReprocessDedup(req.BlockHash, req.CallbackURL, subtreeHashes)
 
+	// Per-request nonce scopes the subtree-counter key so two concurrent
+	// reprocesses of the same (blockHash, callbackURL) get independent counters
+	// and cannot reset each other mid-flight (issue #204).
+	nonce, err := randomHex(16)
+	if err != nil {
+		s.Logger.Error("failed to generate reprocess nonce",
+			logfields.BlockHash(req.BlockHash), "error", err)
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal server error"})
+		return
+	}
 	blockMsg := kafka.BlockMessage{
 		Hash:                  req.BlockHash,
 		Height:                height,
@@ -339,6 +361,7 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 		OverrideCallbackURL:   req.CallbackURL,
 		OverrideCallbackToken: req.CallbackToken,
 		BypassDedup:           true,
+		ReprocessNonce:        nonce,
 	}
 	encoded, err := blockMsg.Encode()
 	if err != nil {

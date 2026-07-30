@@ -292,6 +292,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 			DataHubURL:            resolvedURL,
 			OverrideCallbackURL:   blockMsg.OverrideCallbackURL,
 			OverrideCallbackToken: blockMsg.OverrideCallbackToken,
+			ReprocessNonce:        blockMsg.ReprocessNonce,
 		}
 		data, encErr := workMsg.Encode()
 		if encErr != nil {
@@ -323,7 +324,7 @@ func (p *Processor) handleMessage(ctx context.Context, msg *kafka.Message) error
 	// failure and the consumer falls back to a datahub.
 	blockData := p.buildBlockProcessedData(ctx, blockMsg, meta, resolvedURL)
 
-	counterKey := SubtreeCounterKey(blockMsg.Hash, blockMsg.OverrideCallbackURL)
+	counterKey := SubtreeCounterKey(blockMsg.Hash, blockMsg.OverrideCallbackURL, blockMsg.ReprocessNonce)
 	if p.subtreeCounter != nil {
 		if err := p.subtreeCounter.Init(counterKey, len(encoded), blockData); err != nil {
 			p.Logger.Error(
@@ -546,11 +547,19 @@ func (p *Processor) fetchBlockMetadataWithFailover(
 // Reprocess requests scope by overrideURL so two arcades reprocessing the
 // same block, or a reprocess overlapping with a live announcement, do not
 // share counter state and therefore cannot fire BLOCK_PROCESSED for each
-// other. The counter store treats the key as opaque, so no interface
-// change is needed.
-func SubtreeCounterKey(blockHash, overrideURL string) string {
+// other. The per-request nonce further separates two concurrent reprocesses of
+// the same (blockHash, overrideURL) so an Init overwrite can't reset an
+// in-flight counter (issue #204). The counter store treats the key as opaque,
+// so no interface change is needed.
+//
+// nonce is ignored on the live path (overrideURL == ""): a live announcement
+// carries no nonce and must keep the bare blockHash key it uses today.
+func SubtreeCounterKey(blockHash, overrideURL, nonce string) string {
 	if overrideURL == "" {
 		return blockHash
 	}
-	return blockHash + "|" + overrideURL
+	if nonce == "" {
+		return blockHash + "|" + overrideURL
+	}
+	return blockHash + "|" + overrideURL + "|" + nonce
 }
