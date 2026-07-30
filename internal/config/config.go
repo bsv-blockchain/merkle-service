@@ -144,6 +144,40 @@ type StoreSQLConfig struct {
 // APIConfig holds HTTP API configuration.
 type APIConfig struct {
 	Port int `yaml:"port" mapstructure:"port"`
+
+	// AuthToken is the shared bearer secret required on POST /reprocess (and,
+	// when RequireWatchAuth is true, POST /watch). Empty (the default) disables
+	// inbound auth entirely — the api-server logs a warning once at startup and
+	// serves /reprocess unauthenticated, preserving today's behavior. This
+	// fail-open default lets operators roll auth out in two phases: deploy the
+	// binary that *can* enforce, then set the token to *start* enforcing, so an
+	// arcade client that hasn't provisioned merkle_service.auth_token isn't
+	// broken by the upgrade itself. Source from a Secret via env API_AUTH_TOKEN;
+	// never commit it to config.yaml / the ConfigMap.
+	AuthToken string `yaml:"authToken" mapstructure:"authtoken"`
+
+	// RequireWatchAuth additionally gates POST /watch behind AuthToken. Default
+	// false: /watch is a bounded, idempotent registration upsert with no block
+	// fan-out, so its abuse ceiling is low, and gating it would halt an
+	// un-tokened arcade's transaction propagation (F-024 register-before-
+	// broadcast). Operators wanting defense-in-depth can opt in once every
+	// client has a token. Has no effect while AuthToken is empty.
+	RequireWatchAuth bool `yaml:"requireWatchAuth" mapstructure:"requirewatchauth"`
+
+	// ReprocessRateLimitRps is the sustained token-bucket rate (requests/sec)
+	// admitted on POST /reprocess. <= 0 disables rate limiting. Default 20 — far
+	// above legitimate watchdog volume (~4 concurrent, ~100/tick every 30s), so
+	// this is defense-in-depth behind AuthToken, not a throttle on normal use.
+	ReprocessRateLimitRps float64 `yaml:"reprocessRateLimitRps" mapstructure:"reprocessratelimitrps"`
+
+	// ReprocessBurst is the token-bucket burst size for the /reprocess rate
+	// limiter. Default 100. Ignored when ReprocessRateLimitRps <= 0.
+	ReprocessBurst int `yaml:"reprocessBurst" mapstructure:"reprocessburst"`
+
+	// MaxInflightReprocess caps concurrently-executing POST /reprocess requests
+	// (each probes DataHubs synchronously before returning). <= 0 disables the
+	// cap. Default 16. Excess requests get 429 rather than queueing.
+	MaxInflightReprocess int `yaml:"maxInflightReprocess" mapstructure:"maxinflightreprocess"`
 }
 
 // AerospikeConfig holds Aerospike connection configuration.
@@ -627,6 +661,11 @@ func registerDefaults(v *viper.Viper) {
 
 	// API
 	v.SetDefault("api.port", 8080)
+	v.SetDefault("api.authtoken", "")
+	v.SetDefault("api.requirewatchauth", false)
+	v.SetDefault("api.reprocessratelimitrps", 20.0)
+	v.SetDefault("api.reprocessburst", 100)
+	v.SetDefault("api.maxinflightreprocess", 16)
 
 	// Store
 	v.SetDefault("store.backend", BackendAerospike)
@@ -811,7 +850,12 @@ func bindEnvVars(v *viper.Viper) {
 		"loglevel": "LOG_LEVEL",
 
 		// API
-		"api.port": "API_PORT",
+		"api.port":                  "API_PORT",
+		"api.authtoken":             "API_AUTH_TOKEN", //#nosec G101 -- viper config key → env-var name mapping, not a hardcoded credential value
+		"api.requirewatchauth":      "API_REQUIRE_WATCH_AUTH",
+		"api.reprocessratelimitrps": "API_REPROCESS_RATE_LIMIT_RPS",
+		"api.reprocessburst":        "API_REPROCESS_BURST",
+		"api.maxinflightreprocess":  "API_MAX_INFLIGHT_REPROCESS",
 
 		// Store
 		"store.backend":                          "STORE_BACKEND",
@@ -1047,6 +1091,20 @@ func Load() (*Config, error) {
 				"(e.g. \"collector:4317\"); scheme-prefixed URLs are only understood by the OTEL_EXPORTER_OTLP_ENDPOINT env var",
 				cfg.Telemetry.Endpoint)
 		}
+	}
+
+	// API auth validation. Enabling /watch auth without a token is a
+	// misconfiguration: the middleware fails open when the token is empty, so
+	// the operator would believe /watch is protected while it silently is not.
+	// Fail fast rather than present a false sense of security.
+	if cfg.API.RequireWatchAuth && cfg.API.AuthToken == "" {
+		return nil, fmt.Errorf("invalid api config: api.requireWatchAuth is true but api.authToken is empty " +
+			"(auth fails open with no token, so /watch would be unprotected); set api.authToken or disable api.requireWatchAuth")
+	}
+	// A positive rate limit with a non-positive burst would reject every
+	// request (token bucket can never fill), silently taking /reprocess down.
+	if cfg.API.ReprocessRateLimitRps > 0 && cfg.API.ReprocessBurst <= 0 {
+		return nil, fmt.Errorf("invalid api.reprocessBurst %d: must be > 0 when api.reprocessRateLimitRps > 0", cfg.API.ReprocessBurst)
 	}
 
 	return &cfg, nil

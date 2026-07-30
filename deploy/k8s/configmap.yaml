@@ -11,6 +11,12 @@ data:
 
     api:
       port: 8080
+      # Inbound auth + /reprocess throttling (issue #204). authToken is NOT set
+      # here — it is injected from the api-server-auth Secret via API_AUTH_TOKEN.
+      requireWatchAuth: false
+      reprocessRateLimitRps: 20
+      reprocessBurst: 100
+      maxInflightReprocess: 16
 
     aerospike:
       host: aerospike.merkle-service.svc.cluster.local

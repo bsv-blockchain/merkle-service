@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	_ "embed"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -13,6 +15,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/datahub"
@@ -57,6 +60,12 @@ type Server struct {
 	// Defaults to false (deny). See SetAllowPrivateCallbackIPs and
 	// CallbackConfig.AllowPrivateIPs.
 	allowPrivateCallbackIPs bool
+	// reprocessLimiter token-bucket-throttles POST /reprocess. nil when
+	// api.reprocessRateLimitRps <= 0 (rate limiting disabled). Built in Init.
+	reprocessLimiter *rate.Limiter
+	// reprocessSem caps concurrent in-flight POST /reprocess requests. nil when
+	// api.maxInflightReprocess <= 0 (cap disabled). Built in Init.
+	reprocessSem chan struct{}
 }
 
 // reprocessBlockProducer is the minimal kafka.Producer surface the /reprocess
@@ -162,10 +171,29 @@ func (s *Server) Init(cfg interface{}) error {
 	s.router.Use(metrics.ChiMiddleware)
 	s.router.Use(middleware.Recoverer)
 
+	// Build the /reprocess rate limiter and in-flight cap from config before
+	// registering routes (the per-route middleware close over these).
+	s.initReprocessGuards()
+	// Fail-open notice: with no token configured, /reprocess is unauthenticated.
+	if s.cfg.AuthToken == "" && s.Logger != nil {
+		s.Logger.Warn(
+			"inbound API auth disabled: POST /reprocess is served unauthenticated; set api.authToken (env API_AUTH_TOKEN) to enforce",
+			"setting", "api.authToken",
+		)
+	}
+
 	// Routes
 	s.router.Get("/", handleDashboard)
-	s.router.Post("/watch", s.handleWatch)
-	s.router.Post("/reprocess", s.handleReprocess)
+	// /watch is unauthenticated by default (low abuse ceiling); operators can
+	// opt in via api.requireWatchAuth once every client provisions a token.
+	if s.cfg.RequireWatchAuth {
+		s.router.With(s.authMiddleware).Post("/watch", s.handleWatch)
+	} else {
+		s.router.Post("/watch", s.handleWatch)
+	}
+	// /reprocess: auth first (so unauthorized callers don't consume rate/
+	// in-flight budget), then rate limit, then the concurrency cap.
+	s.router.With(s.authMiddleware, s.reprocessLimit, s.reprocessInflight).Post("/reprocess", s.handleReprocess)
 	s.router.Get("/health", s.handleHealth)
 	s.router.Get("/api/lookup/{txid}", s.handleLookup)
 
@@ -241,6 +269,85 @@ func (s *Server) Health() service.HealthStatus {
 		Status:  status,
 		Details: details,
 	}
+}
+
+// initReprocessGuards builds the /reprocess rate limiter and in-flight cap from
+// config. Called from Init; also exercised directly by tests that drive the
+// middleware without standing up a listener.
+func (s *Server) initReprocessGuards() {
+	if s.cfg.ReprocessRateLimitRps > 0 {
+		s.reprocessLimiter = rate.NewLimiter(rate.Limit(s.cfg.ReprocessRateLimitRps), s.cfg.ReprocessBurst)
+	}
+	if s.cfg.MaxInflightReprocess > 0 {
+		s.reprocessSem = make(chan struct{}, s.cfg.MaxInflightReprocess)
+	}
+}
+
+// authMiddleware enforces a bearer token on the wrapped route. It fails OPEN
+// when s.cfg.AuthToken is empty (auth disabled — see APIConfig.AuthToken and the
+// startup warning in Init): the request passes through untouched. When a token
+// is configured, the presented Authorization: Bearer value is compared in
+// constant time; a missing or mismatched token yields 401 without invoking the
+// handler.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.AuthToken == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		const bearerPrefix = "Bearer "
+		presented := ""
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, bearerPrefix) {
+			presented = strings.TrimPrefix(auth, bearerPrefix)
+		}
+		// ConstantTimeCompare returns 0 (not equal) when lengths differ, so a
+		// missing/short token is rejected without leaking timing information.
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.AuthToken)) != 1 {
+			writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// reprocessLimit token-bucket-throttles the wrapped route, returning 429 when
+// the sustained rate is exceeded. A no-op passthrough when the limiter is
+// disabled (api.reprocessRateLimitRps <= 0).
+func (s *Server) reprocessLimit(next http.Handler) http.Handler {
+	if s.reprocessLimiter == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.reprocessLimiter.Allow() {
+			writeJSON(w, http.StatusTooManyRequests, ErrorResponse{
+				Error: "reprocess rate limit exceeded",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// reprocessInflight caps concurrently-executing requests on the wrapped route
+// using a non-blocking semaphore acquire (modeled on the batch-get semaphore in
+// internal/block/subtree_processor.go): if the cap is reached the request gets
+// 429 immediately rather than queueing. A no-op passthrough when the cap is
+// disabled (api.maxInflightReprocess <= 0).
+func (s *Server) reprocessInflight(next http.Handler) http.Handler {
+	if s.reprocessSem == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case s.reprocessSem <- struct{}{}:
+			defer func() { <-s.reprocessSem }()
+			next.ServeHTTP(w, r)
+		default:
+			writeJSON(w, http.StatusTooManyRequests, ErrorResponse{
+				Error: "too many concurrent reprocess requests",
+			})
+		}
+	})
 }
 
 // middlewareLogger creates a chi middleware that logs requests using slog.
