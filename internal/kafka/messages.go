@@ -63,6 +63,12 @@ type BlockMessage struct {
 	OverrideCallbackURL   string `json:"overrideCallbackUrl,omitempty"`
 	OverrideCallbackToken string `json:"overrideCallbackToken,omitempty"`
 	BypassDedup           bool   `json:"bypassDedup,omitempty"`
+	// ReprocessNonce is a per-request random token set only on reprocess. It is
+	// mixed into the subtree-counter key (see block.SubtreeCounterKey) so two
+	// concurrent /reprocess requests for the same (BlockHash, OverrideCallbackURL)
+	// get independent counters and cannot reset each other's mid-flight. Empty on
+	// live announcements, which keep the bare-BlockHash counter key.
+	ReprocessNonce string `json:"reprocessNonce,omitempty"`
 }
 
 // CallbackTopicMessage is the message published to the callback Kafka topic.
@@ -228,6 +234,10 @@ type SubtreeWorkMessage struct {
 	// not consulted.
 	OverrideCallbackURL   string `json:"overrideCallbackUrl,omitempty"`
 	OverrideCallbackToken string `json:"overrideCallbackToken,omitempty"`
+	// ReprocessNonce is propagated from the originating reprocess BlockMessage so
+	// the subtree worker derives the same nonce-scoped subtree-counter key the
+	// block-processor used to Init the counter. Empty on live announcements.
+	ReprocessNonce string `json:"reprocessNonce,omitempty"`
 }
 
 func (m *SubtreeWorkMessage) Encode() ([]byte, error) {

@@ -51,6 +51,18 @@ spec:
               value: "http://$(HOST_IP):4317"
             - name: TELEMETRY_ENABLED
               value: "false"
+            # Inbound bearer token required on POST /reprocess (issue #204).
+            # Sourced from the api-server-auth Secret. optional: true keeps the
+            # endpoint fail-open (unauthenticated) until an operator creates the
+            # Secret with a real token — matching the phased-rollout design so an
+            # arcade client without merkle_service.auth_token isn't broken by the
+            # upgrade itself. Set the token to START enforcing.
+            - name: API_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: api-server-auth
+                  key: authToken
+                  optional: true
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml
@@ -97,3 +109,23 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+---
+# Placeholder Secret for the POST /reprocess bearer token (issue #204).
+#
+# Committed EMPTY on purpose: the real token must NOT live in a GitOps-tracked
+# manifest. Provision it out-of-band (sealed-secret / external-secrets / manual
+# `kubectl create secret generic api-server-auth --from-literal=authToken=...`)
+# and keep the value in sync with each arcade client's merkle_service.auth_token.
+# While this Secret is absent or the key is empty, the api-server logs a warning
+# and serves /reprocess unauthenticated (fail-open) — see APIConfig.AuthToken.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: api-server-auth
+  namespace: merkle-service
+  labels:
+    app.kubernetes.io/name: api-server
+    app.kubernetes.io/part-of: merkle-service
+type: Opaque
+stringData:
+  authToken: ""

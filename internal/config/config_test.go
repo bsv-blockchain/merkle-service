@@ -26,7 +26,8 @@ func clearConfigEnv(t *testing.T) {
 	envVars := []string{
 		"CONFIG_FILE",
 		"MODE", "LOG_LEVEL",
-		"API_PORT",
+		"API_PORT", "API_AUTH_TOKEN", "API_REQUIRE_WATCH_AUTH",
+		"API_REPROCESS_RATE_LIMIT_RPS", "API_REPROCESS_BURST", "API_MAX_INFLIGHT_REPROCESS",
 		"AEROSPIKE_HOST", "AEROSPIKE_PORT", "AEROSPIKE_NAMESPACE",
 		"AEROSPIKE_SET", "AEROSPIKE_SEEN_SET",
 		"AEROSPIKE_MAX_RETRIES", "AEROSPIKE_RETRY_BASE_MS",
@@ -69,6 +70,21 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.API.Port != 8080 {
 		t.Errorf("API.Port: expected 8080, got %d", cfg.API.Port)
+	}
+	if cfg.API.AuthToken != "" {
+		t.Errorf("API.AuthToken: expected empty default, got %q", cfg.API.AuthToken)
+	}
+	if cfg.API.RequireWatchAuth {
+		t.Errorf("API.RequireWatchAuth: expected false default, got true")
+	}
+	if cfg.API.ReprocessRateLimitRps != 20 {
+		t.Errorf("API.ReprocessRateLimitRps: expected 20, got %v", cfg.API.ReprocessRateLimitRps)
+	}
+	if cfg.API.ReprocessBurst != 100 {
+		t.Errorf("API.ReprocessBurst: expected 100, got %d", cfg.API.ReprocessBurst)
+	}
+	if cfg.API.MaxInflightReprocess != 16 {
+		t.Errorf("API.MaxInflightReprocess: expected 16, got %d", cfg.API.MaxInflightReprocess)
 	}
 
 	// Aerospike defaults
@@ -182,6 +198,11 @@ func TestLoad_EnvOverrides(t *testing.T) {
 
 	_ = os.Setenv("MODE", "microservice")
 	_ = os.Setenv("API_PORT", "9090")
+	_ = os.Setenv("API_AUTH_TOKEN", "s3cret-token")
+	_ = os.Setenv("API_REQUIRE_WATCH_AUTH", "true")
+	_ = os.Setenv("API_REPROCESS_RATE_LIMIT_RPS", "5")
+	_ = os.Setenv("API_REPROCESS_BURST", "42")
+	_ = os.Setenv("API_MAX_INFLIGHT_REPROCESS", "8")
 	_ = os.Setenv("AEROSPIKE_HOST", "aerospike.example.com")
 	_ = os.Setenv("AEROSPIKE_PORT", "3001")
 	_ = os.Setenv("AEROSPIKE_NAMESPACE", "testns")
@@ -226,6 +247,21 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 	if cfg.API.Port != 9090 {
 		t.Errorf("API.Port: expected 9090, got %d", cfg.API.Port)
+	}
+	if cfg.API.AuthToken != "s3cret-token" {
+		t.Errorf("API.AuthToken: expected %q, got %q", "s3cret-token", cfg.API.AuthToken)
+	}
+	if !cfg.API.RequireWatchAuth {
+		t.Errorf("API.RequireWatchAuth: expected true, got false")
+	}
+	if cfg.API.ReprocessRateLimitRps != 5 {
+		t.Errorf("API.ReprocessRateLimitRps: expected 5, got %v", cfg.API.ReprocessRateLimitRps)
+	}
+	if cfg.API.ReprocessBurst != 42 {
+		t.Errorf("API.ReprocessBurst: expected 42, got %d", cfg.API.ReprocessBurst)
+	}
+	if cfg.API.MaxInflightReprocess != 8 {
+		t.Errorf("API.MaxInflightReprocess: expected 8, got %d", cfg.API.MaxInflightReprocess)
 	}
 	if cfg.Aerospike.Host != "aerospike.example.com" {
 		t.Errorf("Aerospike.Host: expected %q, got %q", "aerospike.example.com", cfg.Aerospike.Host)

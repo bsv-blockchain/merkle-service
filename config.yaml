@@ -30,6 +30,27 @@ api:
   # Env: API_PORT
   port: 8080
 
+  # Inbound bearer token required on POST /reprocess (issue #204). Empty
+  # disables auth (fail-open): the server logs a warning and serves /reprocess
+  # unauthenticated. Set it (ideally from a Secret via env) to enforce.
+  # Env: API_AUTH_TOKEN
+  authToken: ""
+
+  # Additionally gate POST /watch behind authToken. Default false — /watch has a
+  # low abuse ceiling and gating it can halt an un-tokened client's tx
+  # propagation. Only enable once every client provisions a token.
+  # Env: API_REQUIRE_WATCH_AUTH
+  requireWatchAuth: false
+
+  # Defense-in-depth throttle on POST /reprocess. Rate is requests/sec; <= 0
+  # disables. Burst is the token-bucket size. maxInflightReprocess caps
+  # concurrent in-flight requests (<= 0 disables). Defaults are far above
+  # legitimate arcade volume.
+  # Env: API_REPROCESS_RATE_LIMIT_RPS / API_REPROCESS_BURST / API_MAX_INFLIGHT_REPROCESS
+  reprocessRateLimitRps: 20
+  reprocessBurst: 100
+  maxInflightReprocess: 16
+
 # ---------------------------------------------------------------------------
 # Store — selects the persistence backend for every non-blob store
 # ---------------------------------------------------------------------------

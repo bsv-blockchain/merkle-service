@@ -20,17 +20,37 @@ import (
 )
 
 // TestSubtreeCounterKey covers the composed-key contract: live announcements
-// keep the bare blockHash key; reprocess scopes by override URL so a
-// concurrent live block and reprocess don't share counter state.
+// keep the bare blockHash key (nonce ignored); reprocess scopes by override URL
+// and per-request nonce so a concurrent live block and reprocess — and two
+// concurrent reprocesses of the same (blockHash, url) — don't share counter
+// state.
 func TestSubtreeCounterKey(t *testing.T) {
 	const blockHash = "abc"
-	if got := SubtreeCounterKey(blockHash, ""); got != blockHash {
+	const url = "https://arcade.example/cb"
+
+	// Live path: bare blockHash, and the nonce is ignored (a live announcement
+	// carries no override URL and no nonce).
+	if got := SubtreeCounterKey(blockHash, "", ""); got != blockHash {
 		t.Errorf("live key: got %q want %q", got, blockHash)
 	}
-	const url = "https://arcade.example/cb"
-	want := blockHash + "|" + url
-	if got := SubtreeCounterKey(blockHash, url); got != want {
-		t.Errorf("reprocess key: got %q want %q", got, want)
+	if got := SubtreeCounterKey(blockHash, "", "ignored"); got != blockHash {
+		t.Errorf("live key must ignore nonce: got %q want %q", got, blockHash)
+	}
+
+	// Reprocess without a nonce keeps the legacy blockHash|url key (back-compat
+	// for any in-flight message predating the nonce field).
+	if got, want := SubtreeCounterKey(blockHash, url, ""), blockHash+"|"+url; got != want {
+		t.Errorf("nonce-free reprocess key: got %q want %q", got, want)
+	}
+
+	// Reprocess with a nonce appends it, and distinct nonces yield distinct keys.
+	got1 := SubtreeCounterKey(blockHash, url, "n1")
+	got2 := SubtreeCounterKey(blockHash, url, "n2")
+	if want := blockHash + "|" + url + "|" + "n1"; got1 != want {
+		t.Errorf("nonced reprocess key: got %q want %q", got1, want)
+	}
+	if got1 == got2 {
+		t.Errorf("distinct nonces must produce distinct keys, both were %q", got1)
 	}
 }
 
