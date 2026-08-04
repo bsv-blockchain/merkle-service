@@ -286,7 +286,7 @@ func (s *Server) initReprocessGuards() {
 // authMiddleware enforces a bearer token on the wrapped route. It fails OPEN
 // when s.cfg.AuthToken is empty (auth disabled — see APIConfig.AuthToken and the
 // startup warning in Init): the request passes through untouched. When a token
-		// is configured, the presented Authorization: Bearer <token> value is compared in
+// is configured, the presented Authorization: Bearer <token> value is compared in
 // constant time; a missing or mismatched token yields 401 without invoking the
 // handler.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
