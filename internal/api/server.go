@@ -300,8 +300,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, bearerPrefix) {
 			presented = strings.TrimPrefix(auth, bearerPrefix)
 		}
-		// ConstantTimeCompare returns 0 (not equal) when lengths differ, so a
-		// missing/short token is rejected without leaking timing information.
+		// ConstantTimeCompare returns 0 (not equal) when lengths differ; it avoids timing leaks about
+		// token contents, but still reveals whether the lengths match.
 		if subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.AuthToken)) != 1 {
 			writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized"})
 			return
