@@ -6,7 +6,8 @@ func TestKafkaConfig_TopicRetention(t *testing.T) {
 	k := KafkaConfig{
 		SubtreeTopic:        "subtree",
 		BlockTopic:          "block",
-		CallbackTopic:       "callback",
+		CallbackTopic:       topicCallback,
+		CallbackSeenTopic:   topicCallbackSeen,
 		CallbackDLQTopic:    "callback-dlq",
 		SubtreeDLQTopic:     "subtree-dlq",
 		SubtreeWorkTopic:    "subtree-work",
@@ -15,7 +16,10 @@ func TestKafkaConfig_TopicRetention(t *testing.T) {
 
 	t.Run("defaults: 6h for work topics, 7d for DLQs", func(t *testing.T) {
 		m := k.TopicRetention()
-		for _, topic := range []string{"subtree", "block", "callback", "subtree-work"} {
+		// callback-seen is a work topic like the rest: 6h, not the 7d DLQ
+		// window. Omitting it would leave a fresh cluster's broker default
+		// (15 min on dev-ovh-1) silently expiring parked SEEN callbacks.
+		for _, topic := range []string{"subtree", "block", topicCallback, topicCallbackSeen, "subtree-work"} {
 			if got := m[topic]; got != defaultTopicRetentionMs {
 				t.Errorf("%s = %d, want %d", topic, got, defaultTopicRetentionMs)
 			}

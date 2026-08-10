@@ -256,6 +256,12 @@ func NewProducer(brokers []string, topic string, partitions map[string]int32, re
 // request/consumer context being canceled should pass
 // context.WithoutCancel(ctx) — this keeps the trace context while dropping
 // cancellation, so a canceled caller can't drop a durable hand-off.
+// Topic returns the topic this producer publishes to. Exposed so callers and
+// tests can assert routing (e.g. that SEEN callbacks are bound to the
+// dedicated SEEN topic rather than the shared 'callback' topic) without
+// reaching into the struct.
+func (p *Producer) Topic() string { return p.topic }
+
 func (p *Producer) Publish(ctx context.Context, key string, value []byte) error {
 	start := time.Now()
 	partition, offset, err := p.pub.Produce(ctx, key, value)

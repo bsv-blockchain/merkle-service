@@ -232,7 +232,35 @@ kafka:
   # Env: KAFKA_CALLBACK_TOPIC
   callbackTopic: callback
 
-  # Dead-letter queue topic for permanently failed callback deliveries.
+  # OPTIONAL dedicated topic for SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES.
+  #
+  # Empty (the default) keeps every callback type on `callbackTopic` — the
+  # pre-split behavior. Set it (e.g. `callback-seen`) and SEEN callbacks get
+  # their own topic AND their own consumer group, so they are no longer queued
+  # behind the ~545 KB STUMP / BLOCK_PROCESSED deliveries that share the
+  # 1-partition `callback` topic. `callback` itself is untouched, so the
+  # BLOCK_PROCESSED-after-STUMPs ordering barrier still holds.
+  #
+  # ROLLOUT ORDER MATTERS: deploy the consumer (callback-delivery, which
+  # creates and subscribes to the topic) BEFORE the producer (subtree-fetcher)
+  # starts publishing to it, or SEEN callbacks sit unconsumed and watched
+  # transactions strand at ACCEPTED_BY_NETWORK. Rollback is a config flip back
+  # to empty.
+  # Env: KAFKA_CALLBACK_SEEN_TOPIC
+  callbackSeenTopic: ""
+
+  # Partition count for callbackSeenTopic. Ignored entirely when
+  # callbackSeenTopic is empty — it can never widen `callback`. SEEN callbacks
+  # have no cross-message ordering requirement: a SEEN_ON_NETWORK and a
+  # SEEN_MULTIPLE_NODES for the same txid can key on different subtree hashes
+  # and so land on different partitions, but arcade's status lattice refuses to
+  # let a lower status supersede a higher one, making the reorder a no-op.
+  # Env: KAFKA_CALLBACK_SEEN_PARTITIONS
+  callbackSeenPartitions: 12
+
+  # Dead-letter queue topic for permanently failed callback deliveries. Shared
+  # by both callback topics — a dead letter is a dead letter regardless of
+  # which topic it arrived on.
   # Env: KAFKA_CALLBACK_DLQ_TOPIC
   callbackDlqTopic: callback-dlq
 
@@ -257,7 +285,8 @@ kafka:
   # starts if the topic already exists narrower (partition counts only ever
   # increase). The 'block' and 'callback' topics are intentionally fixed at 1
   # partition and are not configurable here — 'block' is low-rate, and 'callback'
-  # depends on single-partition ordering to keep BLOCK_PROCESSED behind its
+  # (which after the SEEN split carries only STUMP / BLOCK_PROCESSED) depends on
+  # single-partition ordering to keep BLOCK_PROCESSED behind its
   # STUMPs. Widening 'callback' stays deferred until the expectedSubtreeIndices
   # completeness check is verified end-to-end in arcade — rollout step 4 of
   # docs/block-processed-completeness.md (which supersedes the earlier

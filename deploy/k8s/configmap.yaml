@@ -38,6 +38,22 @@ data:
       subtreeTopic: subtree
       blockTopic: block
       callbackTopic: callback
+      # Dedicated topic for SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES so the heavy
+      # STUMP / BLOCK_PROCESSED traffic on the 1-partition `callback` topic
+      # can't head-of-line-block them. Leave empty (or omit) to keep every
+      # callback type on `callback` — that is the pre-split behavior and the
+      # rollback path.
+      #
+      # Requires a `callback-seen` topic in the cluster. The callback-delivery
+      # service creates it on start, but where topics are GitOps-managed
+      # (Redpanda Topic CRDs) add it there first with
+      # max.message.bytes=10485760 — a 5000-txid batched SEEN chunk is ~335 KB
+      # and the 1 MiB broker default would reject the larger ones.
+      #
+      # Deploy callback-delivery (the consumer) BEFORE subtree-fetcher (the
+      # producer) picks this up, or SEEN callbacks pile up unconsumed.
+      callbackSeenTopic: callback-seen
+      callbackSeenPartitions: 12
       callbackDlqTopic: callback-dlq
       subtreeWorkTopic: subtree-work
       consumerGroup: merkle-service
