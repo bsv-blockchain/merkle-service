@@ -723,6 +723,12 @@ func (s *SubtreeWorkerService) publishSubtreeCallbacks(ctx context.Context, work
 			SubtreeHash:   workMsg.SubtreeHash,
 			SubtreeIndex:  workMsg.SubtreeIndex,
 			StumpRef:      stumpRef,
+			// A /reprocess (OverrideCallbackURL != "") is an explicit
+			// re-emit request whose callbacks must bypass the delivery-side
+			// dedup set, or a re-run after a reorg would be silently
+			// suppressed and never reach the requesting arcade (#208). Live
+			// announcements leave this false so normal dedup is unchanged.
+			BypassDedup: workMsg.OverrideCallbackURL != "",
 		}
 		data, encErr := msg.Encode()
 		if encErr != nil {
@@ -845,6 +851,12 @@ func emitBlockProcessedCallbacks(
 			CallbackToken: entry.Token,
 			Type:          kafka.CallbackBlockProcessed,
 			BlockHash:     blockHash,
+			// A /reprocess (overrideURL != "") must force re-delivery past
+			// the delivery-side dedup set — otherwise the BLOCK_PROCESSED
+			// from a post-reorg re-run is dropped as a duplicate of the
+			// original and arcade never rebuilds the block's BUMP (#208).
+			// Live fan-out (overrideURL == "") leaves this false.
+			BypassDedup: overrideURL != "",
 		}
 		// Attach the block-level enrichment (merkle root, subtree list, coinbase
 		// BUMP) when the producer captured it. Absent for blocks processed

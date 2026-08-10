@@ -784,6 +784,69 @@ func TestProcessDelivery_DedupSkipLogsInfo(t *testing.T) {
 	}
 }
 
+// TestProcessDelivery_BypassDedupForcesReDelivery pins issue #208: a
+// /reprocess-originated callback (BypassDedup=true) must be delivered even
+// when the dedup set already holds its key — otherwise a post-reorg re-run
+// is silently suppressed and arcade never rebuilds the block's BUMP. A normal
+// duplicate (BypassDedup=false) with the same key present must still be
+// skipped. The forced delivery must also re-record the key so subsequent
+// normal duplicates stay suppressed.
+func TestProcessDelivery_BypassDedupForcesReDelivery(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := defaultTestConfig()
+
+	// Baseline: a normal duplicate (dedup key present) is still skipped — no
+	// HTTP request, no new record.
+	dsNormal, _, _ := newTestDeliveryService(t, cfg, server.Client())
+	normalStore := &mockDedupStore{exists: true}
+	dsNormal.dedupStore = normalStore
+	normalMsg := &kafka.CallbackTopicMessage{
+		CallbackURL: server.URL + "/callback",
+		Type:        kafka.CallbackBlockProcessed,
+		BlockHash:   testBlockHash,
+	}
+	if err := dsNormal.processDelivery(context.Background(), normalMsg); err != nil {
+		t.Fatalf("processDelivery (normal) returned error: %v", err)
+	}
+	if got := requestCount.Load(); got != 0 {
+		t.Fatalf("normal duplicate: expected 0 HTTP requests (skipped), got %d", got)
+	}
+	if normalStore.recordCalls != 0 {
+		t.Errorf("normal duplicate: expected 0 Record calls, got %d", normalStore.recordCalls)
+	}
+
+	// Reprocess: same key present, but BypassDedup=true forces delivery and
+	// still records the key on success.
+	dsForce, _, _ := newTestDeliveryService(t, cfg, server.Client())
+	forceStore := &mockDedupStore{exists: true}
+	dsForce.dedupStore = forceStore
+	forceMsg := &kafka.CallbackTopicMessage{
+		CallbackURL: server.URL + "/callback",
+		Type:        kafka.CallbackBlockProcessed,
+		BlockHash:   testBlockHash,
+		BypassDedup: true,
+	}
+	before := callbackCount(metrics.OutcomeDelivered)
+	if err := dsForce.processDelivery(context.Background(), forceMsg); err != nil {
+		t.Fatalf("processDelivery (bypass) returned error: %v", err)
+	}
+	if got := requestCount.Load(); got != 1 {
+		t.Fatalf("reprocess: expected 1 HTTP request (forced delivery), got %d", got)
+	}
+	if delta := callbackCount(metrics.OutcomeDelivered) - before; delta != 1 {
+		t.Errorf("reprocess: expected delivered counter delta=1, got %d", delta)
+	}
+	if forceStore.recordCalls != 1 {
+		t.Errorf("reprocess: expected the forced delivery to re-record the dedup key (1 Record call), got %d", forceStore.recordCalls)
+	}
+}
+
 func TestBuildIdempotencyKey(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1006,6 +1069,9 @@ func TestDeliverCallback_BlockProcessedPayload(t *testing.T) {
 // mockDedupStore implements CallbackDeduper for testing.
 type mockDedupStore struct {
 	exists bool
+	// recordCalls counts Record invocations so a test can assert that a
+	// forced (BypassDedup) delivery still records its dedup key on success.
+	recordCalls int
 }
 
 func (m *mockDedupStore) Exists(txid, callbackURL, statusType string) (bool, error) {
@@ -1013,5 +1079,6 @@ func (m *mockDedupStore) Exists(txid, callbackURL, statusType string) (bool, err
 }
 
 func (m *mockDedupStore) Record(txid, callbackURL, statusType string, ttl time.Duration) error {
+	m.recordCalls++
 	return nil
 }
