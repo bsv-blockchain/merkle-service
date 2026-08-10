@@ -431,10 +431,17 @@ callback:
   # Env: CALLBACK_TIMEOUT_SEC
   timeoutSec: 10
 
-  # Number of unique subtrees a txid must appear in before emitting
-  # a SEEN_MULTIPLE_NODES callback. Tracks network propagation confidence.
+  # Deprecated unique-subtree count (ignored). Prefer seenScoreThreshold.
   # Env: CALLBACK_SEEN_THRESHOLD
   seenThreshold: 3
+
+  # Tip-path window size for mining-node weights (last W blocks).
+  # Env: CALLBACK_SEEN_WINDOW_BLOCKS
+  seenWindowBlocks: 100
+
+  # Weighted score threshold (sum of node block-counts) for SEEN_MULTIPLE_NODES.
+  # Env: CALLBACK_SEEN_SCORE_THRESHOLD
+  seenScoreThreshold: 51
 
   # TTL in seconds for callback delivery deduplication records in Aerospike.
   # After expiry, a very late duplicate could be redelivered. Default: 86400 (24 hours).

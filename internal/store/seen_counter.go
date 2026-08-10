@@ -5,23 +5,26 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	"time"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 	astypes "github.com/aerospike/aerospike-client-go/v8/types"
 )
 
 const (
-	seenSubtreesBin    = "subtrees"
+	seenPeersBin       = "peers" // CDT map peerID → weight
 	seenThresholdFired = "tfired"
 
-	// seenCASMaxAttempts caps the generation-checked retry loop. Real-world
-	// contention is bounded by the number of concurrent subtree workers per
-	// txid; 32 is generous and keeps a runaway loop from holding a connection.
+	// seenCASMaxAttempts caps the generation-checked retry loop for the
+	// exactly-once threshold transition (F-045).
 	seenCASMaxAttempts = 32
 )
 
-// aerospikeSeenCounter is the Aerospike-backed SeenCounterStore implementation.
+// aerospikeSeenCounter is the Aerospike-backed peer-weighted SeenCounterStore.
+//
+// Hot path (BatchAddPeer): one BatchOperate per chunk that MapPut(create-only)
+// the peer and reads back the peers map + tfired. Score is summed client-side
+// from the tiny peer map (≈5 miners). Phase-2 generation-CAS only runs for
+// candidates that just crossed the score threshold (F-045).
 type aerospikeSeenCounter struct {
 	client      *AerospikeClient
 	setName     string
@@ -44,30 +47,23 @@ func NewSeenCounterStore(client *AerospikeClient, setName string, threshold, max
 	}
 }
 
-// Increment idempotently records that a txid was seen in a specific subtree
-// and atomically transitions the threshold-fired flag from false to true the
-// first time the unique-subtree count reaches the threshold. ThresholdReached
-// is true only on the single call that observes that 0->1 transition.
-//
-// The atomic transition is implemented as a generation-checked
-// read-modify-write: each attempt reads the record (capturing generation),
-// computes the next state locally, and issues an Operate with
-// GenerationPolicy=EXPECT_GEN_EQUAL so a concurrent writer that bumped the
-// generation in between forces a retry. F-045: previously the threshold check
-// and the marker write were two unrelated operations, so two concurrent
-// observations could both pass `alreadyFired == false` and emit duplicate
-// SEEN_MULTIPLE_NODES callbacks.
-func (s *aerospikeSeenCounter) Increment(txid, subtreeID string) (*IncrementResult, error) {
+func (s *aerospikeSeenCounter) Threshold() int { return s.threshold }
+
+// AddPeer records peerID with weight if not already present, with generation-CAS
+// for the exactly-once threshold transition.
+func (s *aerospikeSeenCounter) AddPeer(txid, peerID string, weight int) (*IncrementResult, error) {
+	if weight <= 0 || peerID == "" {
+		return &IncrementResult{NewCount: 0, ThresholdReached: false}, nil
+	}
+
 	key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create key: %w", err)
 	}
 
 	for attempt := 0; attempt < seenCASMaxAttempts; attempt++ {
-		// Step 1: read current state + generation. Treat KEY_NOT_FOUND as a
-		// brand-new record (generation 0, empty subtree list, fired=0).
 		readPolicy := s.client.ReadPolicy()
-		current, err := s.client.Client().Get(readPolicy, key, seenSubtreesBin, seenThresholdFired)
+		current, err := s.client.Client().Get(readPolicy, key, seenPeersBin, seenThresholdFired)
 		if err != nil {
 			var asErr as.Error
 			if errors.As(err, &asErr) && asErr.Matches(astypes.KEY_NOT_FOUND_ERROR) {
@@ -78,40 +74,26 @@ func (s *aerospikeSeenCounter) Increment(txid, subtreeID string) (*IncrementResu
 		}
 
 		var (
-			gen           uint32
-			priorFired    bool
-			currentMember bool
-			currentSize   int
+			gen        uint32
+			priorFired bool
+			peers      map[string]int
 		)
 		if current != nil {
 			gen = current.Generation
 			if firedVal, ok := current.Bins[seenThresholdFired].(int); ok && firedVal == 1 {
 				priorFired = true
 			}
-			if list, ok := current.Bins[seenSubtreesBin].([]interface{}); ok {
-				currentSize = len(list)
-				for _, v := range list {
-					if str, ok := v.(string); ok && str == subtreeID {
-						currentMember = true
-						break
-					}
-				}
-			}
+			peers = peersMapFromBin(current.Bins[seenPeersBin])
 		}
-
-		// Step 2: compute next state locally. AddUnique semantics: only count
-		// distinct subtreeIDs.
-		newSize := currentSize
-		if !currentMember {
-			newSize++
+		if peers == nil {
+			peers = make(map[string]int, 4)
 		}
-		shouldFire := !priorFired && newSize >= s.threshold
+		if _, ok := peers[peerID]; !ok {
+			peers[peerID] = weight
+		}
+		score := sumPeerWeights(peers)
+		shouldFire := !priorFired && score >= s.threshold
 
-		// Step 3: write next state with EXPECT_GEN_EQUAL. We always update the
-		// subtree list (idempotent ListAppend with AddUnique|NoFail handles
-		// re-runs) and only set tfired=1 when this attempt observed the
-		// 0->threshold transition. New records skip the generation check via
-		// CREATE_ONLY so two concurrent first-writers also resolve cleanly.
 		wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
 		if current == nil {
 			wp.RecordExistsAction = as.CREATE_ONLY
@@ -121,85 +103,39 @@ func (s *aerospikeSeenCounter) Increment(txid, subtreeID string) (*IncrementResu
 			wp.Generation = gen
 		}
 
-		listPolicy := as.NewListPolicy(as.ListOrderUnordered, as.ListWriteFlagsAddUnique|as.ListWriteFlagsNoFail)
-		ops := []*as.Operation{
-			as.ListAppendWithPolicyOp(listPolicy, seenSubtreesBin, subtreeID),
-		}
+		bins := as.BinMap{seenPeersBin: peersToASMap(peers)}
 		if shouldFire {
-			ops = append(ops, as.PutOp(as.NewBin(seenThresholdFired, 1)))
+			bins[seenThresholdFired] = 1
+		} else if priorFired {
+			bins[seenThresholdFired] = 1
 		}
 
-		_, err = s.client.Client().Operate(wp, key, ops...)
+		err = s.client.Client().Put(wp, key, bins)
 		if err != nil {
 			var asErr as.Error
-			if errors.As(err, &asErr) {
-				// Generation mismatch (concurrent writer beat us) or
-				// CREATE_ONLY collision (two concurrent first-writers): retry
-				// with the now-current state.
-				if asErr.Matches(astypes.GENERATION_ERROR) || asErr.Matches(astypes.KEY_EXISTS_ERROR) {
-					// Tiny backoff to avoid hot-spinning on pathological contention.
-					if s.retryBaseMs > 0 {
-						time.Sleep(time.Duration(s.retryBaseMs) * time.Millisecond)
-					}
-					continue
-				}
+			if errors.As(err, &asErr) &&
+				(asErr.Matches(astypes.GENERATION_ERROR) || asErr.Matches(astypes.KEY_EXISTS_ERROR)) {
+				continue // retry
 			}
 			return nil, fmt.Errorf("failed to write seen counter: %w", err)
 		}
-
-		return &IncrementResult{
-			NewCount:         newSize,
-			ThresholdReached: shouldFire,
-		}, nil
+		return &IncrementResult{NewCount: score, ThresholdReached: shouldFire}, nil
 	}
-
-	return nil, fmt.Errorf("seen counter CAS exhausted after %d attempts (txid=%s)", seenCASMaxAttempts, txid)
+	return nil, fmt.Errorf("seen counter CAS exhausted for %s after %d attempts", txid, seenCASMaxAttempts)
 }
 
-// Threshold returns the configured threshold.
-func (s *aerospikeSeenCounter) Threshold() int {
-	return s.threshold
-}
-
-// BatchIncrement records that every txid in txids was seen in subtreeID,
-// replacing the sequential 2-RTT-per-txid Increment loop that capped the SEEN
-// path at ~500-1000 txids/s per instance (throughput review F-4).
-//
-// txids are split into <=aerospikeBatchChunkSize chunks, and up to
-// batchChunkConcurrency chunks are processed concurrently. Each chunk
-// (batchIncrementChunk) is a SINGLE batch round-trip that both appends
-// subtreeID to every txid's unique-subtree list AND reads back the count and
-// threshold-fired flag (the list-append op returns the new size, so no separate
-// read-back is needed). Any txid that has just reached the threshold without the
-// fired flag set then goes through the generation-CAS Increment, preserving the
-// F-045 exactly-once guarantee: when several workers race, exactly one observes
-// ThresholdReached=true. That fire path is empty in steady state.
-//
-// Chunks cover disjoint txids, so each accumulates into its own local result map
-// (and its own CAS calls on distinct keys) merged under a mutex;
-// batchChunkConcurrency<=1 keeps the whole thing serial.
-//
-// Returns a result for every txid that succeeded plus the first error
-// encountered (F-058 partial-success contract: the caller emits callbacks for
-// returned results and surfaces the error so the subtree is redelivered; all
-// operations here are idempotent under re-runs).
-func (s *aerospikeSeenCounter) BatchIncrement(txids []string, subtreeID string) (map[string]*IncrementResult, error) {
+// BatchAddPeer applies peer/weight to many txids (subtree-fetcher hot path).
+func (s *aerospikeSeenCounter) BatchAddPeer(txids []string, peerID string, weight int) (map[string]*IncrementResult, error) {
 	results := make(map[string]*IncrementResult, len(txids))
-	if len(txids) == 0 {
+	if weight <= 0 || peerID == "" || len(txids) == 0 {
 		return results, nil
 	}
 
-	// Chunks carry disjoint txid sets, so each runs into its own local result map
-	// (and its own phase-2 generation-CAS calls on distinct keys) and is merged
-	// under a mutex. batchChunkConcurrency<=1 keeps this fully serial.
 	var mu sync.Mutex
 	err := forEachChunkConcurrent(txids, s.client.batchChunkConcurrency,
 		func(chunk []string) error {
 			local := make(map[string]*IncrementResult, len(chunk))
-			chunkErr := s.batchIncrementChunk(chunk, subtreeID, local)
-			// Merge partial results even on error: batchIncrementChunk follows the
-			// F-058 partial-success contract (populate what succeeded, surface the
-			// first error for redelivery).
+			chunkErr := s.batchAddPeerChunk(chunk, peerID, weight, local)
 			mu.Lock()
 			for k, v := range local {
 				results[k] = v
@@ -210,43 +146,27 @@ func (s *aerospikeSeenCounter) BatchIncrement(txids []string, subtreeID string) 
 	return results, err
 }
 
-// batchIncrementChunk processes one <=aerospikeBatchChunkSize chunk in a SINGLE
-// batch round-trip. Per txid it issues a BatchOperate that both (a) idempotently
-// appends subtreeID to the unique-subtree list and (b) reads the threshold-fired
-// flag. The list-append operation itself returns the resulting list size
-// ("Server returns list size on bin name"), so the post-count is known without a
-// second read-back BatchGet — halving the per-chunk RTTs versus the prior
-// append-then-BatchGet pair.
-//
-// Phase 2 (the exactly-once 0->threshold transition) is unchanged: any txid that
-// has just reached the threshold without the fired flag set is delegated to the
-// generation-CAS Increment, preserving the F-045 guarantee that exactly one
-// concurrent observer reports ThresholdReached=true.
-func (s *aerospikeSeenCounter) batchIncrementChunk(txids []string, subtreeID string, results map[string]*IncrementResult) error {
-	listPolicy := as.NewListPolicy(as.ListOrderUnordered, as.ListWriteFlagsAddUnique|as.ListWriteFlagsNoFail)
+func (s *aerospikeSeenCounter) batchAddPeerChunk(txids []string, peerID string, weight int, results map[string]*IncrementResult) error {
+	mapPolicy := as.NewMapPolicyWithFlags(as.MapOrder.UNORDERED, as.MapWriteFlagsCreateOnly|as.MapWriteFlagsNoFail)
 	batchRecs := make([]as.BatchRecordIfc, len(txids))
 	for i, txid := range txids {
 		key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
 		if err != nil {
 			return fmt.Errorf("failed to create key for %s: %w", txid, err)
 		}
-		// Two ops in one record transaction: the append returns the new
-		// unique-subtree count on seenSubtreesBin; GetBinOp reads only the fired
-		// flag (a different bin, so its result never collides with the append's).
 		batchRecs[i] = as.NewBatchWrite(
 			nil, key,
-			as.ListAppendWithPolicyOp(listPolicy, seenSubtreesBin, subtreeID),
+			as.MapPutOp(mapPolicy, seenPeersBin, peerID, weight),
+			as.GetBinOp(seenPeersBin),
 			as.GetBinOp(seenThresholdFired),
 		)
 	}
 
 	bp := s.client.BatchPolicy(s.maxRetries, s.retryBaseMs)
 	if err := s.client.Client().BatchOperate(bp, batchRecs); err != nil {
-		return fmt.Errorf("batch append/read seen counters: %w", err)
+		return fmt.Errorf("batch add peer seen counters: %w", err)
 	}
 
-	// Per-key failures: skip those txids (no result entry) and surface the first
-	// error; the caller's redelivery re-runs the whole idempotent batch.
 	var firstErr error
 	for i, br := range batchRecs {
 		rec := br.BatchRec()
@@ -263,26 +183,18 @@ func (s *aerospikeSeenCounter) batchIncrementChunk(txids []string, subtreeID str
 			continue
 		}
 
-		// AddUnique|NoFail: a duplicate subtreeID leaves the count unchanged, so
-		// the returned size is the current unique-subtree count either way.
-		size := 0
-		if v, ok := rec.Record.Bins[seenSubtreesBin].(int); ok {
-			size = v
-		}
+		score := sumPeerWeights(peersMapFromBin(extractPeersBin(rec.Record.Bins[seenPeersBin])))
 		fired := false
 		if firedVal, ok := rec.Record.Bins[seenThresholdFired].(int); ok && firedVal == 1 {
 			fired = true
 		}
 
-		if size >= s.threshold && !fired {
-			// Phase 2: candidate for the exactly-once threshold transition.
-			// Delegate to the generation-CAS Increment (idempotent re-append +
-			// atomic 0->1 flip); if a concurrent worker fires first, this call
-			// returns ThresholdReached=false (F-045).
-			res, incErr := s.Increment(txids[i], subtreeID)
-			if incErr != nil {
+		if score >= s.threshold && !fired {
+			// Phase 2: generation-CAS fire (F-045).
+			res, err := s.AddPeer(txids[i], peerID, weight)
+			if err != nil {
 				if firstErr == nil {
-					firstErr = fmt.Errorf("firing threshold for %s: %w", txids[i], incErr)
+					firstErr = fmt.Errorf("firing threshold for %s: %w", txids[i], err)
 				}
 				continue
 			}
@@ -290,23 +202,16 @@ func (s *aerospikeSeenCounter) batchIncrementChunk(txids []string, subtreeID str
 			continue
 		}
 
-		results[txids[i]] = &IncrementResult{NewCount: size, ThresholdReached: false}
+		results[txids[i]] = &IncrementResult{NewCount: score, ThresholdReached: false}
 	}
-
 	return firstErr
 }
 
-// BatchDelete removes the counters for txids in chunked batch round-trips —
-// the mine-time cleanup: a counter tracks pre-mine propagation, so once its
-// txid is in a block the record is dead weight. Missing keys are not an
-// error (idempotent, safe on work-item redelivery); per-key failures surface
-// as the first error so the caller can log, while the rest of the batch
-// still deletes.
+// BatchDelete removes seen counters at mine time (unchanged contract).
 func (s *aerospikeSeenCounter) BatchDelete(txids []string) error {
 	if len(txids) == 0 {
 		return nil
 	}
-
 	return forEachChunkConcurrent(txids, s.client.batchChunkConcurrency,
 		func(chunk []string) error {
 			batchRecs := make([]as.BatchRecordIfc, 0, len(chunk))
@@ -317,12 +222,10 @@ func (s *aerospikeSeenCounter) BatchDelete(txids []string) error {
 				}
 				batchRecs = append(batchRecs, as.NewBatchDelete(nil, key))
 			}
-
 			bp := s.client.BatchPolicy(s.maxRetries, s.retryBaseMs)
 			if err := s.client.Client().BatchOperate(bp, batchRecs); err != nil {
 				return fmt.Errorf("batch delete seen counters: %w", err)
 			}
-
 			var firstErr error
 			for i, br := range batchRecs {
 				rec := br.BatchRec()
@@ -332,4 +235,78 @@ func (s *aerospikeSeenCounter) BatchDelete(txids []string) error {
 			}
 			return firstErr
 		})
+}
+
+func extractPeersBin(v interface{}) interface{} {
+	switch t := v.(type) {
+	case []interface{}:
+		for i := len(t) - 1; i >= 0; i-- {
+			switch t[i].(type) {
+			case map[interface{}]interface{}, map[string]interface{}:
+				return t[i]
+			}
+		}
+		return nil
+	default:
+		return v
+	}
+}
+
+func peersMapFromBin(v interface{}) map[string]int {
+	out := make(map[string]int)
+	switch m := v.(type) {
+	case map[interface{}]interface{}:
+		for k, val := range m {
+			ks, ok := k.(string)
+			if !ok {
+				continue
+			}
+			out[ks] = asInt(val)
+		}
+	case map[string]interface{}:
+		for k, val := range m {
+			out[k] = asInt(val)
+		}
+	case map[string]int:
+		for k, val := range m {
+			out[k] = val
+		}
+	}
+	return out
+}
+
+func peersToASMap(peers map[string]int) map[interface{}]interface{} {
+	m := make(map[interface{}]interface{}, len(peers))
+	for k, v := range peers {
+		m[k] = v
+	}
+	return m
+}
+
+func sumPeerWeights(peers map[string]int) int {
+	score := 0
+	for _, w := range peers {
+		score += w
+	}
+	return score
+}
+
+func asInt(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		if n > int64(^uint(0)>>1) || n < 0 {
+			return 0
+		}
+		return int(n)
+	case uint64:
+		// Peer weights and block heights are small; reject absurd values.
+		if n > uint64(^uint(0)>>1) {
+			return 0
+		}
+		return int(n)
+	default:
+		return 0
+	}
 }

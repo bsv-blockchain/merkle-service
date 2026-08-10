@@ -6,6 +6,7 @@ import (
 
 	"github.com/bsv-blockchain/merkle-service/internal/config"
 	"github.com/bsv-blockchain/merkle-service/internal/metrics"
+	"github.com/bsv-blockchain/merkle-service/internal/nodes"
 	"github.com/bsv-blockchain/merkle-service/internal/service"
 	"github.com/bsv-blockchain/merkle-service/internal/store"
 	_ "github.com/bsv-blockchain/merkle-service/internal/store/sql" // register SQL backend
@@ -35,7 +36,15 @@ func main() {
 	}
 	defer func() { _ = registry.Close() }()
 
-	processor := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree, logger)
+	nodeRegistry, err := nodes.NewRegistry(registry.BlockAttribution, cfg.Callback.SeenWindowBlocks, logger)
+	if err != nil {
+		log.Fatal("failed to create node registry: ", err)
+	}
+	// Fetcher replicas do not process blocks; refresh tip weights from the shared store.
+	nodeRegistry.StartBackgroundRefresh(0)
+	defer nodeRegistry.StopBackgroundRefresh()
+
+	processor := subtree.NewProcessor(cfg, registry.Registration, registry.SeenCounter, registry.Subtree, nodeRegistry, registry.SubtreeAttribution, logger)
 
 	var metricsSrv *metrics.Server
 	if cfg.Metrics.Enabled {

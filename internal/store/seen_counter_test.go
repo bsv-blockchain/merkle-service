@@ -28,7 +28,7 @@ func TestSeenCounter_BasicIncrement(t *testing.T) {
 
 	txid := fmt.Sprintf("tx-basic-%d", os.Getpid())
 	for i := 1; i <= 5; i++ {
-		res, err := store.Increment(txid, fmt.Sprintf("subtree-%d", i))
+		res, err := store.AddPeer(txid, fmt.Sprintf("subtree-%d", i), 1)
 		if err != nil {
 			t.Fatalf("Increment %d: %v", i, err)
 		}
@@ -43,7 +43,7 @@ func TestSeenCounter_DuplicateSubtreeIsIdempotent(t *testing.T) {
 
 	txid := fmt.Sprintf("tx-dup-%d", os.Getpid())
 	for i := 0; i < 4; i++ {
-		res, err := store.Increment(txid, "subtree-A")
+		res, err := store.AddPeer(txid, "subtree-A", 1)
 		if err != nil {
 			t.Fatalf("Increment %d: %v", i, err)
 		}
@@ -62,7 +62,7 @@ func TestSeenCounter_ThresholdFiresExactlyOnce(t *testing.T) {
 	txid := fmt.Sprintf("tx-thresh-%d", os.Getpid())
 	fired := 0
 	for i := 0; i < 8; i++ {
-		res, err := store.Increment(txid, fmt.Sprintf("subtree-%d", i))
+		res, err := store.AddPeer(txid, fmt.Sprintf("subtree-%d", i), 1)
 		if err != nil {
 			t.Fatalf("Increment %d: %v", i, err)
 		}
@@ -100,7 +100,7 @@ func TestSeenCounter_ConcurrentThresholdFiresOnce(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			res, err := store.Increment(txid, fmt.Sprintf("subtree-%d", i))
+			res, err := store.AddPeer(txid, fmt.Sprintf("subtree-%d", i), 1)
 			if err != nil {
 				t.Errorf("Increment %d: %v", i, err)
 				return
@@ -139,7 +139,7 @@ func TestSeenCounter_ConcurrentDistinctTxidsAllFire(t *testing.T) {
 			go func(i, j int) {
 				defer wg.Done()
 				txid := fmt.Sprintf("tx-multi-%d-%d", pid, i)
-				res, err := store.Increment(txid, fmt.Sprintf("subtree-%d", j))
+				res, err := store.AddPeer(txid, fmt.Sprintf("subtree-%d", j), 1)
 				if err != nil {
 					t.Errorf("Increment(%s,%d): %v", txid, j, err)
 					return

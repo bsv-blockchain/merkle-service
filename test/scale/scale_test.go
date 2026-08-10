@@ -251,7 +251,8 @@ func runScaleTest(t *testing.T, fixtureDir string, instanceCount int, timeout ti
 		AllowPrivateIPs: true, // mock DataHub runs on 127.0.0.1
 	}
 
-	processor := block.NewProcessor(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, urlRegistry, dataHubRegistry, subtreeCounter, logger)
+	// nodeRegistry nil: block first-seen attribution not needed for scale throughput path.
+	processor := block.NewProcessor(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, urlRegistry, dataHubRegistry, subtreeCounter, nil, logger)
 	if err := processor.Init(nil); err != nil {
 		t.Fatalf("failed to init block processor: %v", err)
 	}

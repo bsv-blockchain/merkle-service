@@ -227,7 +227,17 @@ func (c *Client) Run(ctx context.Context) error {
 		c.Logger.Error("p2p client terminating due to fatal error", "error", err)
 		return err
 	case <-ctx.Done():
-		return nil
+		// Prefer a fatal error if one was already signaled. signalFatal writes
+		// fatalErr then cancels; when the test (or a miswired cancel) cancels
+		// the same ctx Run selects on, both cases can be ready and Go picks
+		// non-deterministically. Drain fatalErr so the real terminal cause wins.
+		select {
+		case err := <-c.fatalErr:
+			c.Logger.Error("p2p client terminating due to fatal error", "error", err)
+			return err
+		default:
+			return nil
+		}
 	}
 }
 

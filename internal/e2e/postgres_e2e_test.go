@@ -79,8 +79,10 @@ func newSQLConfig(t *testing.T, dsn string) *config.Config {
 			StumpDAHOffset: 6,
 		},
 		Callback: config.CallbackConfig{
-			SeenThreshold: 3,
-			DedupTTLSec:   3600,
+			SeenWindowBlocks:   100,
+			SeenScoreThreshold: 3, // fire after 3 peers at weight 1 in this e2e
+			SeenThreshold:      3,
+			DedupTTLSec:        3600,
 		},
 		Aerospike: config.AerospikeConfig{
 			SubtreeCounterTTLSec:      600,
@@ -191,7 +193,7 @@ func TestPostgres_SeenCounterThreshold(t *testing.T) {
 
 	firedCount := 0
 	for i := 0; i < 6; i++ {
-		res, err := registry.SeenCounter.Increment(txid, fmt.Sprintf("st-%d", i))
+		res, err := registry.SeenCounter.AddPeer(txid, fmt.Sprintf("st-%d", i), 1)
 		if err != nil {
 			t.Fatalf("Increment: %v", err)
 		}

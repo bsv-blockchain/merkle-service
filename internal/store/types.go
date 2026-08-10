@@ -1,9 +1,10 @@
 package store
 
-// IncrementResult is returned by SeenCounterStore.Increment.
+// IncrementResult is returned by SeenCounterStore.AddPeer / BatchAddPeer.
+// NewCount is the weighted seen score after the call (sum of peer weights).
 type IncrementResult struct {
 	NewCount         int
-	ThresholdReached bool // true only when count first equals threshold (not above)
+	ThresholdReached bool // true only when score first reaches threshold (not above)
 }
 
 // AccumulatedCallbackEntry holds data for one subtree's contribution to a

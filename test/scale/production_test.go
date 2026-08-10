@@ -168,7 +168,8 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 			MaxAttempts:    10,
 		},
 	}
-	fetcher := subtree.NewProcessor(fetcherCfg, regStore, seenCounter, subtreeStore, logger)
+	// nodeRegistry/subtreeAttribution nil: SEEN_MULTIPLE_NODES scoring disabled for this throughput path.
+	fetcher := subtree.NewProcessor(fetcherCfg, regStore, seenCounter, subtreeStore, nil, nil, logger)
 	if err := fetcher.Init(nil); err != nil {
 		t.Fatalf("failed to init subtree fetcher: %v", err)
 	}
@@ -183,7 +184,8 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 		PostMineTTLSec: 1800, // production default (config.yaml postMineTTLSec)
 		DedupCacheSize: 100,
 	}
-	processor := block.NewProcessor(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, urlRegistry, dataHubRegistry, subtreeCounter, logger)
+	// nodeRegistry nil: block first-seen attribution not needed for throughput measurement.
+	processor := block.NewProcessor(kafkaCfg, blockCfg, datahubCfg, regStore, subtreeStore, urlRegistry, dataHubRegistry, subtreeCounter, nil, logger)
 	if err := processor.Init(nil); err != nil {
 		t.Fatalf("failed to init block processor: %v", err)
 	}

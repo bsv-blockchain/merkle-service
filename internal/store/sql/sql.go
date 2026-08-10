@@ -85,9 +85,11 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 		CallbackURLRegistry: newCallbackURLRegistry(db, d, urlRetention),
 		DataHubRegistry:     newDataHubRegistry(db, d, urlRetention),
 		CallbackAccumulator: newCallbackAccumulator(db, d, cfg.Aerospike.CallbackAccumulatorTTLSec),
-		SeenCounter:         newSeenCounter(db, d, cfg.Callback.SeenThreshold),
+		SeenCounter:         newSeenCounter(db, d, cfg.Callback.SeenScoreThreshold),
 		SubtreeCounter:      newSubtreeCounter(db, d, cfg.Aerospike.SubtreeCounterTTLSec),
 		ExpectedStump:       newExpectedStump(db, d, cfg.Aerospike.SubtreeCounterTTLSec),
+		BlockAttribution:    newBlockAttributionStore(db, d),
+		SubtreeAttribution:  newSubtreeAttributionStore(db, d, cfg.Callback.DedupTTLSec),
 		Blob:                blob,
 		Health:              &pingHealth{db: db},
 	}

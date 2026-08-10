@@ -178,10 +178,12 @@ func startDeliveryService(t *testing.T, callbackTopic string) (*callback.Deliver
 			ConsumerGroup:    fmt.Sprintf("e2e-test-%d", time.Now().UnixNano()),
 		},
 		Callback: config.CallbackConfig{
-			MaxRetries:     3,
-			BackoffBaseSec: 1,
-			TimeoutSec:     5,
-			SeenThreshold:  3,
+			MaxRetries:         3,
+			BackoffBaseSec:     1,
+			TimeoutSec:         5,
+			SeenWindowBlocks:   100,
+			SeenScoreThreshold: 51,
+			SeenThreshold:      3,
 		},
 	}
 
@@ -452,7 +454,7 @@ func TestSeenMultipleNodes(t *testing.T) {
 	//    multiple times and track when threshold is reached.
 	var thresholdReached bool
 	for i := 0; i < threshold+1; i++ {
-		result, err := seenStore.Increment(txid, fmt.Sprintf("subtree-%d", i))
+		result, err := seenStore.AddPeer(txid, fmt.Sprintf("subtree-%d", i), 1)
 		if err != nil {
 			t.Fatalf("failed to increment seen counter (iteration %d): %v", i, err)
 		}
@@ -502,7 +504,7 @@ func TestSeenMultipleNodes(t *testing.T) {
 	}
 
 	// 7. Verify that incrementing beyond threshold does NOT set ThresholdReached again.
-	result, err := seenStore.Increment(txid, "subtree-extra")
+	result, err := seenStore.AddPeer(txid, "subtree-extra", 1)
 	if err != nil {
 		t.Fatalf("failed to increment seen counter past threshold: %v", err)
 	}
