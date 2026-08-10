@@ -101,6 +101,23 @@ type CallbackTopicMessage struct {
 	RetryCount   int       `json:"retryCount,omitempty"`
 	NextRetryAt  time.Time `json:"nextRetryAt,omitempty"`
 
+	// BypassDedup marks a callback that must be delivered even if the
+	// delivery-side dedup set already holds its key — set only on
+	// /reprocess-originated STUMP and BLOCK_PROCESSED callbacks (see
+	// bsv-blockchain/merkle-service#208). A /reprocess is an explicit
+	// "re-emit this block's results" request, so deduping its callbacks
+	// against the original delivery silently defeats the caller's reorg
+	// recovery. When true the delivery service skips the dedup existence
+	// check but STILL records the key on success, so normal (non-reprocess)
+	// duplicates for the same block continue to be suppressed afterward.
+	//
+	// Additive + omitempty: older consumers ignore it, and live-announcement
+	// callbacks leave it false so their dedup behavior is unchanged. It is
+	// derived producer-side from OverrideCallbackURL != "" (the established
+	// "this is a reprocess" signal) and is not part of the arcade
+	// CallbackMessage contract.
+	BypassDedup bool `json:"bypassDedup,omitempty"`
+
 	// BLOCK_PROCESSED enrichment (merkle-service issues #123/#124/#125 + the
 	// coinbase path). These let a consumer build and validate a compound BUMP
 	// without fetching the block from a teranode datahub. All additive and

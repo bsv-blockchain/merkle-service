@@ -413,7 +413,28 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 	)
 
 	// Check callback dedup — skip if already delivered.
-	if d.dedupStore != nil {
+	//
+	// A reprocess-originated callback (BypassDedup) is an explicit "re-emit
+	// this block's results" request, so it MUST force re-delivery past the
+	// dedup set: deduping it against the original delivery silently defeats
+	// arcade's reorg recovery (#208). We bypass only the existence *check*
+	// here — the key is still recorded on success below — so normal
+	// (non-reprocess) duplicates for the same block continue to be
+	// suppressed afterward. Reprocess is operator/arcade-driven and
+	// rate-limited at the /reprocess handler, and a forced delivery does not
+	// itself trigger another reprocess, so this cannot self-perpetuate into
+	// a callback storm.
+	if d.dedupStore != nil && cbMsg.BypassDedup {
+		d.Logger.Info(
+			"forcing callback re-delivery (reprocess): bypassing dedup",
+			"dedupKey", dedupKeyForMessage(cbMsg),
+			logfields.CallbackURL(cbMsg.CallbackURL),
+			"type", cbMsg.Type,
+			logfields.BlockHash(cbMsg.BlockHash),
+			logfields.SubtreeIndex(cbMsg.SubtreeIndex),
+		)
+	}
+	if d.dedupStore != nil && !cbMsg.BypassDedup {
 		dedupKey := dedupKeyForMessage(cbMsg)
 		if dedupKey != "" {
 			checkStart := time.Now()
