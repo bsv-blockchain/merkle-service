@@ -429,7 +429,16 @@ func (k KafkaConfig) TopicPartitions() map[string]int32 {
 	// silently widen the shared 'callback' topic to defaultCallbackSeenPartitions
 	// and shatter the STUMP → BLOCK_PROCESSED ordering barrier. 'callback' must
 	// stay absent from this map (see the topic_partitions_test assertion).
-	if k.CallbackSeenTopic != "" {
+	//
+	// The != CallbackTopic guard closes the same hazard reached a different way:
+	// an operator setting callbackSeenTopic to the SAME name as callbackTopic
+	// (copy/paste or typo). Producer and consumer both treat that as fallback
+	// mode, but without this guard it would still put 'callback' in the
+	// partition map and let EnsureTopics widen it. Widening is effectively
+	// irreversible — the operator cannot shrink a live topic without recreating
+	// it during a drained window — so a misconfiguration must not be able to
+	// reach it.
+	if k.CallbackSeenTopic != "" && k.CallbackSeenTopic != k.CallbackTopic {
 		m[k.CallbackSeenTopic] = int32(seen)
 	}
 	return m

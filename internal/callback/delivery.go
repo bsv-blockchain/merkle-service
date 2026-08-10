@@ -297,6 +297,14 @@ func (d *DeliveryService) Init(_ interface{}) error {
 			d.Logger,
 		)
 		if sErr != nil {
+			// Unwind the retry producer created moments ago. Init's caller
+			// treats an error as "service never started" and does not call
+			// Stop(), so anything already opened here has to be closed on this
+			// path or its broker connections leak for the process lifetime.
+			if cErr := seenRetryProducer.Close(); cErr != nil {
+				d.Logger.Warn("failed to close SEEN retry producer after consumer init failure", "error", cErr)
+			}
+			delete(d.retryProducers, seenTopic)
 			return fmt.Errorf("failed to create SEEN callback consumer: %w", sErr)
 		}
 		d.consumers = append(d.consumers, seenConsumer)

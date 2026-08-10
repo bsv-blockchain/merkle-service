@@ -92,6 +92,24 @@ func TestKafkaConfig_TopicPartitions(t *testing.T) {
 			t.Errorf("callback-seen = %d, want %d", got, defaultCallbackSeenPartitions)
 		}
 	})
+
+	// An operator who copy/pastes callbackTopic into callbackSeenTopic must not
+	// be able to widen the shared 'callback' topic through the SEEN knob. The
+	// producer and consumer already treat identical names as fallback mode; the
+	// partition map has to agree, because EnsureTopics only ever GROWS a topic —
+	// a widened 'callback' cannot be shrunk back without recreating it during a
+	// drained window, and it breaks the STUMP → BLOCK_PROCESSED ordering barrier
+	// in the meantime.
+	t.Run("seen topic set to the callback topic name never widens callback", func(t *testing.T) {
+		k := KafkaConfig{
+			CallbackTopic:          topicCallback,
+			CallbackSeenTopic:      topicCallback, // misconfiguration
+			CallbackSeenPartitions: 12,
+		}
+		if _, ok := k.TopicPartitions()[topicCallback]; ok {
+			t.Error("callback must stay absent from the partition map when callbackSeenTopic duplicates callbackTopic")
+		}
+	})
 }
 
 // TestKafkaConfig_SeenCallbackTopic pins the fallback contract that makes the
