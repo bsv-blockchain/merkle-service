@@ -478,6 +478,30 @@ callback:
   # Env: CALLBACK_MAX_IDLE_CONNS_PER_HOST
   maxIdleConnsPerHost: 16
 
+  # Mirror of the RECEIVER's inbound body cap, in bytes. When > 0, a built
+  # callback body larger than this is never POSTed: delivery fails fast with an
+  # oversize error naming the block hash, subtree index and exact byte count,
+  # instead of spending a multi-MiB upload on a request the receiver is certain
+  # to reject with 413.
+  #
+  # 0 (the default) disables the pre-flight check and relies on the receiver's
+  # 413. That is safe — a 413 is retried, not DLQ'd — but it is strictly less
+  # diagnosable, so operators SHOULD set this to whatever their receiver
+  # enforces. For arcade that is `callback.max_body_bytes` (env
+  # ARCADE_CALLBACK_MAX_BODY_BYTES); its default is 16 MiB (16777216) and
+  # dev-ovh-1 runs 128 MiB (134217728) since teranode-argocd-deployments#211.
+  #
+  # Background: STUMP bodies are hex-encoded, which DOUBLES the blob, so the
+  # effective raw-STUMP ceiling is half this number. On 2026-08-11 at 1000 TPS
+  # a single subtree's STUMP crossed arcade's 16 MiB default; the 413 was
+  # classified as a permanent 4xx and DLQ'd with ZERO retries, arcade's
+  # bump-builder logged `expected_stumps:1, received_stumps:0` forever, and
+  # every transaction in that block was stranded short of MINED. Deliveries
+  # now also log a WARN above 8 MiB regardless of this setting, so payload
+  # growth is visible before it becomes an outage.
+  # Env: CALLBACK_MAX_BODY_BYTES
+  maxBodyBytes: 0
+
   # SSRF guard escape hatch. When false (the default), callback URLs that
   # resolve to loopback (127.0.0.0/8, ::1), link-local (169.254.0.0/16,
   # fe80::/10), or RFC1918 (10/8, 172.16/12, 192.168/16) addresses are
