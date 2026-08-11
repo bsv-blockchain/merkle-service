@@ -116,7 +116,13 @@ the Kafka message schema, the dedup keys and the DLQ topic are all unchanged.)_
   `CallbackConfig.MaxBodyBytes`, viper default 0, env binding
   `CALLBACK_MAX_BODY_BYTES`.
 - **`internal/metrics/labels.go`**: `OutcomeOversize`,
-  `OutcomeOversizeStranded`.
+  `OutcomeOversizeStranded`. **`internal/metrics/callback.go`**:
+  `ObserveCallbackPayloadSize` split out of `ObserveCallbackDelivery` so the
+  pre-flight refusal — which issues no request, and so has no status or
+  duration — still lands in the size histogram.
+- **`internal/callback/delivery.go`** (body cache): `bodyCacheMaxBytes`
+  (64 MiB) and an incrementally-maintained `bodyBytes` running sum, so the
+  STUMP body cache is bounded by total resident bytes as well as entry count.
 - **No changes** to the HTTP body, the encoding, the Kafka message format,
   dedup keys, the DLQ topic, or arcade.
 
