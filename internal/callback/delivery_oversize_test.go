@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -144,10 +145,10 @@ func TestProcessDelivery_413DoesNotGoStraightToDLQ(t *testing.T) {
 	server, _ := newOversizeTestServer(t)
 
 	cfg := defaultTestConfig()
+	cfg.Callback.BreakerThreshold = 1 // trip on the very first failure, if it were reachable
 	ds, retryMock, dlqMock := newTestDeliveryService(t, cfg, server.Client())
 	registry := &recordingURLRegistry{}
 	ds.urlRegistry = registry
-	cfg.Callback.BreakerThreshold = 1 // trip on the very first failure, if it were reachable
 
 	msg := &kafka.CallbackTopicMessage{
 		CallbackURL:  server.URL + "/callback",
@@ -515,4 +516,99 @@ func findLogEntry(t *testing.T, raw []byte, pred func(map[string]any) bool) map[
 	}
 	t.Fatalf("no matching log entry found in:\n%s", raw)
 	return nil
+}
+
+// TestStoreBody_ByteBudgetEvicts pins the memory bound that makes the STUMP
+// body cache safe now that bodies can legitimately be huge.
+//
+// bodyCacheMaxEntries alone is only a safe bound while entries are a
+// predictable size. The 2026-08-11 incident proved they are not — and arcade's
+// cap has since been raised to 128 MiB so that bodies that large CAN be
+// delivered. Count-bounded, the cache would then hold 64 x 128 MiB ~= 8 GiB
+// and OOM-kill the delivery pod, escalating "one block's STUMPs are oversized"
+// into "callback delivery is dead".
+func TestStoreBody_ByteBudgetEvicts(t *testing.T) {
+	ds := &DeliveryService{}
+
+	// Entries far below the count limit, but together far above the byte
+	// budget: the byte bound must be the one that binds.
+	const chunk = bodyCacheMaxBytes / 4
+	for i := range 8 {
+		ds.storeBody(strconv.Itoa(i), make([]byte, chunk))
+	}
+
+	if ds.bodyBytes > bodyCacheMaxBytes {
+		t.Errorf("resident bytes %d exceed budget %d", ds.bodyBytes, bodyCacheMaxBytes)
+	}
+	if len(ds.bodyCache) != len(ds.bodyOrder) {
+		t.Errorf("cache/order desync: %d entries vs %d order slots", len(ds.bodyCache), len(ds.bodyOrder))
+	}
+	// bodyBytes must stay an exact running sum, or the budget silently drifts.
+	var sum int
+	for _, v := range ds.bodyCache {
+		sum += len(v)
+	}
+	if sum != ds.bodyBytes {
+		t.Errorf("bodyBytes drifted: tracked %d, actual %d", ds.bodyBytes, sum)
+	}
+	// FIFO: the newest entry survives, the oldest does not.
+	if ds.cachedBody("7") == nil {
+		t.Error("most recently stored entry was evicted")
+	}
+	if ds.cachedBody("0") != nil {
+		t.Error("oldest entry should have been evicted by the byte budget")
+	}
+}
+
+// TestStoreBody_EntryBudgetStillEvicts guards the original count bound: small
+// bodies must still be capped at bodyCacheMaxEntries, since the byte budget
+// would never bind for them.
+func TestStoreBody_EntryBudgetStillEvicts(t *testing.T) {
+	ds := &DeliveryService{}
+	for i := range bodyCacheMaxEntries + 10 {
+		ds.storeBody(strconv.Itoa(i), []byte("small"))
+	}
+	if len(ds.bodyCache) != bodyCacheMaxEntries {
+		t.Errorf("expected %d entries, got %d", bodyCacheMaxEntries, len(ds.bodyCache))
+	}
+	if ds.cachedBody("0") != nil {
+		t.Error("oldest entry should have been evicted by the count budget")
+	}
+}
+
+// TestStoreBody_OversizedSingleBodyIsStillCached pins the degenerate case: a
+// single body larger than the whole budget is cached anyway, alone. Refusing
+// it would restore precisely the per-subscriber re-fetch/re-hex/re-marshal
+// duplication the cache exists to eliminate — and that duplication is at its
+// most expensive exactly when the body is at its largest.
+func TestStoreBody_OversizedSingleBodyIsStillCached(t *testing.T) {
+	ds := &DeliveryService{}
+	ds.storeBody("small", []byte("x"))
+	huge := make([]byte, bodyCacheMaxBytes+1)
+	ds.storeBody("huge", huge)
+
+	if ds.cachedBody("huge") == nil {
+		t.Fatal("an over-budget body must still be cached, so the fan-out does not rebuild it per subscriber")
+	}
+	if len(ds.bodyCache) != 1 {
+		t.Errorf("expected the over-budget body to be the only resident entry, got %d", len(ds.bodyCache))
+	}
+}
+
+// TestStoreBody_DuplicateKeyDoesNotDoubleCount guards the running sum against
+// the classic incremental-accounting bug: re-storing an existing key must not
+// add its size again, or bodyBytes drifts upward until the cache evicts
+// everything on every insert.
+func TestStoreBody_DuplicateKeyDoesNotDoubleCount(t *testing.T) {
+	ds := &DeliveryService{}
+	body := make([]byte, 1024)
+	ds.storeBody("k", body)
+	ds.storeBody("k", body)
+
+	if ds.bodyBytes != 1024 {
+		t.Errorf("bodyBytes: expected 1024 after a duplicate store, got %d", ds.bodyBytes)
+	}
+	if len(ds.bodyOrder) != 1 {
+		t.Errorf("order: expected 1 entry after a duplicate store, got %d", len(ds.bodyOrder))
+	}
 }

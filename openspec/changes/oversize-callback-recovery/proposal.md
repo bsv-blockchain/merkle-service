@@ -81,6 +81,14 @@ with subtree size, so the cap will be hit again.
   and status. Plus an unconditional WARN above a fixed 8 MiB (`bodyWarnBytes`,
   half arcade's original default) so payload growth is visible *before* it
   becomes an outage.
+- **The STUMP body cache gains a byte budget** (`bodyCacheMaxBytes`, 64 MiB)
+  alongside its existing 64-entry bound. The entry count was sized against
+  ~545 KB bodies; now that arcade's cap is 128 MiB precisely so bodies that
+  large can be delivered, a count-only bound admits 64 × 128 MiB ≈ 8 GiB
+  resident — an OOM-kill that would escalate "one block's STUMPs are
+  oversized" into "callback delivery is dead". An over-budget single body is
+  still cached (alone), since refusing it would restore the per-subscriber
+  re-fetch/re-hex/re-marshal work the cache exists to remove.
 
 ## Capabilities
 

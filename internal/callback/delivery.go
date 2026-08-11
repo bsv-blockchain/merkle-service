@@ -211,17 +211,40 @@ type DeliveryService struct {
 	// re-hex-encoded (~half MB), and re-JSON-marshaled (~half MB) once per
 	// subscriber: at 100 subscribers, 100x redundant work and two ~half-MB
 	// allocations per delivery on the hot path. Entries are evicted FIFO at
-	// bodyCacheMaxEntries.
+	// bodyCacheMaxEntries OR bodyCacheMaxBytes, whichever binds first.
 	bodyMu    sync.Mutex
 	bodyCache map[string][]byte
 	bodyOrder []string
+	// bodyBytes is the running sum of len(v) over bodyCache, maintained
+	// incrementally so the byte budget costs no iteration on the hot path.
+	bodyBytes int
 }
 
-// bodyCacheMaxEntries bounds the STUMP body cache. Bodies are ~545 KB
-// (~271 KB stump, hex-doubled, plus small JSON fields), so 64 entries caps
-// the cache at ~35 MB while comfortably covering the distinct subtrees in
-// flight during one block's delivery fan-out.
+// bodyCacheMaxEntries bounds the STUMP body cache by entry count. Bodies are
+// ~545 KB (~271 KB stump, hex-doubled, plus small JSON fields) in the steady
+// state, and 64 entries comfortably covers the distinct subtrees in flight
+// during one block's delivery fan-out.
 const bodyCacheMaxEntries = 64
+
+// bodyCacheMaxBytes bounds the same cache by total resident bytes, and is the
+// bound that actually protects the process.
+//
+// An entry count alone is only safe while entries are a predictable size, and
+// the 2026-08-11 dev-ovh-1 incident is the proof that they are not: a single
+// STUMP body crossed 16 MiB, and arcade's cap has since been raised to 128 MiB
+// (teranode-argocd-deployments#211) precisely so bodies that large can be
+// delivered. At that ceiling a purely count-bounded cache would hold
+// 64 x 128 MiB ~= 8 GiB — an OOM-kill of the callback-delivery pod, converting
+// "one block's STUMPs are oversized" into "the delivery service is dead".
+//
+// 64 MiB keeps the steady state fully cached (64 x ~545 KB ~= 35 MB fits with
+// room to spare, so nothing about normal operation changes) while capping the
+// pathological case at a survivable number. Exceeding it evicts oldest-first;
+// in the degenerate case where one body alone exceeds the budget it is still
+// cached — evicting it immediately would just restore the redundant
+// fetch/hex/marshal work per subscriber that the cache exists to remove — but
+// it will be the only resident entry.
+const bodyCacheMaxBytes = 64 << 20
 
 // bodyWarnBytes is the built-body size above which a delivery logs a WARN
 // naming the block, subtree and exact byte count — even when the POST then
@@ -276,10 +299,11 @@ func (d *DeliveryService) cachedBody(key string) []byte {
 	return d.bodyCache[key]
 }
 
-// storeBody memoizes body under key with FIFO eviction. The build happens
-// outside the lock (half-MB hex+marshal work must not serialize the
-// per-partition delivery workers); a concurrent duplicate build is harmless —
-// first writer wins.
+// storeBody memoizes body under key with FIFO eviction, bounded by BOTH
+// bodyCacheMaxEntries and bodyCacheMaxBytes. The build happens outside the
+// lock (half-MB hex+marshal work must not serialize the per-partition
+// delivery workers); a concurrent duplicate build is harmless — first writer
+// wins.
 func (d *DeliveryService) storeBody(key string, body []byte) {
 	d.bodyMu.Lock()
 	defer d.bodyMu.Unlock()
@@ -287,14 +311,23 @@ func (d *DeliveryService) storeBody(key string, body []byte) {
 		// Lazy init: tests construct DeliveryService via struct literal.
 		d.bodyCache = make(map[string][]byte, bodyCacheMaxEntries)
 	}
-	if _, ok := d.bodyCache[key]; !ok {
-		if len(d.bodyOrder) >= bodyCacheMaxEntries {
-			oldest := d.bodyOrder[0]
-			d.bodyOrder = d.bodyOrder[1:]
-			delete(d.bodyCache, oldest)
-		}
-		d.bodyCache[key] = body
-		d.bodyOrder = append(d.bodyOrder, key)
+	if _, ok := d.bodyCache[key]; ok {
+		return
+	}
+	d.bodyCache[key] = body
+	d.bodyOrder = append(d.bodyOrder, key)
+	d.bodyBytes += len(body)
+	// Evict oldest-first until BOTH bounds hold. The byte budget is checked
+	// with len(d.bodyOrder) > 1 so the newly-stored entry is never evicted by
+	// its own size: a body larger than the whole budget still gets cached
+	// (alone), because evicting it on insert would restore exactly the
+	// per-subscriber fetch/hex/marshal duplication the cache exists to remove.
+	for len(d.bodyOrder) > bodyCacheMaxEntries ||
+		(d.bodyBytes > bodyCacheMaxBytes && len(d.bodyOrder) > 1) {
+		oldest := d.bodyOrder[0]
+		d.bodyOrder = d.bodyOrder[1:]
+		d.bodyBytes -= len(d.bodyCache[oldest])
+		delete(d.bodyCache, oldest)
 	}
 }
 

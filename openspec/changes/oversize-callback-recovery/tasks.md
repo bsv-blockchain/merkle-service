@@ -37,6 +37,14 @@
       blob and that dev-ovh-1 runs 128 MiB since
       teranode-argocd-deployments#211
 - [x] 3.5 Surface `maxBodyBytes` / `bodyWarnBytes` in the delivery init log
+- [x] 3.6 Bound the STUMP body cache by total bytes (`bodyCacheMaxBytes`,
+      64 MiB) as well as entry count. The existing 64-entry bound assumed
+      ~545 KB bodies; with arcade's cap now 128 MiB a count-only bound admits
+      64 x 128 MiB ~= 8 GiB resident and OOM-kills the delivery pod, escalating
+      "one block's STUMPs are oversized" into "callback delivery is dead". An
+      over-budget single body is still cached (alone), since refusing it would
+      restore the per-subscriber re-fetch/re-hex/re-marshal work the cache
+      exists to remove
 
 ## 4. Observability
 
@@ -59,7 +67,11 @@
       `TestDeliverCallback_PreflightMaxBodyBytesRefusesThePost`,
       `TestDeliverCallback_PreflightDisabledByDefault`,
       `TestHandleMessage_413RepublishesBeforeAck`,
-      `TestDeliverCallback_BodyWarnThresholdLogs`
+      `TestDeliverCallback_BodyWarnThresholdLogs`,
+      `TestStoreBody_ByteBudgetEvicts`,
+      `TestStoreBody_EntryBudgetStillEvicts`,
+      `TestStoreBody_OversizedSingleBodyIsStillCached`,
+      `TestStoreBody_DuplicateKeyDoesNotDoubleCount`
 - [x] 5.2 `internal/config/config_test.go`:
       `TestLoad_CallbackMaxBodyBytesDefaultsToDisabled`,
       `TestLoad_CallbackMaxBodyBytesEnvOverride`; add
