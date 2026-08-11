@@ -27,6 +27,20 @@ const (
 	OutcomeRetryScheduled   = "retry_scheduled"
 	OutcomeStumpNotFound    = "stump_not_found"
 	OutcomePermanent4xx     = "permanent_4xx"
+	// OutcomeOversize counts callback deliveries whose request body was too
+	// large for the receiver — either it answered 413, or our own pre-flight
+	// callback.maxBodyBytes check refused to send it. Counted once per
+	// attempt, so a non-zero rate here means bodies are already being
+	// rejected and a block's finalization is being delayed.
+	OutcomeOversize = "oversize"
+	// OutcomeOversizeStranded counts oversize deliveries that exhausted their
+	// retry budget and went to the DLQ. Deliberately separate from
+	// OutcomeDLQ: this is the "a block cannot be finalized and its
+	// transactions cannot reach MINED" signal (the 2026-08-11 dev-ovh-1
+	// incident), and it is the one an operator should page on. Non-zero here
+	// means the receiver's inbound body cap must be raised and the affected
+	// block re-driven via POST /reprocess.
+	OutcomeOversizeStranded = "oversize_stranded"
 	OutcomeHit              = "hit"
 	OutcomeMiss             = "miss"
 	OutcomeEmpty            = "empty"

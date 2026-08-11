@@ -45,6 +45,7 @@ func clearConfigEnv(t *testing.T) {
 		"BLOCK_EMIT_EXPECTED_STUMP_SET",
 		"CALLBACK_MAX_RETRIES", "CALLBACK_BACKOFF_BASE_SEC",
 		"CALLBACK_TIMEOUT_SEC", "CALLBACK_SEEN_THRESHOLD",
+		"CALLBACK_MAX_BODY_BYTES",
 		"BLOB_STORE_URL", "BLOB_STORE_SWEEP_INTERVAL_SEC", "BLOB_STORE_SWEEP_MAX_AGE_SEC",
 		envTelemetryEnabled, "TELEMETRY_ENDPOINT", envTelemetryProtocol,
 		"TELEMETRY_INSECURE", "TELEMETRY_SERVICE_NAME", "TELEMETRY_NAMESPACE",
@@ -870,5 +871,48 @@ func TestBlockConfig_EmitExpectedStumpSetEnabled_ZeroValue(t *testing.T) {
 	var cfg BlockConfig
 	if !cfg.EmitExpectedStumpSetEnabled() {
 		t.Error("zero-valued BlockConfig: EmitExpectedStumpSetEnabled() expected true (nil means enabled), got false")
+	}
+}
+
+// TestLoad_CallbackMaxBodyBytesDefaultsToDisabled pins the non-breaking
+// default for the pre-flight body cap introduced after the 2026-08-11
+// dev-ovh-1 STUMP-413 incident. 0 means "no local cap; discover the
+// receiver's limit from its 413".
+//
+// The default MUST stay 0. merkle cannot know a third-party receiver's
+// inbound cap, so any non-zero default here would start refusing bodies the
+// receiver would happily have accepted — trading a rare, now-recoverable
+// failure for a guaranteed one.
+func TestLoad_CallbackMaxBodyBytesDefaultsToDisabled(t *testing.T) {
+	clearConfigEnv(t)
+	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	defer clearConfigEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.Callback.MaxBodyBytes != 0 {
+		t.Errorf("Callback.MaxBodyBytes: expected 0 (disabled) by default, got %d", cfg.Callback.MaxBodyBytes)
+	}
+}
+
+// TestLoad_CallbackMaxBodyBytesEnvOverride covers the knob operators reach
+// for: mirror the receiver's cap (arcade's callback.max_body_bytes, raised to
+// 128 MiB on dev-ovh-1 in teranode-argocd-deployments#211) so an oversize
+// body is diagnosed here, with block/subtree context, instead of as an opaque
+// 413 from the far end.
+func TestLoad_CallbackMaxBodyBytesEnvOverride(t *testing.T) {
+	clearConfigEnv(t)
+	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	_ = os.Setenv("CALLBACK_MAX_BODY_BYTES", "134217728")
+	defer clearConfigEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.Callback.MaxBodyBytes != 134217728 {
+		t.Errorf("Callback.MaxBodyBytes: expected 134217728, got %d", cfg.Callback.MaxBodyBytes)
 	}
 }

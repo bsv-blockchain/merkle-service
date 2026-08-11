@@ -601,6 +601,30 @@ type CallbackConfig struct {
 	// registry and BLOCK_PROCESSED / STUMP fan-out stops targeting it (a fresh
 	// /watch re-enables it). Default 20; set <= 0 to disable the breaker.
 	BreakerThreshold int `yaml:"breakerThreshold" mapstructure:"breakerthreshold"`
+	// MaxBodyBytes mirrors, on OUR side, the inbound body cap the receiver
+	// enforces on its callback endpoint (arcade: `callback.max_body_bytes`,
+	// which wraps the request in http.MaxBytesReader and answers 413 on
+	// overflow). When > 0, a built callback body larger than this is never
+	// POSTed: delivery fails fast with an oversize error that logs the block
+	// hash, subtree index and exact body size, instead of burning a request
+	// timeout uploading a body that is guaranteed to be rejected.
+	//
+	// Default 0 = disabled, i.e. "trust the receiver and discover the limit
+	// from its 413". That is deliberate: merkle cannot know a third-party
+	// receiver's cap, and a wrong non-zero default here would start refusing
+	// bodies the receiver would happily have accepted. Operators who know
+	// their receiver's cap SHOULD set this to the same number so the failure
+	// is diagnosed here, with full block/subtree context, rather than as an
+	// opaque 413 from the far end.
+	//
+	// Incident 2026-08-11 (dev-ovh-1, 1000 TPS): a single subtree's STUMP,
+	// hex-encoded (2x inflation), exceeded arcade's then-default 16 MiB cap.
+	// arcade answered 413, merkle classified the 4xx as permanent and DLQ'd
+	// the callback with zero retries, and arcade's bump-builder then logged
+	// `expected_stumps:1, received_stumps:0` forever — every transaction in
+	// that block never reached MINED. See CallbackConfig usage in
+	// internal/callback/delivery.go.
+	MaxBodyBytes int64 `yaml:"maxBodyBytes" mapstructure:"maxbodybytes"`
 	// AllowPrivateIPs disables the SSRF guard that normally rejects
 	// callback URLs (or dial addresses) pointing at loopback,
 	// link-local, or RFC1918 destinations. Default false. Operators
@@ -836,6 +860,10 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("callback.dedupttlsec", 86400)
 	v.SetDefault("callback.maxconnsperhost", 32)
 	v.SetDefault("callback.maxidleconnsperhost", 16)
+	// 0 = disabled: no local pre-flight cap, discover the receiver's limit
+	// from its 413. See CallbackConfig.MaxBodyBytes for why there is no
+	// non-zero default.
+	v.SetDefault("callback.maxbodybytes", 0)
 	v.SetDefault("callback.allowprivateips", false)
 
 	// BlobStore
@@ -1012,6 +1040,7 @@ func bindEnvVars(v *viper.Viper) {
 		"callback.dedupttlsec":         "CALLBACK_DEDUP_TTL_SEC",
 		"callback.maxconnsperhost":     "CALLBACK_MAX_CONNS_PER_HOST",
 		"callback.maxidleconnsperhost": "CALLBACK_MAX_IDLE_CONNS_PER_HOST",
+		"callback.maxbodybytes":        "CALLBACK_MAX_BODY_BYTES",
 		"callback.allowprivateips":     "CALLBACK_ALLOW_PRIVATE_IPS",
 
 		// BlobStore

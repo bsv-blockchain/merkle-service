@@ -64,6 +64,74 @@ func isPermanentDeliveryError(err error) bool {
 	return errors.As(err, &p)
 }
 
+// oversizeDeliveryError marks a delivery that failed purely because the
+// request body was bigger than the receiver is willing to accept — either the
+// receiver answered 413 Request Entity Too Large, or our own pre-flight check
+// (callback.maxBodyBytes) refused to send it.
+//
+// This is deliberately a DIFFERENT class from permanentDeliveryError even
+// though 413 is a 4xx. Every other non-retryable 4xx (400/401/403/404/405/410
+// /415/422) says "this request is wrong and always will be" — a bad URL, a bad
+// token, a payload the receiver cannot parse. 413 says something categorically
+// different: "this request is too big *for my current configuration*". That is
+// an operational condition, curable without changing anything about the
+// message, by raising the receiver's cap.
+//
+// The distinction is not academic. Live on dev-ovh-1 at 1000 TPS on
+// 2026-08-11, one subtree's STUMP exceeded arcade's then-default 16 MiB
+// `callback.max_body_bytes` after hex inflation (hex doubles the blob).
+// arcade answered 413, we classified it as `permanent`, logged
+//
+//	"callback permanently failed, publishing to DLQ" type:"STUMP" reason:"permanent"
+//
+// and published it to `callback-dlq` after ZERO retry attempts. arcade's
+// bump-builder then logged, forever:
+//
+//	"BLOCK_PROCESSED is missing expected STUMPs — deferring finalization"
+//	expected_stumps:1 received_stumps:0 missing_subtree_indices:[0]
+//
+// It never built a BUMP for that block, so EVERY transaction in it never
+// reached MINED. Because arcade's completeness gate leaves `processed_at`
+// NULL, its watchdog re-drives the block via /reprocess indefinitely — so the
+// block IS recoverable, but only if merkle is still willing to attempt the
+// delivery. Sending it straight to the DLQ with no retries threw away the one
+// window in which an operator could raise the cap and have the block heal
+// itself.
+//
+// Routing: an oversize failure takes the normal retry ladder (5 attempts,
+// linear 30s backoff ≈ 7.5 minutes of durable, Kafka-parked retries) instead
+// of the DLQ, and it never trips the per-URL circuit breaker — see
+// scheduleRetryOrDLQ.
+type oversizeDeliveryError struct {
+	err error
+	// bodyBytes is the size of the body we built (and either sent or
+	// refused to send). Carried on the error so the retry/DLQ decision point
+	// can name it in the operator-facing log without rebuilding the payload.
+	bodyBytes int
+	// limitBytes is the cap that was violated: the receiver's, when we know
+	// it (pre-flight), or 0 when we only learned about it from a 413.
+	limitBytes int64
+	// statusCode is the HTTP status the receiver returned, or 0 when the
+	// request was never sent because the pre-flight check refused it.
+	statusCode int
+}
+
+func (e *oversizeDeliveryError) Error() string { return e.err.Error() }
+func (e *oversizeDeliveryError) Unwrap() error { return e.err }
+
+func errOversizeDelivery(err error, bodyBytes int, limitBytes int64, statusCode int) error {
+	return &oversizeDeliveryError{err: err, bodyBytes: bodyBytes, limitBytes: limitBytes, statusCode: statusCode}
+}
+
+// asOversizeDeliveryError returns the oversize error in err's chain, or nil.
+func asOversizeDeliveryError(err error) *oversizeDeliveryError {
+	var o *oversizeDeliveryError
+	if errors.As(err, &o) {
+		return o
+	}
+	return nil
+}
+
 // callbackPayload is the JSON body sent to the callback URL, matching Arcade's CallbackMessage.
 type callbackPayload struct {
 	Type         string   `json:"type"`
@@ -154,6 +222,30 @@ type DeliveryService struct {
 // the cache at ~35 MB while comfortably covering the distinct subtrees in
 // flight during one block's delivery fan-out.
 const bodyCacheMaxEntries = 64
+
+// bodyWarnBytes is the built-body size above which a delivery logs a WARN
+// naming the block, subtree and exact byte count — even when the POST then
+// succeeds.
+//
+// 8 MiB is half of arcade's original `callback.max_body_bytes` default
+// (16 MiB, `config.DefaultCallbackMaxBodyBytes`). A body at this size means
+// the deployment is one subtree-growth step away from the 2026-08-11
+// dev-ovh-1 incident, in which a STUMP crossed that cap and the block it
+// belonged to was stranded (see oversizeDeliveryError). This is the
+// early-warning signal that the receiver's cap is about to be reached.
+//
+// It is a constant rather than config on purpose — its job is "tell me the
+// payloads are growing", which needs no tuning, while the *enforcing* knob
+// (callback.maxBodyBytes) is configurable because only the operator knows the
+// receiver's real cap.
+//
+// The warning fires per DELIVERY, not per built body: it sits after the
+// bodyCache lookup, so one subtree fanned out to N subscribers logs N lines.
+// Deliberate — the body is memoized but the risk is per-request, and any one
+// of those N POSTs can be the one that 413s. A normal STUMP body is ~545 KB,
+// so crossing 8 MiB at all already means the deployment is close to an
+// outage, which is exactly when the volume is worth paying.
+const bodyWarnBytes = 8 << 20
 
 // NewDeliveryService creates a new callback DeliveryService. stumpStore is
 // required whenever STUMP-type messages are delivered — it is the claim-check
@@ -323,6 +415,11 @@ func (d *DeliveryService) Init(_ interface{}) error {
 		"futureRetryWaitCap", futureRetryWaitCap,
 		"maxConnsPerHost", maxConnsPerHostOrDefault(d.cfg.Callback.MaxConnsPerHost),
 		"maxIdleConnsPerHost", maxIdleConnsPerHostOrDefault(d.cfg.Callback.MaxIdleConnsPerHost),
+		// 0 means "no local pre-flight cap; discover the receiver's limit from
+		// its 413". Surfaced at startup because whether this is set is the
+		// difference between a diagnosable oversize failure and an opaque one.
+		"maxBodyBytes", d.cfg.Callback.MaxBodyBytes,
+		"bodyWarnBytes", bodyWarnBytes,
 		"allowPrivateIPs", d.cfg.Callback.AllowPrivateIPs,
 	)
 
@@ -648,6 +745,64 @@ func (d *DeliveryService) processDelivery(ctx context.Context, sourceTopic strin
 // returns nil iff the durable side-effect succeeded; otherwise the caller
 // must propagate the error up so the Kafka offset is not committed.
 func (d *DeliveryService) scheduleRetryOrDLQ(ctx context.Context, sourceTopic string, cbMsg *kafka.CallbackTopicMessage, cause error) error {
+	// Oversize is checked BEFORE the permanent check and before the retry
+	// budget, because it needs the opposite treatment from both.
+	//
+	// It must not be permanent: 413 is curable by raising the receiver's cap,
+	// and DLQ-on-first-413 is exactly what stranded a block on 2026-08-11
+	// (see oversizeDeliveryError). So it falls through to the normal retry
+	// ladder below — 5 attempts on a 30s linear backoff is ~7.5 minutes of
+	// durable, Kafka-parked retrying, during which an operator raising the cap
+	// heals the block with no further action. Beyond that window arcade's own
+	// watchdog keeps the block recoverable: its completeness gate leaves
+	// `processed_at` NULL and re-drives /reprocess, which re-emits this STUMP.
+	//
+	// It must also not trip the per-URL circuit breaker on the way out. The
+	// breaker's premise is "this endpoint is dead, stop fanning out to it" —
+	// but a receiver rejecting one oversize STUMP is emphatically alive, and
+	// a block full of oversize STUMPs would cross the default threshold of 20
+	// in a single block and auto-disable arcade's callback URL, killing SEEN
+	// and BLOCK_PROCESSED delivery for every transaction, not just the
+	// stranded block's. That is a strictly worse outage than the one we are
+	// fixing.
+	if o := asOversizeDeliveryError(cause); o != nil {
+		if cbMsg.RetryCount < d.cfg.Callback.MaxRetries {
+			// Retry budget left: fall through to the normal republish path,
+			// which logs the scheduled retry. The loud ERROR naming the block
+			// was already emitted at detection time by logOversize.
+			return d.scheduleRetry(ctx, sourceTopic, cbMsg, cause)
+		}
+		// Budget exhausted. This is the "a block is stranded" moment — say so
+		// in those words, with the block identity and the exact size, so an
+		// operator reading logs or alerting on the metric knows immediately
+		// which block is stuck and why. Distinct outcome label from the
+		// generic DLQ counter precisely so it can be alerted on separately.
+		d.Logger.Error(
+			"BLOCK STRANDED: oversize callback exhausted its retries and is going to the DLQ — "+
+				"the receiver never got this subtree's STUMP, so it cannot finalize the block and none of the "+
+				"block's transactions can reach MINED. Raise the receiver's inbound body cap "+
+				"(arcade: callback.max_body_bytes / ARCADE_CALLBACK_MAX_BODY_BYTES), then re-drive the block "+
+				"with POST /reprocess",
+			logfields.CallbackURL(cbMsg.CallbackURL),
+			logfields.TxID(cbMsg.TxID),
+			"type", cbMsg.Type,
+			logfields.BlockHash(cbMsg.BlockHash),
+			logfields.SubtreeIndex(cbMsg.SubtreeIndex),
+			"bodyBytes", o.bodyBytes,
+			"limitBytes", o.limitBytes,
+			"status", o.statusCode,
+			"retryCount", cbMsg.RetryCount,
+			"reason", "oversize",
+			"cause", cause,
+		)
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeOversizeStranded).Inc()
+		if err := d.publishToDLQDurably(ctx, cbMsg); err != nil {
+			return err
+		}
+		// Deliberately NO recordCallbackURLFailure here — see above.
+		return nil
+	}
+
 	// Permanent failures (e.g. STUMP blob expired) skip the retry budget and
 	// go straight to the DLQ — retrying cannot recover them.
 	if isPermanentDeliveryError(cause) {
@@ -686,9 +841,21 @@ func (d *DeliveryService) scheduleRetryOrDLQ(ctx context.Context, sourceTopic st
 		return nil
 	}
 
-	// Bump retry count + compute next NextRetryAt using linear backoff, then
-	// republish back to the callback topic. The republish is the durable
-	// side-effect: until it succeeds, we must not ack the source message.
+	return d.scheduleRetry(ctx, sourceTopic, cbMsg, cause)
+}
+
+// scheduleRetry bumps the retry count, computes the next NextRetryAt using
+// linear backoff, and republishes back to the source topic. The republish is
+// the durable side-effect: until it succeeds, we must not ack the source
+// message.
+//
+// Extracted from scheduleRetryOrDLQ so the oversize branch — which is
+// evaluated ahead of the permanent-failure check, and so cannot fall through
+// to the tail of that function — schedules retries through exactly the same
+// code path, with the same backoff and the same durability contract, as every
+// other retryable failure. Duplicating it there would be a standing invitation
+// for the two ladders to drift.
+func (d *DeliveryService) scheduleRetry(ctx context.Context, sourceTopic string, cbMsg *kafka.CallbackTopicMessage, cause error) error {
 	cbMsg.RetryCount++
 	backoffSec := d.cfg.Callback.BackoffBaseSec * cbMsg.RetryCount
 	cbMsg.NextRetryAt = time.Now().Add(time.Duration(backoffSec) * time.Second)
@@ -907,6 +1074,44 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 		}
 	}
 
+	// Size gate. The body is finished at this point (including a cache hit),
+	// so this covers every delivery, not just freshly-built ones.
+	//
+	// The WARN is unconditional early warning; the pre-flight refusal only
+	// fires when an operator has told us the receiver's cap. Refusing here
+	// rather than POSTing saves a doomed multi-MiB upload plus a request
+	// timeout, and — far more importantly — produces a diagnosis that names
+	// the block hash, subtree index and exact byte count, instead of an
+	// opaque 413 from the far end that we historically threw away as
+	// "permanent". See oversizeDeliveryError for the incident.
+	if len(body) > bodyWarnBytes {
+		d.Logger.Warn(
+			"callback body is approaching the receiver's inbound size limit — "+
+				"a STUMP that crosses it is rejected with 413 and strands its block until the cap is raised",
+			logfields.CallbackURL(msg.CallbackURL),
+			"type", msg.Type,
+			logfields.BlockHash(msg.BlockHash),
+			logfields.SubtreeIndex(msg.SubtreeIndex),
+			"bodyBytes", len(body),
+			"warnThresholdBytes", bodyWarnBytes,
+			"configuredMaxBodyBytes", d.cfg.Callback.MaxBodyBytes,
+		)
+	}
+	if limit := d.cfg.Callback.MaxBodyBytes; limit > 0 && int64(len(body)) > limit {
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeOversize).Inc()
+		// No request is issued on this path, so ObserveCallbackDelivery never
+		// runs — record the size explicitly so the largest bodies (the ones
+		// that matter most for spotting the growth trend) are not silently
+		// missing from the payload-size histogram.
+		metrics.ObserveCallbackPayloadSize(msg.CallbackURL, len(body))
+		d.logOversize(msg, len(body), limit, 0,
+			"callback body exceeds callback.maxBodyBytes — refusing to POST a body the receiver will reject with 413")
+		return errOversizeDelivery(
+			fmt.Errorf("callback body %d bytes exceeds configured callback.maxBodyBytes %d", len(body), limit),
+			len(body), limit, 0,
+		)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, msg.CallbackURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
@@ -978,12 +1183,25 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 	} else {
 		statusErr = fmt.Errorf("callback returned non-2xx status: %d: %s", resp.StatusCode, string(snippet))
 	}
-	// 4xx other than 408 (Request Timeout) and 429 (Too Many Requests) signal
-	// a client-side problem the receiver cannot resolve by us retrying — wrong
-	// URL, missing/invalid auth token, malformed payload, gone. Route straight
-	// to DLQ so a misconfigured arcade does not pin a callback worker on
-	// every block for the full retry budget. 408/429 stay retryable because
-	// they are explicit "try again later" signals.
+	// 413 first: it is a 4xx, but it is a payload-SIZE problem, not a
+	// "this request is invalid forever" problem, and conflating the two is
+	// what stranded a whole block's transactions on 2026-08-11 (see
+	// oversizeDeliveryError). Give it its own class so it keeps its retry
+	// budget and never trips the per-URL circuit breaker.
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeOversize).Inc()
+		d.logOversize(msg, len(body), d.cfg.Callback.MaxBodyBytes, resp.StatusCode,
+			"callback REJECTED as too large by the receiver (413) — raise the receiver's inbound body cap "+
+				"(arcade: callback.max_body_bytes / ARCADE_CALLBACK_MAX_BODY_BYTES); until it is raised, "+
+				"this block cannot be finalized and its transactions cannot reach MINED")
+		return errOversizeDelivery(statusErr, len(body), d.cfg.Callback.MaxBodyBytes, resp.StatusCode)
+	}
+	// 4xx other than 408 (Request Timeout), 413 (handled above) and 429 (Too
+	// Many Requests) signal a client-side problem the receiver cannot resolve
+	// by us retrying — wrong URL, missing/invalid auth token, malformed
+	// payload, gone. Route straight to DLQ so a misconfigured arcade does not
+	// pin a callback worker on every block for the full retry budget. 408/429
+	// stay retryable because they are explicit "try again later" signals.
 	if isNonRetryable4xx(resp.StatusCode) {
 		metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomePermanent4xx).Inc()
 		return errPermanentDelivery(statusErr)
@@ -991,15 +1209,48 @@ func (d *DeliveryService) deliverCallback(ctx context.Context, msg *kafka.Callba
 	return statusErr
 }
 
+// logOversize emits the single operator-facing ERROR for an oversize
+// callback. It deliberately names the block hash, subtree index and exact
+// body size: those three facts are what turn "some callback failed" into
+// "block <hash> subtree <n> is stranded because its body is <n> bytes and the
+// receiver's cap is lower than that", which is diagnosable at a glance.
+//
+// limit is 0 when we only learned about the cap from a 413 and the operator
+// has not mirrored the receiver's value into callback.maxBodyBytes; status is
+// 0 when our own pre-flight check refused the POST.
+func (d *DeliveryService) logOversize(msg *kafka.CallbackTopicMessage, bodyBytes int, limit int64, status int, headline string) {
+	d.Logger.Error(
+		headline,
+		logfields.CallbackURL(msg.CallbackURL),
+		logfields.TxID(msg.TxID),
+		"type", msg.Type,
+		logfields.BlockHash(msg.BlockHash),
+		logfields.SubtreeIndex(msg.SubtreeIndex),
+		"bodyBytes", bodyBytes,
+		"limitBytes", limit,
+		"status", status,
+		"stumpRef", msg.StumpRef,
+		"retryCount", msg.RetryCount,
+	)
+}
+
 // isNonRetryable4xx reports whether code is a 4xx response that we should
 // treat as permanent. 408 (Request Timeout) and 429 (Too Many Requests) are
 // the standard "try again later" 4xx codes and stay on the retry path.
+//
+// 413 (Request Entity Too Large) is likewise NOT permanent, but for a
+// different reason: it is curable by an operator raising the receiver's cap,
+// so it gets its own oversize class with its own routing rather than sharing
+// the generic retry path — see oversizeDeliveryError and the caller above,
+// which peels 413 off before consulting this function. It is listed here too
+// so that any future caller of isNonRetryable4xx cannot silently reintroduce
+// the "413 == permanent == DLQ == stranded block" bug.
 func isNonRetryable4xx(code int) bool {
 	if code < 400 || code >= 500 {
 		return false
 	}
 	switch code {
-	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+	case http.StatusRequestTimeout, http.StatusRequestEntityTooLarge, http.StatusTooManyRequests:
 		return false
 	}
 	return true

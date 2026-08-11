@@ -89,9 +89,24 @@ func ObserveCallbackDelivery(callbackURL string, statusCode, payloadSize int, d 
 	host := HostLabel(callbackURL)
 	statusClass := StatusClass(statusCode, err)
 	callbackDeliveryDuration.WithLabelValues(host, statusClass).Observe(d.Seconds())
-	if payloadSize > 0 {
-		callbackPayloadSize.WithLabelValues(host).Observe(float64(payloadSize))
+	ObserveCallbackPayloadSize(callbackURL, payloadSize)
+}
+
+// ObserveCallbackPayloadSize records the size of a body built for a callback,
+// independently of whether it was actually sent.
+//
+// Split out of ObserveCallbackDelivery so the pre-flight oversize refusal
+// (callback.maxBodyBytes) still lands in the size histogram. That path never
+// issues an HTTP request, so it has no status and no duration to report — but
+// it is precisely the case where knowing the payload size matters most, and
+// silently dropping the largest bodies from the histogram would hide the
+// growth trend that leads to the 413 in the first place. Non-positive sizes
+// are ignored.
+func ObserveCallbackPayloadSize(callbackURL string, payloadSize int) {
+	if payloadSize <= 0 {
+		return
 	}
+	callbackPayloadSize.WithLabelValues(HostLabel(callbackURL)).Observe(float64(payloadSize))
 }
 
 // ObserveCallbackRetryAttempt records the RetryCount distribution at the
