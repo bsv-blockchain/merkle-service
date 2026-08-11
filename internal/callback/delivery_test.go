@@ -106,11 +106,17 @@ func newTestDeliveryServiceWithStumps(t *testing.T, cfg *config.Config, httpClie
 	stumpStore := store.NewStumpStore(store.NewMemoryBlobStore(), 0, logger)
 
 	ds := &DeliveryService{
-		cfg:           cfg,
-		httpClient:    httpClient,
-		dlqProducer:   kafka.NewTestProducer(mockDLQProducer, cfg.Kafka.CallbackDLQTopic, logger),
-		retryProducer: kafka.NewTestProducer(mockRetryProducer, cfg.Kafka.CallbackTopic, logger),
-		stumpStore:    stumpStore,
+		cfg:         cfg,
+		httpClient:  httpClient,
+		dlqProducer: kafka.NewTestProducer(mockDLQProducer, cfg.Kafka.CallbackDLQTopic, logger),
+		// Keyed by SOURCE topic, mirroring Init. Messages built by
+		// encodeConsumerMessage carry no Topic, which retryProducerFor resolves
+		// to this 'callback' entry — the pre-split behavior every existing test
+		// asserts against.
+		retryProducers: map[string]*kafka.Producer{
+			cfg.Kafka.CallbackTopic: kafka.NewTestProducer(mockRetryProducer, cfg.Kafka.CallbackTopic, logger),
+		},
+		stumpStore: stumpStore,
 	}
 	ds.InitBase("callback-delivery-test")
 	ds.Logger = logger
@@ -465,7 +471,7 @@ func TestProcessDelivery_NonRetryable4xxRoutesStraightToDLQ(t *testing.T) {
 		SubtreeIndex: 0,
 	}
 
-	if err := ds.processDelivery(context.Background(), msg); err != nil {
+	if err := ds.processDelivery(context.Background(), "", msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
 
@@ -500,7 +506,7 @@ func TestProcessDelivery_RetriesViaKafkaRepublish(t *testing.T) {
 	}
 
 	retriedBefore := callbackCount(metrics.OutcomeRetryScheduled)
-	if err := ds.processDelivery(context.Background(), msg); err != nil {
+	if err := ds.processDelivery(context.Background(), "", msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
 
@@ -542,7 +548,7 @@ func TestProcessDelivery_RetryRepublishFailureSurfacesError(t *testing.T) {
 	}
 
 	before := callbackCount(metrics.OutcomeRetryScheduled)
-	err := ds.processDelivery(context.Background(), msg)
+	err := ds.processDelivery(context.Background(), "", msg)
 	if err == nil {
 		t.Fatal("expected error from processDelivery when retry republish fails")
 	}
@@ -573,7 +579,7 @@ func TestProcessDelivery_PublishesToDLQAfterMaxRetries(t *testing.T) {
 	}
 
 	before := callbackCount(metrics.OutcomeDLQ)
-	if err := ds.processDelivery(context.Background(), msg); err != nil {
+	if err := ds.processDelivery(context.Background(), "", msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
 
@@ -615,7 +621,7 @@ func TestProcessDelivery_DLQPublishFailureSurfacesError(t *testing.T) {
 
 	before := callbackCount(metrics.OutcomeDLQ)
 	start := time.Now()
-	err := ds.processDelivery(context.Background(), msg)
+	err := ds.processDelivery(context.Background(), "", msg)
 	if err == nil {
 		t.Fatal("expected error from processDelivery when DLQ publish fails")
 	}
@@ -651,7 +657,7 @@ func TestProcessDelivery_MissingStumpBlobGoesStraightToDLQ(t *testing.T) {
 	}
 
 	before := callbackCount(metrics.OutcomeDLQ)
-	if err := ds.processDelivery(context.Background(), msg); err != nil {
+	if err := ds.processDelivery(context.Background(), "", msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
 
@@ -683,7 +689,7 @@ func TestProcessDelivery_SuccessIncrementsCounter(t *testing.T) {
 	}
 
 	before := callbackCount(metrics.OutcomeDelivered)
-	if err := ds.processDelivery(context.Background(), msg); err != nil {
+	if err := ds.processDelivery(context.Background(), "", msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
 
@@ -712,7 +718,7 @@ func TestProcessDelivery_DedupSkipsDuplicate(t *testing.T) {
 	}
 
 	before := callbackCount(metrics.OutcomeDedupHit)
-	if err := ds.processDelivery(context.Background(), msg); err != nil {
+	if err := ds.processDelivery(context.Background(), "", msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
 
@@ -751,7 +757,7 @@ func TestProcessDelivery_DedupSkipLogsInfo(t *testing.T) {
 		SubtreeIndex: 0,
 	}
 
-	if err := ds.processDelivery(context.Background(), msg); err != nil {
+	if err := ds.processDelivery(context.Background(), "", msg); err != nil {
 		t.Fatalf("processDelivery returned error: %v", err)
 	}
 
@@ -811,7 +817,7 @@ func TestProcessDelivery_BypassDedupForcesReDelivery(t *testing.T) {
 		Type:        kafka.CallbackBlockProcessed,
 		BlockHash:   testBlockHash,
 	}
-	if err := dsNormal.processDelivery(context.Background(), normalMsg); err != nil {
+	if err := dsNormal.processDelivery(context.Background(), "", normalMsg); err != nil {
 		t.Fatalf("processDelivery (normal) returned error: %v", err)
 	}
 	if got := requestCount.Load(); got != 0 {
@@ -833,7 +839,7 @@ func TestProcessDelivery_BypassDedupForcesReDelivery(t *testing.T) {
 		BypassDedup: true,
 	}
 	before := callbackCount(metrics.OutcomeDelivered)
-	if err := dsForce.processDelivery(context.Background(), forceMsg); err != nil {
+	if err := dsForce.processDelivery(context.Background(), "", forceMsg); err != nil {
 		t.Fatalf("processDelivery (bypass) returned error: %v", err)
 	}
 	if got := requestCount.Load(); got != 1 {

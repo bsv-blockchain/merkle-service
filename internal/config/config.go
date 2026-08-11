@@ -317,6 +317,14 @@ func (a AerospikeConfig) SeedHosts() []string {
 const (
 	defaultSubtreePartitions     = 12
 	defaultSubtreeWorkPartitions = 24
+	// defaultCallbackSeenPartitions is the width of the DEDICATED SEEN callback
+	// topic (CallbackSeenTopic). It only applies when that topic is configured;
+	// it never widens the shared 'callback' topic. SEEN callbacks carry no
+	// cross-message ordering requirement that a partition split could break —
+	// arcade's status lattice refuses to supersede a higher status with a lower
+	// one, so SEEN_MULTIPLE_NODES arriving before SEEN_ON_NETWORK is a no-op
+	// rather than a regression.
+	defaultCallbackSeenPartitions = 12
 )
 
 // Default retention.ms applied when THIS service creates a topic (see
@@ -335,6 +343,7 @@ type KafkaConfig struct {
 	SubtreeTopic        string   `yaml:"subtreeTopic"        mapstructure:"subtreetopic"`
 	BlockTopic          string   `yaml:"blockTopic"          mapstructure:"blocktopic"`
 	CallbackTopic       string   `yaml:"callbackTopic"       mapstructure:"callbacktopic"`
+	CallbackSeenTopic   string   `yaml:"callbackSeenTopic"   mapstructure:"callbackseentopic"`
 	CallbackDLQTopic    string   `yaml:"callbackDlqTopic"    mapstructure:"callbackdlqtopic"`
 	SubtreeDLQTopic     string   `yaml:"subtreeDlqTopic"     mapstructure:"subtreedlqtopic"`
 	SubtreeWorkTopic    string   `yaml:"subtreeWorkTopic"    mapstructure:"subtreeworktopic"`
@@ -350,14 +359,20 @@ type KafkaConfig struct {
 	// can fetch/build concurrently. Defaults: subtree-work 24, subtree 12.
 	//
 	// The 'block' and 'callback' topics are deliberately NOT configurable here and
-	// stay at 1 partition: 'block' is low-rate, and 'callback' relies on
+	// stay at 1 partition: 'block' is low-rate, and 'callback' — which after the
+	// SEEN split carries ONLY the STUMP / BLOCK_PROCESSED traffic — relies on
 	// single-partition ordering to keep BLOCK_PROCESSED behind its STUMPs.
 	// Widening 'callback' stays deferred until the expectedSubtreeIndices
 	// completeness check is verified end-to-end in arcade — rollout step 4 of
 	// docs/block-processed-completeness.md (which supersedes the earlier
 	// callback-topic-partition-design.md, no longer in the repo).
-	SubtreePartitions     int `yaml:"subtreePartitions"     mapstructure:"subtreepartitions"`
-	SubtreeWorkPartitions int `yaml:"subtreeWorkPartitions" mapstructure:"subtreeworkpartitions"`
+	//
+	// CallbackSeenPartitions is a SEPARATE knob for the dedicated SEEN topic
+	// (CallbackSeenTopic) and never touches 'callback': SEEN callbacks carry no
+	// STUMP → BLOCK_PROCESSED barrier, so they are free to fan out.
+	SubtreePartitions      int `yaml:"subtreePartitions"      mapstructure:"subtreepartitions"`
+	SubtreeWorkPartitions  int `yaml:"subtreeWorkPartitions"  mapstructure:"subtreeworkpartitions"`
+	CallbackSeenPartitions int `yaml:"callbackSeenPartitions" mapstructure:"callbackseenpartitions"`
 
 	// TopicRetentionMs / DLQRetentionMs set the retention.ms config applied
 	// when this service CREATES a topic (work topics and DLQ topics
@@ -369,8 +384,24 @@ type KafkaConfig struct {
 	DLQRetentionMs   int64 `yaml:"dlqRetentionMs"   mapstructure:"dlqretentionms"`
 }
 
+// SeenCallbackTopic returns the topic SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES
+// callbacks travel on: the dedicated CallbackSeenTopic when configured,
+// otherwise the shared CallbackTopic (pre-split behavior).
+//
+// BOTH the producer (internal/subtree/processor.go) and the consumer
+// (internal/callback/delivery.go) MUST route through this one helper — if
+// either side hard-codes a topic while the other reads config, SEEN callbacks
+// are published to a topic nobody consumes and every watched transaction
+// silently strands at ACCEPTED_BY_NETWORK.
+func (k KafkaConfig) SeenCallbackTopic() string {
+	if k.CallbackSeenTopic != "" {
+		return k.CallbackSeenTopic
+	}
+	return k.CallbackTopic
+}
+
 // TopicPartitions maps each topic name to the partition count it should be
-// created with (and grown to). Only the two safe-to-widen topics carry a count
+// created with (and grown to). Only the safe-to-widen topics carry a count
 // above 1; every other topic is absent, which callers/EnsureTopics treat as the
 // default of 1. Counts <= 0 fall back to the built-in default.
 func (k KafkaConfig) TopicPartitions() map[string]int32 {
@@ -382,12 +413,33 @@ func (k KafkaConfig) TopicPartitions() map[string]int32 {
 	if work <= 0 {
 		work = defaultSubtreeWorkPartitions
 	}
-	m := make(map[string]int32, 2)
+	seen := k.CallbackSeenPartitions
+	if seen <= 0 {
+		seen = defaultCallbackSeenPartitions
+	}
+	m := make(map[string]int32, 3)
 	if k.SubtreeTopic != "" {
 		m[k.SubtreeTopic] = int32(subtree)
 	}
 	if k.SubtreeWorkTopic != "" {
 		m[k.SubtreeWorkTopic] = int32(work)
+	}
+	// Deliberately keyed off CallbackSeenTopic, NOT SeenCallbackTopic(): in
+	// fallback mode the helper returns CallbackTopic, so using it here would
+	// silently widen the shared 'callback' topic to defaultCallbackSeenPartitions
+	// and shatter the STUMP → BLOCK_PROCESSED ordering barrier. 'callback' must
+	// stay absent from this map (see the topic_partitions_test assertion).
+	//
+	// The != CallbackTopic guard closes the same hazard reached a different way:
+	// an operator setting callbackSeenTopic to the SAME name as callbackTopic
+	// (copy/paste or typo). Producer and consumer both treat that as fallback
+	// mode, but without this guard it would still put 'callback' in the
+	// partition map and let EnsureTopics widen it. Widening is effectively
+	// irreversible — the operator cannot shrink a live topic without recreating
+	// it during a drained window — so a misconfiguration must not be able to
+	// reach it.
+	if k.CallbackSeenTopic != "" && k.CallbackSeenTopic != k.CallbackTopic {
+		m[k.CallbackSeenTopic] = int32(seen)
 	}
 	return m
 }
@@ -406,8 +458,8 @@ func (k KafkaConfig) TopicRetention() map[string]int64 {
 	if dlqMs <= 0 {
 		dlqMs = defaultDLQRetentionMs
 	}
-	m := make(map[string]int64, 7)
-	for _, topic := range []string{k.SubtreeTopic, k.BlockTopic, k.CallbackTopic, k.SubtreeWorkTopic} {
+	m := make(map[string]int64, 8)
+	for _, topic := range []string{k.SubtreeTopic, k.BlockTopic, k.CallbackTopic, k.CallbackSeenTopic, k.SubtreeWorkTopic} {
 		if topic != "" {
 			m[topic] = topicMs
 		}
@@ -719,6 +771,10 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("kafka.subtreetopic", "subtree")
 	v.SetDefault("kafka.blocktopic", "block")
 	v.SetDefault("kafka.callbacktopic", "callback")
+	// Empty by default: the SEEN split is INERT until an operator sets
+	// kafka.callbackSeenTopic (or KAFKA_CALLBACK_SEEN_TOPIC). Empty ⇒
+	// SeenCallbackTopic() falls back to 'callback' and behavior is unchanged.
+	v.SetDefault("kafka.callbackseentopic", "")
 	v.SetDefault("kafka.callbackdlqtopic", "callback-dlq")
 	v.SetDefault("kafka.subtreedlqtopic", "subtree-dlq")
 	v.SetDefault("kafka.subtreeworktopic", "subtree-work")
@@ -726,6 +782,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("kafka.consumergroup", "merkle-service")
 	v.SetDefault("kafka.subtreepartitions", defaultSubtreePartitions)
 	v.SetDefault("kafka.subtreeworkpartitions", defaultSubtreeWorkPartitions)
+	v.SetDefault("kafka.callbackseenpartitions", defaultCallbackSeenPartitions)
 	v.SetDefault("kafka.topicretentionms", defaultTopicRetentionMs)
 	v.SetDefault("kafka.dlqretentionms", defaultDLQRetentionMs)
 
@@ -903,6 +960,7 @@ func bindEnvVars(v *viper.Viper) {
 		"kafka.subtreetopic":        "KAFKA_SUBTREE_TOPIC",
 		"kafka.blocktopic":          "KAFKA_BLOCK_TOPIC",
 		"kafka.callbacktopic":       "KAFKA_CALLBACK_TOPIC",
+		"kafka.callbackseentopic":   "KAFKA_CALLBACK_SEEN_TOPIC",
 		"kafka.callbackdlqtopic":    "KAFKA_CALLBACK_DLQ_TOPIC",
 		"kafka.subtreedlqtopic":     "KAFKA_SUBTREE_DLQ_TOPIC",
 		"kafka.subtreeworktopic":    "KAFKA_SUBTREE_WORK_TOPIC",
@@ -910,6 +968,8 @@ func bindEnvVars(v *viper.Viper) {
 		"kafka.consumergroup":       "KAFKA_CONSUMER_GROUP",
 		"kafka.topicretentionms":    "KAFKA_TOPIC_RETENTION_MS",
 		"kafka.dlqretentionms":      "KAFKA_DLQ_RETENTION_MS",
+
+		"kafka.callbackseenpartitions": "KAFKA_CALLBACK_SEEN_PARTITIONS",
 
 		// P2P
 		"p2p.network":               "P2P_NETWORK",

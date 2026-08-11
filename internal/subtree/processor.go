@@ -57,7 +57,7 @@ type Processor struct {
 
 	cfg               *config.Config
 	consumer          *kafka.Consumer
-	callbackProducer  *kafka.Producer
+	callbackProducer  *kafka.Producer // publishes SEEN_* callbacks to Kafka.SeenCallbackTopic()
 	retryProducer     *kafka.Producer // re-publishes to the subtree topic on transient failure
 	dlqProducer       *kafka.Producer // publishes to subtree-dlq when MaxAttempts is exceeded
 	registrationStore RegistrationGetter
@@ -131,9 +131,15 @@ func (p *Processor) Init(_ interface{}) error {
 		p.regCache = regCache
 	}
 
+	// SEEN_ON_NETWORK / SEEN_MULTIPLE_NODES go to the dedicated SEEN topic when
+	// one is configured, otherwise the shared 'callback' topic. Routed through
+	// KafkaConfig.SeenCallbackTopic() so producer and consumer can never
+	// disagree about where SEEN callbacks live. STUMP / BLOCK_PROCESSED stay on
+	// 'callback' (internal/block/*) — they are the traffic that was
+	// head-of-line-blocking these small, latency-sensitive messages.
 	callbackProducer, err := kafka.NewProducer(
 		p.cfg.Kafka.Brokers,
-		p.cfg.Kafka.CallbackTopic,
+		p.cfg.Kafka.SeenCallbackTopic(),
 		p.cfg.Kafka.TopicPartitions(),
 		p.cfg.Kafka.TopicRetention(),
 		p.Logger,
@@ -192,7 +198,7 @@ func (p *Processor) Init(_ interface{}) error {
 		"storageMode", p.cfg.Subtree.StorageMode,
 		"subtreeTopic", p.cfg.Kafka.SubtreeTopic,
 		"subtreeDLQTopic", p.cfg.Kafka.SubtreeDLQTopic,
-		"callbackTopic", p.cfg.Kafka.CallbackTopic,
+		"callbackTopic", p.cfg.Kafka.SeenCallbackTopic(),
 		"maxAttempts", p.cfg.Subtree.MaxAttempts,
 		"retryBackoffBaseMs", p.cfg.Subtree.RetryBackoffBaseMs,
 		"cacheEnabled", p.regCache != nil,

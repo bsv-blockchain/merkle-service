@@ -111,13 +111,26 @@ type callbackPayload struct {
 type DeliveryService struct {
 	service.BaseService
 
-	cfg           *config.Config
-	consumer      *kafka.Consumer
-	dlqProducer   *kafka.Producer
-	retryProducer *kafka.Producer
-	httpClient    *http.Client
-	dedupStore    CallbackDeduper
-	stumpStore    store.StumpStore
+	cfg *config.Config
+	// consumers holds one consumer per source topic: always the shared
+	// 'callback' topic (STUMP / BLOCK_PROCESSED), plus — when
+	// Kafka.CallbackSeenTopic is configured — a second, independent consumer
+	// group on the SEEN topic. Two consumers means two independent sets of
+	// partition workers, so a burst of ~545 KB STUMP deliveries can no longer
+	// head-of-line-block the small SEEN callbacks behind it.
+	consumers   []*kafka.Consumer
+	dlqProducer *kafka.Producer
+	// retryProducers maps SOURCE topic -> the producer that republishes a
+	// failed delivery back onto THAT SAME topic. Keying by source topic is
+	// load-bearing: a single retry producer pinned to 'callback' would push
+	// SEEN retries onto the blocked topic and silently reintroduce exactly the
+	// head-of-line blocking this split removes. Lookups go through
+	// retryProducerFor, which falls back to the 'callback' producer for an
+	// unknown/empty topic.
+	retryProducers map[string]*kafka.Producer
+	httpClient     *http.Client
+	dedupStore     CallbackDeduper
+	stumpStore     store.StumpStore
 	// urlRegistry trips a per-URL circuit breaker after a DLQ'd callback so dead
 	// endpoints stop receiving fan-out. nil disables the breaker.
 	urlRegistry store.CallbackURLRegistry
@@ -231,7 +244,7 @@ func (d *DeliveryService) Init(_ interface{}) error {
 	if err != nil {
 		return fmt.Errorf("failed to create callback retry producer: %w", err)
 	}
-	d.retryProducer = retryProducer
+	d.retryProducers = map[string]*kafka.Producer{d.cfg.Kafka.CallbackTopic: retryProducer}
 
 	// Create consumer for the callback topic.
 	consumer, err := kafka.NewConsumer(
@@ -246,11 +259,63 @@ func (d *DeliveryService) Init(_ interface{}) error {
 	if err != nil {
 		return fmt.Errorf("failed to create callback consumer: %w", err)
 	}
-	d.consumer = consumer
+	d.consumers = []*kafka.Consumer{consumer}
+
+	// SEEN split: when a dedicated SEEN topic is configured, stand up a second,
+	// fully independent consumer group for it. Its partition workers run in
+	// parallel with the 'callback' ones, so a block's STUMP/BLOCK_PROCESSED
+	// burst can no longer delay a SEEN_ON_NETWORK. Unlike 'callback', this
+	// topic IS created wide (TopicPartitions carries CallbackSeenTopic) —
+	// SEEN callbacks have no STUMP → BLOCK_PROCESSED barrier to preserve, and
+	// arcade's status lattice refuses to let a lower status supersede a higher
+	// one, so cross-partition SEEN reordering cannot regress a transaction.
+	//
+	// When CallbackSeenTopic is empty, SeenCallbackTopic() == CallbackTopic and
+	// we skip this entirely: one consumer, one retry producer, exactly the
+	// pre-split behavior.
+	seenTopic := d.cfg.Kafka.SeenCallbackTopic()
+	if seenTopic != d.cfg.Kafka.CallbackTopic {
+		seenRetryProducer, sErr := kafka.NewProducer(
+			d.cfg.Kafka.Brokers,
+			seenTopic,
+			d.cfg.Kafka.TopicPartitions(),
+			d.cfg.Kafka.TopicRetention(),
+			d.Logger,
+		)
+		if sErr != nil {
+			return fmt.Errorf("failed to create SEEN callback retry producer: %w", sErr)
+		}
+		d.retryProducers[seenTopic] = seenRetryProducer
+
+		seenConsumer, sErr := kafka.NewConsumer(
+			d.cfg.Kafka.Brokers,
+			d.cfg.Kafka.ConsumerGroup+"-callback-seen",
+			[]string{seenTopic},
+			d.handleMessage,
+			d.cfg.Kafka.TopicPartitions(),
+			d.cfg.Kafka.TopicRetention(),
+			d.Logger,
+		)
+		if sErr != nil {
+			// Unwind the retry producer created moments ago. Init's caller
+			// treats an error as "service never started" and does not call
+			// Stop(), so anything already opened here has to be closed on this
+			// path or its broker connections leak for the process lifetime.
+			if cErr := seenRetryProducer.Close(); cErr != nil {
+				d.Logger.Warn("failed to close SEEN retry producer after consumer init failure", "error", cErr)
+			}
+			delete(d.retryProducers, seenTopic)
+			return fmt.Errorf("failed to create SEEN callback consumer: %w", sErr)
+		}
+		d.consumers = append(d.consumers, seenConsumer)
+	}
 
 	d.Logger.Info(
 		"callback delivery service initialized",
 		"callbackTopic", d.cfg.Kafka.CallbackTopic,
+		"callbackSeenTopic", seenTopic,
+		"callbackSeenPartitions", d.cfg.Kafka.TopicPartitions()[d.cfg.Kafka.CallbackSeenTopic],
+		"callbackSeenSplitEnabled", seenTopic != d.cfg.Kafka.CallbackTopic,
 		"callbackDlqTopic", d.cfg.Kafka.CallbackDLQTopic,
 		"maxRetries", d.cfg.Callback.MaxRetries,
 		"backoffBaseSec", d.cfg.Callback.BackoffBaseSec,
@@ -272,8 +337,13 @@ func (d *DeliveryService) Start(ctx context.Context) error {
 	// throughput without enabling DEBUG (successful deliveries log at DEBUG).
 	go d.heartbeat(d.Context())
 
-	if err := d.consumer.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start callback consumer: %w", err)
+	// Start every configured consumer ('callback', plus the SEEN topic when the
+	// split is enabled). A failure on any one aborts startup — a half-started
+	// service would silently strand one class of callbacks.
+	for _, c := range d.consumers {
+		if err := c.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start callback consumer: %w", err)
+		}
 	}
 
 	d.SetStarted(true)
@@ -287,16 +357,27 @@ func (d *DeliveryService) Stop() error {
 
 	var firstErr error
 
-	if d.consumer != nil {
-		if err := d.consumer.Stop(); err != nil {
+	for _, c := range d.consumers {
+		if c == nil {
+			continue
+		}
+		if err := c.Stop(); err != nil {
 			d.Logger.Error("failed to stop consumer", "error", err)
-			firstErr = err
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 
-	if d.retryProducer != nil {
-		if err := d.retryProducer.Close(); err != nil {
-			d.Logger.Error("failed to close retry producer", "error", err)
+	// Close every per-source-topic retry producer. Iterated over a sorted key
+	// list so shutdown logging is deterministic rather than map-order random.
+	for _, topic := range sortedKeys(d.retryProducers) {
+		p := d.retryProducers[topic]
+		if p == nil {
+			continue
+		}
+		if err := p.Close(); err != nil {
+			d.Logger.Error("failed to close retry producer", "topic", topic, "error", err)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -337,8 +418,43 @@ func (d *DeliveryService) Health() service.HealthStatus {
 			"messagesProcessed": fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDelivered)))),
 			"messagesRetried":   fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeRetryScheduled)))),
 			"messagesFailed":    fmt.Sprintf("%d", int64(testutil.ToFloat64(metrics.CallbackMessagesTotal.WithLabelValues(metrics.OutcomeDLQ)))),
+			// Surfaces whether the SEEN split is actually live in this pod —
+			// the first thing to check when SEEN callbacks stop arriving.
+			"consumedTopics":  strings.Join(sortedKeys(d.retryProducers), ","),
+			"consumerCount":   fmt.Sprintf("%d", len(d.consumers)),
+			"seenSplitActive": fmt.Sprintf("%t", len(d.consumers) > 1),
 		},
 	}
+}
+
+// sortedKeys returns the keys of m in ascending order, so map iteration never
+// leaks nondeterministic ordering into logs or health output.
+func sortedKeys(m map[string]*kafka.Producer) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// retryProducerFor returns the producer that republishes retries back onto
+// topic — the SOURCE topic the message was consumed from.
+//
+// Routing a retry to its source topic is a correctness requirement, not a
+// nicety: before the SEEN split there was a single retry producer pinned to
+// 'callback', and reusing it for SEEN messages would drop every SEEN retry
+// onto the topic that STUMP floods block, reintroducing the head-of-line
+// stall for exactly the callbacks that most need low latency.
+//
+// An unknown or empty topic (tests construct kafka.Message without one, and a
+// consumer could in principle be pointed at another topic) falls back to the
+// 'callback' producer, which is the pre-split behavior.
+func (d *DeliveryService) retryProducerFor(topic string) *kafka.Producer {
+	if p, ok := d.retryProducers[topic]; ok {
+		return p
+	}
+	return d.retryProducers[d.cfg.Kafka.CallbackTopic]
 }
 
 // handleMessage is the durable entry-point for a single Kafka message. It
@@ -351,6 +467,9 @@ func (d *DeliveryService) Health() service.HealthStatus {
 // Same-partition serialization (callback URL is the partition key) means
 // STUMP messages for a given (block, callbackURL) are processed before
 // BLOCK_PROCESSED for the same key, without any in-process gating.
+//
+// msg.Topic is threaded down the whole retry path so a republished retry goes
+// back to the topic it came from — see retryProducerFor.
 func (d *DeliveryService) handleMessage(ctx context.Context, msg *kafka.Message) error {
 	cbMsg, err := kafka.DecodeCallbackTopicMessage(msg.Value)
 	if err != nil {
@@ -390,19 +509,22 @@ func (d *DeliveryService) handleMessage(ctx context.Context, msg *kafka.Message)
 				case <-ctx.Done():
 					return ctx.Err()
 				}
-				return d.republishForRetry(ctx, cbMsg, "future-dated retry not yet due")
+				return d.republishForRetry(ctx, msg.Topic, cbMsg, "future-dated retry not yet due")
 			}
 		}
 	}
 
-	return d.processDelivery(ctx, cbMsg)
+	return d.processDelivery(ctx, msg.Topic, cbMsg)
 }
 
 // processDelivery runs the dedup check, HTTP delivery, dedup record, and
 // retry/DLQ logic for a single message inline. It returns nil only after the
 // message reaches a durable terminal state; a non-nil return means the
 // Kafka offset must NOT be marked so the message is re-consumed.
-func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.CallbackTopicMessage) error {
+//
+// sourceTopic is the topic the message was consumed from; it decides which
+// retry producer a rescheduled delivery is republished through.
+func (d *DeliveryService) processDelivery(ctx context.Context, sourceTopic string, cbMsg *kafka.CallbackTopicMessage) error {
 	d.Logger.Debug(
 		"processing callback message",
 		logfields.CallbackURL(cbMsg.CallbackURL),
@@ -453,7 +575,7 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 				// to fall through to the retry path so the next attempt
 				// re-checks dedup once the store recovers.
 				d.Logger.Error("dedup check failed, scheduling retry", "error", err, "dedupKey", dedupKey, logfields.CallbackURL(cbMsg.CallbackURL))
-				return d.scheduleRetryOrDLQ(ctx, cbMsg, fmt.Errorf("dedup check: %w", err))
+				return d.scheduleRetryOrDLQ(ctx, sourceTopic, cbMsg, fmt.Errorf("dedup check: %w", err))
 			}
 			if exists {
 				// Log at info so silent suppressions are observable in
@@ -518,14 +640,14 @@ func (d *DeliveryService) processDelivery(ctx context.Context, cbMsg *kafka.Call
 		logfields.SubtreeIndex(cbMsg.SubtreeIndex),
 		"error", deliverErr,
 	)
-	return d.scheduleRetryOrDLQ(ctx, cbMsg, deliverErr)
+	return d.scheduleRetryOrDLQ(ctx, sourceTopic, cbMsg, deliverErr)
 }
 
 // scheduleRetryOrDLQ decides whether a failed message should be republished
 // for retry or routed to the DLQ, then performs the durable side-effect. It
 // returns nil iff the durable side-effect succeeded; otherwise the caller
 // must propagate the error up so the Kafka offset is not committed.
-func (d *DeliveryService) scheduleRetryOrDLQ(ctx context.Context, cbMsg *kafka.CallbackTopicMessage, cause error) error {
+func (d *DeliveryService) scheduleRetryOrDLQ(ctx context.Context, sourceTopic string, cbMsg *kafka.CallbackTopicMessage, cause error) error {
 	// Permanent failures (e.g. STUMP blob expired) skip the retry budget and
 	// go straight to the DLQ — retrying cannot recover them.
 	if isPermanentDeliveryError(cause) {
@@ -582,7 +704,7 @@ func (d *DeliveryService) scheduleRetryOrDLQ(ctx context.Context, cbMsg *kafka.C
 		"cause", cause,
 	)
 
-	return d.republishForRetry(ctx, cbMsg, "retry after delivery failure")
+	return d.republishForRetry(ctx, sourceTopic, cbMsg, "retry after delivery failure")
 }
 
 // recordCallbackURLFailure trips the per-URL circuit breaker after a callback
@@ -610,31 +732,43 @@ func (d *DeliveryService) recordCallbackURLFailure(callbackURL string) {
 	}
 }
 
-// republishForRetry encodes cbMsg and publishes it back to the callback
-// topic via the retry producer. The partition key is derived from the
-// message's scope (subtree or block, plus URL) so retries land on the same
-// partition as the original — preserving STUMP → BLOCK_PROCESSED ordering
-// for the same (subtree, callbackURL) — while still scattering across
-// partitions when there's a single registered URL (F-059).
+// republishForRetry encodes cbMsg and publishes it back to sourceTopic — the
+// topic it was consumed from — via that topic's retry producer. The partition
+// key is derived from the message's scope (subtree or block, plus URL) so
+// retries land on the same partition as the original — preserving
+// STUMP → BLOCK_PROCESSED ordering for the same (subtree, callbackURL) — while
+// still scattering across partitions when there's a single registered URL
+// (F-059).
+//
+// Routing by sourceTopic is what keeps the SEEN split intact across retries: a
+// retry producer pinned to 'callback' would drag every retried SEEN callback
+// back behind the STUMP flood it was split away from.
 //
 // Returning nil means the publish was acknowledged by Kafka and the source
 // message can now be safely ack'd. A non-nil return means the publish failed
 // and the caller must NOT mark the offset.
-func (d *DeliveryService) republishForRetry(ctx context.Context, cbMsg *kafka.CallbackTopicMessage, reason string) error {
+func (d *DeliveryService) republishForRetry(ctx context.Context, sourceTopic string, cbMsg *kafka.CallbackTopicMessage, reason string) error {
 	data, err := cbMsg.Encode()
 	if err != nil {
 		return fmt.Errorf("encode callback message for retry republish (%s): %w", reason, err)
 	}
+	producer := d.retryProducerFor(sourceTopic)
+	if producer == nil {
+		// No retry channel at all: never ack, so the message is redelivered
+		// rather than silently dropped.
+		return fmt.Errorf("no retry producer for source topic %q (%s)", sourceTopic, reason)
+	}
 	// WithoutCancel: this republish is a durable retry hand-off that must not
 	// be dropped by the originating consumer ctx being canceled mid-flight;
 	// only the trace context is preserved.
-	if err := d.retryProducer.PublishWithHashKey(context.WithoutCancel(ctx), cbMsg.PartitionKey(), data); err != nil {
+	if err := producer.PublishWithHashKey(context.WithoutCancel(ctx), cbMsg.PartitionKey(), data); err != nil {
 		d.Logger.Error(
 			"retry republish failed, leaving Kafka offset uncommitted",
 			logfields.CallbackURL(cbMsg.CallbackURL),
 			logfields.TxID(cbMsg.TxID),
 			"retryCount", cbMsg.RetryCount,
 			"reason", reason,
+			"sourceTopic", sourceTopic,
 			"error", err,
 		)
 		return fmt.Errorf("retry republish (%s): %w", reason, err)
