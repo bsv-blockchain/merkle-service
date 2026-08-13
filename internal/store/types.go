@@ -3,7 +3,7 @@ package store
 // IncrementResult is returned by SeenCounterStore.Increment.
 type IncrementResult struct {
 	NewCount         int
-	ThresholdReached bool // true only when count first equals threshold (not above)
+	ThresholdReached bool // true only when count first reaches or exceeds the threshold
 }
 
 // AccumulatedCallbackEntry holds data for one subtree's contribution to a
