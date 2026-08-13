@@ -136,7 +136,7 @@ func TestKafkaConfig_SeenCallbackTopic(t *testing.T) {
 // with no config file and no env var, SEEN callbacks still resolve to
 // 'callback' and the shared topic is still absent from the partition map.
 func TestLoad_CallbackSeenTopicDefaultsInert(t *testing.T) {
-	t.Setenv("CONFIG_FILE", "/nonexistent/config.yaml")
+	isolateFromRepoConfig(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -158,7 +158,7 @@ func TestLoad_CallbackSeenTopicDefaultsInert(t *testing.T) {
 // TestLoad_CallbackSeenTopicEnvOverride verifies the env plumbing operators
 // will actually use to turn the split on.
 func TestLoad_CallbackSeenTopicEnvOverride(t *testing.T) {
-	t.Setenv("CONFIG_FILE", "/nonexistent/config.yaml")
+	isolateFromRepoConfig(t)
 	t.Setenv("KAFKA_CALLBACK_SEEN_TOPIC", topicCallbackSeen)
 	t.Setenv("KAFKA_CALLBACK_SEEN_PARTITIONS", "6")
 	cfg, err := Load()

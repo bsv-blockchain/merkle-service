@@ -1087,6 +1087,11 @@ func bindEnvVars(v *viper.Viper) {
 
 // Load reads configuration from defaults, YAML file, and environment variables.
 // Priority order: env vars > YAML file > defaults.
+//
+// When CONFIG_FILE is set, a missing or unreadable file is fatal so a typo or
+// missing mount cannot silently start the service on built-in defaults. When
+// CONFIG_FILE is unset, a missing default config.yaml is ignored and Load
+// continues with defaults and environment variables.
 func Load() (*Config, error) {
 	v := viper.New()
 
@@ -1098,23 +1103,20 @@ func Load() (*Config, error) {
 
 	// Configure config file path.
 	// Check CONFIG_FILE env var directly (not via Viper since it's not a config key).
-	if configFile := os.Getenv("CONFIG_FILE"); configFile != "" {
-		v.SetConfigFile(configFile)
+	explicitFile := os.Getenv("CONFIG_FILE")
+	if explicitFile != "" {
+		v.SetConfigFile(explicitFile)
 	} else {
 		v.SetConfigName("config")
 		v.SetConfigType("yaml")
 		v.AddConfigPath(".")
 	}
 
-	// Read config file (ignore file-not-found).
 	if err := v.ReadInConfig(); err != nil {
 		var notFoundErr viper.ConfigFileNotFoundError
-		if errors.As(err, &notFoundErr) {
-			// No config file found — use defaults + env vars only.
-		} else if os.IsNotExist(err) {
-			// Explicit CONFIG_FILE path doesn't exist — use defaults + env vars only.
+		if explicitFile == "" && (errors.As(err, &notFoundErr) || os.IsNotExist(err)) {
+			// No default config.yaml — use defaults + env vars only.
 		} else {
-			// File exists but is invalid (parse error).
 			return nil, fmt.Errorf("failed to read config file: %w", err)
 		}
 	}

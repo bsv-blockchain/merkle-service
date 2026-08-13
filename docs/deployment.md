@@ -69,6 +69,8 @@ Configuration is loaded in this priority order (highest wins):
 2. **YAML config file** (`config.yaml` by default, override path with `CONFIG_FILE`)
 3. **Built-in defaults**
 
+If `CONFIG_FILE` is set, the file must exist; a missing explicit path is a startup error. A missing default `config.yaml` is ignored.
+
 ---
 
 ## All-in-One vs Microservice Mode
@@ -88,7 +90,7 @@ Set via `MODE` env var or the `mode` YAML key.
 
 | Variable       | Default        | Description                                       |
 |----------------|----------------|---------------------------------------------------|
-| `CONFIG_FILE`  | `config.yaml`  | Path to YAML configuration file.                  |
+| `CONFIG_FILE`  | `config.yaml`  | Path to YAML configuration file. Missing explicit paths fail startup. |
 | `MODE`         | `all-in-one`   | Operating mode: `all-in-one` or `microservice`.   |
 
 ### API

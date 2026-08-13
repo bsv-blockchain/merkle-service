@@ -70,7 +70,7 @@ func TestKafkaConfig_TopicRetention(t *testing.T) {
 // broker default (dev-ovh-1: 15 minutes) can't silently apply to topics this
 // service creates.
 func TestLoad_TopicRetentionDefaults(t *testing.T) {
-	t.Setenv("CONFIG_FILE", "/nonexistent/config.yaml")
+	isolateFromRepoConfig(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -85,7 +85,7 @@ func TestLoad_TopicRetentionDefaults(t *testing.T) {
 
 // TestLoad_TopicRetentionEnvOverride verifies the env var plumbing.
 func TestLoad_TopicRetentionEnvOverride(t *testing.T) {
-	t.Setenv("CONFIG_FILE", "/nonexistent/config.yaml")
+	isolateFromRepoConfig(t)
 	t.Setenv("KAFKA_TOPIC_RETENTION_MS", "3600000")
 	t.Setenv("KAFKA_DLQ_RETENTION_MS", "86400000")
 	cfg, err := Load()

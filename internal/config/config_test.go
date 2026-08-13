@@ -3,6 +3,7 @@ package config
 import (
 	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -59,8 +60,7 @@ func clearConfigEnv(t *testing.T) {
 
 func TestLoad_Defaults(t *testing.T) {
 	clearConfigEnv(t)
-	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
+	isolateFromRepoConfig(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -195,8 +195,7 @@ func TestLoad_Defaults(t *testing.T) {
 
 func TestLoad_EnvOverrides(t *testing.T) {
 	clearConfigEnv(t)
-	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
+	isolateFromRepoConfig(t)
 
 	_ = os.Setenv("MODE", "microservice")
 	_ = os.Setenv("API_PORT", "9090")
@@ -374,7 +373,7 @@ func TestLoad_BlobStoreSweepValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clearConfigEnv(t)
-			t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+			isolateFromRepoConfig(t)
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
@@ -468,10 +467,32 @@ func TestLoad_InvalidYAMLReturnsError(t *testing.T) {
 	}
 }
 
+func TestLoad_MissingExplicitConfigFileIsFatal(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CONFIG_FILE", filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when CONFIG_FILE points at a missing file")
+	}
+}
+
+func TestLoad_MissingDefaultConfigFileUsesDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	t.Chdir(t.TempDir())
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with no config.yaml should succeed: %v", err)
+	}
+	if cfg.Mode != "all-in-one" {
+		t.Errorf("Mode: expected %q, got %q", "all-in-one", cfg.Mode)
+	}
+}
+
 func TestLoad_P2PMsgBusDefaults(t *testing.T) {
 	clearConfigEnv(t)
-	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
+	isolateFromRepoConfig(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -494,12 +515,9 @@ func TestLoad_P2PMsgBusDefaults(t *testing.T) {
 
 func TestLoad_P2PDHTModeEnvOverride(t *testing.T) {
 	clearConfigEnv(t)
-	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	isolateFromRepoConfig(t)
 	_ = os.Setenv("P2P_DHT_MODE", "server")
-	defer func() {
-		_ = os.Unsetenv("CONFIG_FILE")
-		_ = os.Unsetenv("P2P_DHT_MODE")
-	}()
+	defer func() { _ = os.Unsetenv("P2P_DHT_MODE") }()
 
 	cfg, err := Load()
 	if err != nil {
@@ -513,8 +531,7 @@ func TestLoad_P2PDHTModeEnvOverride(t *testing.T) {
 
 func TestLoad_LogLevelDefault(t *testing.T) {
 	clearConfigEnv(t)
-	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
+	isolateFromRepoConfig(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -528,12 +545,9 @@ func TestLoad_LogLevelDefault(t *testing.T) {
 
 func TestLoad_LogLevelEnvOverride(t *testing.T) {
 	clearConfigEnv(t)
-	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	isolateFromRepoConfig(t)
 	_ = os.Setenv("LOG_LEVEL", "debug")
-	defer func() {
-		_ = os.Unsetenv("CONFIG_FILE")
-		_ = os.Unsetenv("LOG_LEVEL")
-	}()
+	defer func() { _ = os.Unsetenv("LOG_LEVEL") }()
 
 	cfg, err := Load()
 	if err != nil {
@@ -552,7 +566,7 @@ func TestLoad_LogLevelEnvOverride(t *testing.T) {
 // cooldown even though the peer was fine).
 func TestLoad_DataHubPeerHealthDefaults(t *testing.T) {
 	clearConfigEnv(t)
-	t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	isolateFromRepoConfig(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -575,7 +589,7 @@ func TestLoad_DataHubPeerHealthDefaults(t *testing.T) {
 // env var ignored.
 func TestLoad_DataHubPeerHealthEnvBinding(t *testing.T) {
 	clearConfigEnv(t)
-	t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	isolateFromRepoConfig(t)
 	t.Setenv("DATAHUB_PEER_HEALTH_FAILURE_THRESHOLD", "5")
 	t.Setenv("DATAHUB_PEER_HEALTH_COOLDOWN_SEC", "120")
 	t.Setenv("DATAHUB_PEER_HEALTH_STALE404_GRACE_SEC", "900")
@@ -598,7 +612,7 @@ func TestLoad_DataHubPeerHealthEnvBinding(t *testing.T) {
 
 func TestLoad_TelemetryDefaults(t *testing.T) {
 	clearConfigEnv(t)
-	t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	isolateFromRepoConfig(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -642,7 +656,7 @@ func TestLoad_TelemetryDefaults(t *testing.T) {
 // binding entry would silently leave the env var ignored.
 func TestLoad_TelemetryEnvBinding(t *testing.T) {
 	clearConfigEnv(t)
-	t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	isolateFromRepoConfig(t)
 	t.Setenv(envTelemetryEnabled, "true")
 	t.Setenv("TELEMETRY_ENDPOINT", "collector:4317")
 	t.Setenv(envTelemetryProtocol, "http")
@@ -762,7 +776,7 @@ func TestLoad_TelemetryValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clearConfigEnv(t)
-			t.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+			isolateFromRepoConfig(t)
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
@@ -814,8 +828,7 @@ func TestParseLogLevel(t *testing.T) {
 // flag is an emergency off-switch, not a rollout gate.
 func TestLoad_EmitExpectedStumpSet_DefaultTrue(t *testing.T) {
 	clearConfigEnv(t)
-	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
-	defer func() { _ = os.Unsetenv("CONFIG_FILE") }()
+	isolateFromRepoConfig(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -844,7 +857,7 @@ func TestLoad_EmitExpectedStumpSet_EnvOverride(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clearConfigEnv(t)
-			_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+			isolateFromRepoConfig(t)
 			_ = os.Setenv("BLOCK_EMIT_EXPECTED_STUMP_SET", tt.envVal)
 			defer clearConfigEnv(t)
 
@@ -885,7 +898,7 @@ func TestBlockConfig_EmitExpectedStumpSetEnabled_ZeroValue(t *testing.T) {
 // failure for a guaranteed one.
 func TestLoad_CallbackMaxBodyBytesDefaultsToDisabled(t *testing.T) {
 	clearConfigEnv(t)
-	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	isolateFromRepoConfig(t)
 	defer clearConfigEnv(t)
 
 	cfg, err := Load()
@@ -904,7 +917,7 @@ func TestLoad_CallbackMaxBodyBytesDefaultsToDisabled(t *testing.T) {
 // 413 from the far end.
 func TestLoad_CallbackMaxBodyBytesEnvOverride(t *testing.T) {
 	clearConfigEnv(t)
-	_ = os.Setenv("CONFIG_FILE", "/tmp/nonexistent-config-file.yaml")
+	isolateFromRepoConfig(t)
 	_ = os.Setenv("CALLBACK_MAX_BODY_BYTES", "134217728")
 	defer clearConfigEnv(t)
 
