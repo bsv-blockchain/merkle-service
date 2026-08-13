@@ -1,5 +1,7 @@
 package store
 
+import "errors"
+
 // Registry bundles every store needed by a service. Services read the fields
 // they need (typed as interfaces) so they stay backend-agnostic. Close()
 // releases any backend-owned resources (Aerospike client, SQL connection pool,
@@ -44,12 +46,12 @@ func (r *Registry) AddCloser(fn func() error) {
 // are collected and returned as a joined error so one failure doesn't hide
 // another.
 func (r *Registry) Close() error {
-	var firstErr error
+	var errs []error
 	for i := len(r.closers) - 1; i >= 0; i-- {
-		if err := r.closers[i](); err != nil && firstErr == nil {
-			firstErr = err
+		if err := r.closers[i](); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	r.closers = nil
-	return firstErr
+	return errors.Join(errs...)
 }
