@@ -650,17 +650,28 @@ async function verifyMerkleRoot(bump) {
             resultBox.style.background = '#1c0e0e';
             resultBox.style.border = '1px solid #da3633';
             resultBox.style.color = '#f85149';
-            resultBox.innerHTML = '<strong>&#10007; Invalid ' + formatName + '</strong> &mdash; Computed merkle root does not match.' +
-                '<br>Expected: ' + rootInput +
-                '<br>Computed: ' + computedRoot +
-                '<br>Computed (display order): ' + reversedRoot;
+            resultBox.textContent = '';
+            var invalidTitle = document.createElement('strong');
+            invalidTitle.textContent = '\u2717 Invalid ' + formatName;
+            resultBox.appendChild(invalidTitle);
+            resultBox.appendChild(document.createTextNode(' \u2014 Computed merkle root does not match.'));
+            resultBox.appendChild(document.createElement('br'));
+            resultBox.appendChild(document.createTextNode('Expected: ' + rootInput));
+            resultBox.appendChild(document.createElement('br'));
+            resultBox.appendChild(document.createTextNode('Computed: ' + computedRoot));
+            resultBox.appendChild(document.createElement('br'));
+            resultBox.appendChild(document.createTextNode('Computed (display order): ' + reversedRoot));
         }
     } catch (e) {
         resultBox.style.display = '';
         resultBox.style.background = '#1c0e0e';
         resultBox.style.border = '1px solid #da3633';
         resultBox.style.color = '#f85149';
-        resultBox.innerHTML = '<strong>Verification error:</strong> ' + e.message;
+        resultBox.textContent = '';
+        var errTitle = document.createElement('strong');
+        errTitle.textContent = 'Verification error:';
+        resultBox.appendChild(errTitle);
+        resultBox.appendChild(document.createTextNode(' ' + e.message));
     }
 }
 
