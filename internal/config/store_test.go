@@ -16,6 +16,15 @@ func writeTempConfig(t *testing.T, body string) string {
 	return path
 }
 
+// isolateFromRepoConfig points CONFIG_FILE at an empty temp YAML so Load
+// does not pick up the repo-root config.yaml. Tests that want defaults or
+// env-only overrides should call this after clearConfigEnv. A missing
+// explicit CONFIG_FILE is fatal, so this must be a real file.
+func isolateFromRepoConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("CONFIG_FILE", writeTempConfig(t, ""))
+}
+
 func loadWith(t *testing.T, env map[string]string, yaml string) (*Config, error) {
 	t.Helper()
 	for k, v := range env {
