@@ -44,6 +44,11 @@ var ttlTables = []ttlTable{
 	},
 	{parent: "callback_dedup"},
 	{parent: "subtree_counters"},
+	{
+		parent:    "seen_counters",
+		parentKey: "txid",
+		children:  []ttlChild{{table: "seen_counter_subtrees", fk: "txid"}},
+	},
 	{parent: "expected_stumps"},
 	{
 		parent:    "callback_accumulator",

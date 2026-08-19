@@ -13,12 +13,13 @@ type seenCounter struct {
 	db        *sql.DB
 	d         *dialect
 	threshold int
+	ttlSec    int
 }
 
 var _ storepkg.SeenCounterStore = (*seenCounter)(nil)
 
-func newSeenCounter(db *sql.DB, d *dialect, threshold int) *seenCounter {
-	return &seenCounter{db: db, d: d, threshold: threshold}
+func newSeenCounter(db *sql.DB, d *dialect, threshold, ttlSec int) *seenCounter {
+	return &seenCounter{db: db, d: d, threshold: threshold, ttlSec: ttlSec}
 }
 
 func (s *seenCounter) Threshold() int { return s.threshold }
@@ -66,10 +67,15 @@ func (s *seenCounter) Increment(txid, subtreeID string) (*storepkg.IncrementResu
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Ensure the parent counter row exists (no-op if already there).
+	// Ensure the parent counter row exists and re-stamp expires_at on every
+	// increment (an inactivity window, mirroring the Aerospike backend): the
+	// mine-time BatchDelete only covers registered txids that get mined, so
+	// without a TTL, counters for never-mined txids accumulate forever. The
+	// upsert also stamps legacy pre-0009 rows (NULL expires_at) on their next
+	// sighting.
 	qIns := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-		"INSERT INTO seen_counters (txid) VALUES (%s)%s",
-		s.d.placeholder(1), s.d.onConflictDoNothing,
+		"INSERT INTO seen_counters (txid, expires_at) VALUES (%s, %s) ON CONFLICT (txid) DO UPDATE SET expires_at = EXCLUDED.expires_at",
+		s.d.placeholder(1), s.d.intervalSeconds(s.ttlSec),
 	)
 	if _, err = tx.ExecContext(ctx, qIns, txid); err != nil {
 		return nil, fmt.Errorf("insert seen_counters: %w", err)

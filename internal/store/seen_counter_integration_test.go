@@ -19,7 +19,7 @@ func TestSeenCounter_BatchDelete_Aerospike(t *testing.T) {
 	setName := uniqueSet(t, "seen_del")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	s := store.NewSeenCounterStore(client, setName, 3, 2, 10, logger)
+	s := store.NewSeenCounterStore(client, setName, 3, 86400, 2, 10, logger)
 
 	for _, txid := range []string{"tx-del-a", "tx-del-b", "tx-del-keep"} {
 		for _, st := range []string{"st1", "st2"} {

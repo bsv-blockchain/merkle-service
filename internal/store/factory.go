@@ -149,6 +149,7 @@ func newAerospikeRegistry(_ context.Context, cfg *config.Config, logger *slog.Lo
 		),
 		SeenCounter: NewSeenCounterStore(
 			asClient, cfg.Aerospike.SeenSet, cfg.Callback.SeenThreshold,
+			cfg.Aerospike.SeenCounterTTLSec,
 			cfg.Aerospike.MaxRetries, cfg.Aerospike.RetryBaseMs, logger,
 		),
 		SubtreeCounter: NewSubtreeCounterStore(

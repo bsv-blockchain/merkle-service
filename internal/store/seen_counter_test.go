@@ -20,7 +20,7 @@ func newSeenCounterTestStore(t *testing.T, threshold int) SeenCounterStore {
 	t.Cleanup(func() { client.Close() })
 
 	setName := fmt.Sprintf("test_seen_%d", os.Getpid())
-	return NewSeenCounterStore(client, setName, threshold, 2, 50, logger)
+	return NewSeenCounterStore(client, setName, threshold, 86400, 2, 50, logger)
 }
 
 func TestSeenCounter_BasicIncrement(t *testing.T) {

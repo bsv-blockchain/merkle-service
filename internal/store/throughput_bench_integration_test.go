@@ -65,7 +65,7 @@ func benchTxids(prefix string, n int) []string {
 func BenchmarkSeenCounter(b *testing.B) {
 	client := benchAerospikeClient(b)
 	setName := fmt.Sprintf("bench_seen_%d", time.Now().UnixNano())
-	sc := store.NewSeenCounterStore(client, setName, 1_000_000, 3, 100, slog.Default())
+	sc := store.NewSeenCounterStore(client, setName, 1_000_000, 86400, 3, 100, slog.Default())
 
 	for _, size := range []int{100, 1000, 5000} {
 		b.Run(fmt.Sprintf("serial/txids=%d", size), func(b *testing.B) {
@@ -220,7 +220,7 @@ func TestBatchIncrement_ConcurrentThresholdFiresOnce(t *testing.T) {
 		threshold = 3
 	)
 	setName := fmt.Sprintf("bench_f045_%d", time.Now().UnixNano())
-	sc := store.NewSeenCounterStore(client, setName, threshold, 3, 100, slog.Default())
+	sc := store.NewSeenCounterStore(client, setName, threshold, 86400, 3, 100, slog.Default())
 	txids := benchTxids("f045", txidCount)
 
 	type fireCount struct {
@@ -294,7 +294,7 @@ func TestBatchIncrement_CountIsListSizeAndIdempotent(t *testing.T) {
 
 	const threshold = 100 // high: keep phase 2 (threshold firing) out of the picture
 	setName := fmt.Sprintf("bench_count_%d", time.Now().UnixNano())
-	sc := store.NewSeenCounterStore(client, setName, threshold, 3, 100, slog.Default())
+	sc := store.NewSeenCounterStore(client, setName, threshold, 86400, 3, 100, slog.Default())
 	txids := benchTxids("count", 50)
 
 	assertCounts := func(stage string, results map[string]*store.IncrementResult, want int) {

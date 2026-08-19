@@ -26,6 +26,7 @@ type aerospikeSeenCounter struct {
 	client      *AerospikeClient
 	setName     string
 	threshold   int
+	ttlSec      int
 	logger      *slog.Logger
 	maxRetries  int
 	retryBaseMs int
@@ -33,11 +34,12 @@ type aerospikeSeenCounter struct {
 
 var _ SeenCounterStore = (*aerospikeSeenCounter)(nil)
 
-func NewSeenCounterStore(client *AerospikeClient, setName string, threshold, maxRetries, retryBaseMs int, logger *slog.Logger) SeenCounterStore {
+func NewSeenCounterStore(client *AerospikeClient, setName string, threshold, ttlSec, maxRetries, retryBaseMs int, logger *slog.Logger) SeenCounterStore {
 	return &aerospikeSeenCounter{
 		client:      client,
 		setName:     setName,
 		threshold:   threshold,
+		ttlSec:      ttlSec,
 		logger:      logger,
 		maxRetries:  maxRetries,
 		retryBaseMs: retryBaseMs,
@@ -113,6 +115,11 @@ func (s *aerospikeSeenCounter) Increment(txid, subtreeID string) (*IncrementResu
 		// 0->threshold transition. New records skip the generation check via
 		// CREATE_ONLY so two concurrent first-writers also resolve cleanly.
 		wp := s.client.WritePolicy(s.maxRetries, s.retryBaseMs)
+		// Re-stamp the TTL on every write so a counter expires only after
+		// ttlSec of inactivity. Mine-time BatchDelete remains the fast path;
+		// the TTL reclaims counters for txids that never get mined (which the
+		// delete never covers) instead of letting them accumulate forever.
+		wp.Expiration = uint32(s.ttlSec) //nolint:gosec // ttlSec is config-validated and fits uint32
 		if current == nil {
 			wp.RecordExistsAction = as.CREATE_ONLY
 		} else {
@@ -224,6 +231,11 @@ func (s *aerospikeSeenCounter) BatchIncrement(txids []string, subtreeID string) 
 // concurrent observer reports ThresholdReached=true.
 func (s *aerospikeSeenCounter) batchIncrementChunk(txids []string, subtreeID string, results map[string]*IncrementResult) error {
 	listPolicy := as.NewListPolicy(as.ListOrderUnordered, as.ListWriteFlagsAddUnique|as.ListWriteFlagsNoFail)
+	// Re-stamp the TTL on every append (see Increment) so counters expire
+	// after ttlSec of inactivity instead of living forever when their txid is
+	// never mined.
+	wpol := as.NewBatchWritePolicy()
+	wpol.Expiration = uint32(s.ttlSec) //nolint:gosec // ttlSec is config-validated and fits uint32
 	batchRecs := make([]as.BatchRecordIfc, len(txids))
 	for i, txid := range txids {
 		key, err := as.NewKey(s.client.Namespace(), s.setName, txid)
@@ -234,7 +246,7 @@ func (s *aerospikeSeenCounter) batchIncrementChunk(txids []string, subtreeID str
 		// unique-subtree count on seenSubtreesBin; GetBinOp reads only the fired
 		// flag (a different bin, so its result never collides with the append's).
 		batchRecs[i] = as.NewBatchWrite(
-			nil, key,
+			wpol, key,
 			as.ListAppendWithPolicyOp(listPolicy, seenSubtreesBin, subtreeID),
 			as.GetBinOp(seenThresholdFired),
 		)

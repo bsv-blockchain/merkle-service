@@ -119,6 +119,13 @@ aerospike:
   # Env: AEROSPIKE_SEEN_SET
   seenSet: merkle_seen_counters
 
+  # TTL in seconds for per-txid seen counters, re-stamped on every increment
+  # (an inactivity window). Mine-time cleanup only deletes counters for
+  # registered txids that get mined; this TTL reclaims counters for txids
+  # that never make it into a block so the seen set cannot grow without bound.
+  # Env: AEROSPIKE_SEEN_COUNTER_TTL_SEC
+  seenCounterTTLSec: 86400
+
   # Aerospike set used for callback delivery deduplication records.
   # Env: AEROSPIKE_CALLBACK_DEDUP_SET
   callbackDedupSet: merkle_callback_dedup
