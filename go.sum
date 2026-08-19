@@ -64,8 +64,8 @@ github.com/bsv-blockchain/go-batcher/v2 v2.0.6 h1:YqiS+ZjCPpiytVEQ1A/famVrBW+pGG
 github.com/bsv-blockchain/go-batcher/v2 v2.0.6/go.mod h1:h0taeDYa4L6iQ57WvpVPuKLlsrRF72+7Lk85ouSKoC0=
 github.com/bsv-blockchain/go-bc v1.1.8 h1:AkOOAb25aU6fNT/yCZV06wAuYCY8KCXS5Fbf4g7Yg1M=
 github.com/bsv-blockchain/go-bc v1.1.8/go.mod h1:cWQdoth53+H6d/D6ocDx842kSxRtps0RgQT8WDHqh5M=
-github.com/bsv-blockchain/go-bt/v2 v2.6.8 h1:lk6asRPfLA/+jmmk9ggSglPYn7C0Wzu31R6Ldkemwz4=
-github.com/bsv-blockchain/go-bt/v2 v2.6.8/go.mod h1:QNUJG28qG3UEe0RNySaqZJQJpyVtjxb3cjDZKq7OsFA=
+github.com/bsv-blockchain/go-bt/v2 v2.6.9 h1:0g6Dme9cNPNG+iHz0y3NhTfOdCBl2OmZ5xZmrztZ1Fk=
+github.com/bsv-blockchain/go-bt/v2 v2.6.9/go.mod h1:Oj/oRSHe7COsLG0165FB9v/p9Sm3U/BrNqkS0ADu1JQ=
 github.com/bsv-blockchain/go-chaincfg v1.6.2 h1:BoBm2eLvXioMyf39B5A6LxhddmTV/9VYArbzIr1KEJM=
 github.com/bsv-blockchain/go-chaincfg v1.6.2/go.mod h1:tmKOKZkvIZNhh5GwpcrKTYTXLac1+IGpSFRMSZt/8Gc=
 github.com/bsv-blockchain/go-lockfree-queue v1.2.0 h1:VSD75MVVU63idFvcBDiL0BHcYZ5RgGwXHpeFIt9EzHo=
