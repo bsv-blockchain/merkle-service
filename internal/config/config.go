@@ -187,11 +187,11 @@ type AerospikeConfig struct {
 	// node's connection pool becoming the bottleneck).
 	Host string `yaml:"host" mapstructure:"host"`
 	// Seeds is a list of seed node addresses. When non-empty, Host is ignored.
-	Seeds               []string `yaml:"seeds"                mapstructure:"seeds"`
-	Port                int      `yaml:"port"                 mapstructure:"port"`
-	Namespace           string   `yaml:"namespace"            mapstructure:"namespace"`
-	SetName             string   `yaml:"setName"              mapstructure:"setname"`
-	SeenSet             string   `yaml:"seenSet"              mapstructure:"seenset"`
+	Seeds     []string `yaml:"seeds"                mapstructure:"seeds"`
+	Port      int      `yaml:"port"                 mapstructure:"port"`
+	Namespace string   `yaml:"namespace"            mapstructure:"namespace"`
+	SetName   string   `yaml:"setName"              mapstructure:"setname"`
+	SeenSet   string   `yaml:"seenSet"              mapstructure:"seenset"`
 	// SeenCounterTTLSec bounds the lifetime of per-txid seen counters. The
 	// mine-time BatchDelete only removes counters for REGISTERED txids that
 	// actually get mined; counters for unregistered or never-mined txids (or
@@ -199,9 +199,9 @@ type AerospikeConfig struct {
 	// growing the seen set without bound until the namespace hit stop-writes.
 	// The TTL is re-stamped on every increment, so it is an inactivity window:
 	// a counter expires only after ttlSec without a new subtree sighting.
-	SeenCounterTTLSec   int      `yaml:"seenCounterTTLSec"    mapstructure:"seencounterttlsec"`
-	CallbackDedupSet    string   `yaml:"callbackDedupSet"     mapstructure:"callbackdedupset"`
-	CallbackURLRegistry string   `yaml:"callbackUrlRegistry"  mapstructure:"callbackurlregistry"`
+	SeenCounterTTLSec   int    `yaml:"seenCounterTTLSec"    mapstructure:"seencounterttlsec"`
+	CallbackDedupSet    string `yaml:"callbackDedupSet"     mapstructure:"callbackdedupset"`
+	CallbackURLRegistry string `yaml:"callbackUrlRegistry"  mapstructure:"callbackurlregistry"`
 	// CallbackURLRegistryTTLSec is the per-URL eviction window applied by the
 	// Aerospike callback URL registry (and the SQL sibling). URLs whose last
 	// `Add` is older than this are evicted, bounding the registry's growth so
