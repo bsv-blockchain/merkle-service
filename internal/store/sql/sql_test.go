@@ -531,7 +531,7 @@ func TestCallbackURLRegistry_SweeperEvicts(t *testing.T) {
 
 func TestSeenCounter_ThresholdFiresOnce(t *testing.T) {
 	db, d := newTestDB(t)
-	s := newSeenCounter(db, d, 3)
+	s := newSeenCounter(db, d, 3, 86400)
 
 	var firedCount int
 	// Increment with 5 distinct subtreeIDs.
@@ -588,7 +588,7 @@ func TestSeenCounter_ConcurrentThresholdFiresOnce(t *testing.T) {
 		threshold = 5
 		workers   = 32
 	)
-	s := newSeenCounter(db, d, threshold)
+	s := newSeenCounter(db, d, threshold, 86400)
 
 	var firedCount int64
 	var wg sync.WaitGroup
@@ -970,7 +970,7 @@ func TestSQLBackend_InterfaceSatisfaction(t *testing.T) {
 		_ storepkg.CallbackDedupStore       = newCallbackDedup(db, d)
 		_ storepkg.CallbackURLRegistry      = newCallbackURLRegistry(db, d, time.Hour)
 		_ storepkg.CallbackAccumulatorStore = newCallbackAccumulator(db, d, 60)
-		_ storepkg.SeenCounterStore         = newSeenCounter(db, d, 3)
+		_ storepkg.SeenCounterStore         = newSeenCounter(db, d, 3, 86400)
 		_ storepkg.SubtreeCounterStore      = newSubtreeCounter(db, d, 60)
 	)
 }
@@ -995,7 +995,7 @@ func TestMigrations_Idempotent(t *testing.T) {
 // threshold fire across successive batches, and idempotent re-runs.
 func TestSeenCounter_BatchIncrement(t *testing.T) {
 	db, d := newTestDB(t)
-	s := newSeenCounter(db, d, 2)
+	s := newSeenCounter(db, d, 2, 86400)
 
 	txids := []string{"tx-a", "tx-b", "tx-c"}
 
@@ -1043,7 +1043,7 @@ func TestSeenCounter_BatchIncrement(t *testing.T) {
 // per-subtree child rows, so a hypothetical later increment starts fresh.
 func TestSeenCounter_BatchDelete(t *testing.T) {
 	db, d := newTestDB(t)
-	s := newSeenCounter(db, d, 3)
+	s := newSeenCounter(db, d, 3, 86400)
 
 	for _, txid := range []string{"tx-a", "tx-b", "tx-keep"} {
 		for i := 0; i < 2; i++ {
@@ -1073,5 +1073,126 @@ func TestSeenCounter_BatchDelete(t *testing.T) {
 	}
 	if res.NewCount != 3 {
 		t.Errorf("tx-keep count = %d, want 3 (2 prior + 1 new)", res.NewCount)
+	}
+}
+
+// TestSeenCounter_IncrementRestampsTTL verifies that every Increment re-stamps
+// expires_at (inactivity-window semantics, matching the Aerospike backend) —
+// including rows created before migration 0009, whose expires_at is NULL until
+// their next sighting.
+func TestSeenCounter_IncrementRestampsTTL(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newSeenCounter(db, d, 3, 86400)
+
+	if _, err := s.Increment("tx-ttl", "st1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Backdate the row's expiry firmly into the past — the state the sweeper
+	// would see for a txid with no recent sightings.
+	if _, err := db.ExecContext(
+		context.Background(),
+		fmt.Sprintf("UPDATE seen_counters SET expires_at = %s WHERE txid = %s", d.intervalSeconds(-3600), d.placeholder(1)),
+		"tx-ttl",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Increment("tx-ttl", "st2"); err != nil {
+		t.Fatal(err)
+	}
+
+	var future bool
+	if err := db.QueryRowContext(
+		context.Background(),
+		fmt.Sprintf("SELECT expires_at > %s FROM seen_counters WHERE txid = %s", d.now, d.placeholder(1)),
+		"tx-ttl",
+	).Scan(&future); err != nil {
+		t.Fatal(err)
+	}
+	if !future {
+		t.Fatal("Increment did not re-stamp expires_at into the future")
+	}
+
+	// A legacy row (NULL expires_at, as left by migration 0009) picks up an
+	// expiry on its next increment.
+	if _, err := db.ExecContext(
+		context.Background(),
+		fmt.Sprintf("UPDATE seen_counters SET expires_at = NULL WHERE txid = %s", d.placeholder(1)),
+		"tx-ttl",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Increment("tx-ttl", "st3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(
+		context.Background(),
+		fmt.Sprintf("SELECT expires_at IS NOT NULL FROM seen_counters WHERE txid = %s", d.placeholder(1)),
+		"tx-ttl",
+	).Scan(&future); err != nil {
+		t.Fatal(err)
+	}
+	if !future {
+		t.Fatal("Increment left a legacy NULL expires_at unstamped")
+	}
+}
+
+// TestSweeper_DeletesExpiredSeenCounters verifies the sweeper reclaims expired
+// seen counters along with their child subtree rows, leaves active counters
+// alone, and never touches legacy rows whose expires_at is still NULL.
+func TestSweeper_DeletesExpiredSeenCounters(t *testing.T) {
+	db, d := newTestDB(t)
+	s := newSeenCounter(db, d, 3, 86400)
+
+	for txid, subtree := range map[string]string{
+		"tx-expired": "st1",
+		"tx-fresh":   "st2",
+		"tx-legacy":  "st3",
+	} {
+		if _, err := s.Increment(txid, subtree); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Expire one counter and strip another back to the pre-0009 NULL state.
+	if _, err := db.ExecContext(
+		context.Background(),
+		fmt.Sprintf("UPDATE seen_counters SET expires_at = %s WHERE txid = %s", d.intervalSeconds(-3600), d.placeholder(1)),
+		"tx-expired",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(
+		context.Background(),
+		fmt.Sprintf("UPDATE seen_counters SET expires_at = NULL WHERE txid = %s", d.placeholder(1)),
+		"tx-legacy",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	sw := newSweeper(db, d, 10*time.Millisecond, time.Hour, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
+	sw.sweepOnce(context.Background())
+
+	counts := func(txid string) (parents, children int) {
+		if err := db.QueryRowContext(context.Background(),
+			fmt.Sprintf("SELECT COUNT(*) FROM seen_counters WHERE txid = %s", d.placeholder(1)), txid).Scan(&parents); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRowContext(context.Background(),
+			fmt.Sprintf("SELECT COUNT(*) FROM seen_counter_subtrees WHERE txid = %s", d.placeholder(1)), txid).Scan(&children); err != nil {
+			t.Fatal(err)
+		}
+		return parents, children
+	}
+
+	if p, c := counts("tx-expired"); p != 0 || c != 0 {
+		t.Fatalf("expired counter not fully swept: parents=%d children=%d", p, c)
+	}
+	if p, c := counts("tx-fresh"); p != 1 || c != 1 {
+		t.Fatalf("fresh counter was swept: parents=%d children=%d", p, c)
+	}
+	if p, c := counts("tx-legacy"); p != 1 || c != 1 {
+		t.Fatalf("legacy NULL-expiry counter was swept: parents=%d children=%d", p, c)
 	}
 }

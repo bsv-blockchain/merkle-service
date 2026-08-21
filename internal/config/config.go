@@ -187,13 +187,21 @@ type AerospikeConfig struct {
 	// node's connection pool becoming the bottleneck).
 	Host string `yaml:"host" mapstructure:"host"`
 	// Seeds is a list of seed node addresses. When non-empty, Host is ignored.
-	Seeds               []string `yaml:"seeds"                mapstructure:"seeds"`
-	Port                int      `yaml:"port"                 mapstructure:"port"`
-	Namespace           string   `yaml:"namespace"            mapstructure:"namespace"`
-	SetName             string   `yaml:"setName"              mapstructure:"setname"`
-	SeenSet             string   `yaml:"seenSet"              mapstructure:"seenset"`
-	CallbackDedupSet    string   `yaml:"callbackDedupSet"     mapstructure:"callbackdedupset"`
-	CallbackURLRegistry string   `yaml:"callbackUrlRegistry"  mapstructure:"callbackurlregistry"`
+	Seeds     []string `yaml:"seeds"                mapstructure:"seeds"`
+	Port      int      `yaml:"port"                 mapstructure:"port"`
+	Namespace string   `yaml:"namespace"            mapstructure:"namespace"`
+	SetName   string   `yaml:"setName"              mapstructure:"setname"`
+	SeenSet   string   `yaml:"seenSet"              mapstructure:"seenset"`
+	// SeenCounterTTLSec bounds the lifetime of per-txid seen counters. The
+	// mine-time BatchDelete only removes counters for REGISTERED txids that
+	// actually get mined; counters for unregistered or never-mined txids (or
+	// txids mined while block processing was down) previously lived forever,
+	// growing the seen set without bound until the namespace hit stop-writes.
+	// The TTL is re-stamped on every increment, so it is an inactivity window:
+	// a counter expires only after ttlSec without a new subtree sighting.
+	SeenCounterTTLSec   int    `yaml:"seenCounterTTLSec"    mapstructure:"seencounterttlsec"`
+	CallbackDedupSet    string `yaml:"callbackDedupSet"     mapstructure:"callbackdedupset"`
+	CallbackURLRegistry string `yaml:"callbackUrlRegistry"  mapstructure:"callbackurlregistry"`
 	// CallbackURLRegistryTTLSec is the per-URL eviction window applied by the
 	// Aerospike callback URL registry (and the SQL sibling). URLs whose last
 	// `Add` is older than this are evicted, bounding the registry's growth so
@@ -759,6 +767,11 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("aerospike.namespace", "merkle")
 	v.SetDefault("aerospike.setname", "merkle_registrations")
 	v.SetDefault("aerospike.seenset", "merkle_seen_counters")
+	// 24h. Seen counters track pre-mine propagation, so anything alive this
+	// long is a txid that never made it into a block (or was mined while the
+	// service couldn't process the block). Generous relative to normal mine
+	// times; re-stamped on every increment so active txids never expire.
+	v.SetDefault("aerospike.seencounterttlsec", 24*60*60)
 	v.SetDefault("aerospike.callbackdedupset", "merkle_callback_dedup")
 	v.SetDefault("aerospike.callbackurlregistry", "merkle_callback_urls")
 	v.SetDefault("aerospike.callbackurlregistryttlsec", 7*24*60*60)
@@ -959,6 +972,7 @@ func bindEnvVars(v *viper.Viper) {
 		"aerospike.namespace":                   "AEROSPIKE_NAMESPACE",
 		"aerospike.setname":                     "AEROSPIKE_SET",
 		"aerospike.seenset":                     "AEROSPIKE_SEEN_SET",
+		"aerospike.seencounterttlsec":           "AEROSPIKE_SEEN_COUNTER_TTL_SEC",
 		"aerospike.callbackdedupset":            "AEROSPIKE_CALLBACK_DEDUP_SET",
 		"aerospike.callbackurlregistry":         "AEROSPIKE_CALLBACK_URL_REGISTRY",
 		"aerospike.callbackurlregistryttlsec":   "AEROSPIKE_CALLBACK_URL_REGISTRY_TTL_SEC",
@@ -1144,6 +1158,13 @@ func Load() (*Config, error) {
 	// becomes a permanent record that the sweeper never reclaims.
 	if cfg.Aerospike.SubtreeCounterTTLSec <= 0 {
 		return nil, fmt.Errorf("invalid aerospike.subtreeCounterTTLSec %d: must be > 0", cfg.Aerospike.SubtreeCounterTTLSec)
+	}
+
+	// SeenCounterTTLSec: same rationale — 0 would fall back to the namespace
+	// default (never-expire on a default-ttl 0 namespace), silently reviving
+	// the unbounded seen-set growth this TTL exists to prevent.
+	if cfg.Aerospike.SeenCounterTTLSec <= 0 {
+		return nil, fmt.Errorf("invalid aerospike.seenCounterTTLSec %d: must be > 0", cfg.Aerospike.SeenCounterTTLSec)
 	}
 
 	// Blob-store sweeper validation. The age floor is the safety property:
