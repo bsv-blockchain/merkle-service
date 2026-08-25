@@ -76,10 +76,10 @@ github.com/bsv-blockchain/go-safe-conversion v1.2.0 h1:HwLWaxqm2OyU5/2BRQ8kwdn25
 github.com/bsv-blockchain/go-safe-conversion v1.2.0/go.mod h1:62Eq2980j4BygfqJhd/ObGRHET8ubEy2rBdGi4k6nsw=
 github.com/bsv-blockchain/go-sdk v1.3.4 h1:qcAh8xPXncuKs3CnUPxmULTNFMX1RaEk8M/aR9qLbdQ=
 github.com/bsv-blockchain/go-sdk v1.3.4/go.mod h1:OgwTIUwBL74L5DUT+595i+7WPediUqxhxnzC9rIK0og=
-github.com/bsv-blockchain/go-subtree v1.4.5 h1:PDyujago1K6il1oG1GBH2NzNygELfTI0cwFZy98R6wU=
-github.com/bsv-blockchain/go-subtree v1.4.5/go.mod h1:omuv2wkd3ZJpuqNlyP4M4f9cY6fLDbuTbHAM8F/ptOk=
-github.com/bsv-blockchain/go-teranode-p2p-client v0.2.8 h1:vK1RYp96uvKOwydVStMRTqhLcOGBNJEq8PNOmJWeKFA=
-github.com/bsv-blockchain/go-teranode-p2p-client v0.2.8/go.mod h1:6ymLIwDV/mg3yIWzKdjPFqyutz7/sYMNftRuNsjn2Fc=
+github.com/bsv-blockchain/go-subtree v1.4.6 h1:m63oZs7zLIke5MGbTBj+0nwtmqctSRKg2y9VYXYoYiY=
+github.com/bsv-blockchain/go-subtree v1.4.6/go.mod h1:/6KVy25RXti/pmBJVkHLf0HVvc+YvXhKTDW3A6qzE0U=
+github.com/bsv-blockchain/go-teranode-p2p-client v0.2.9 h1:7l/lm0zbFuTvxF2br261iEd3XN/bYtdIfqewYi/Y1A4=
+github.com/bsv-blockchain/go-teranode-p2p-client v0.2.9/go.mod h1:4eIaoM6DjhobU6PE1bqNSbvbf6/M9eEH4SJuv8469mU=
 github.com/bsv-blockchain/go-tx-map v1.4.1 h1:rY1yuI8O2Ul3ThRBq2l073+oKvLxyXHhKWylZ5G1yf4=
 github.com/bsv-blockchain/go-tx-map v1.4.1/go.mod h1:0k6O94B3SiWhqu8g8JYWMEHRX1tiHsmKQKi7aATcJuM=
 github.com/bsv-blockchain/go-wire v1.2.11 h1:jVbatioBZ21ebK7rrt9IY768VPVTMpk0KSPC2fm0lS0=
@@ -157,8 +157,8 @@ github.com/fsnotify/fsnotify v1.10.1 h1:b0/UzAf9yR5rhf3RPm9gf3ehBPpf0oZKIjtpKrx5
 github.com/fsnotify/fsnotify v1.10.1/go.mod h1:TLheqan6HD6GBK6PrDWyDPBaEV8LspOxvPSjC+bVfgo=
 github.com/fxamacker/cbor/v2 v2.9.3 h1:oQBnFATpNdY8gJHTndDDv5Xl4QqNaz51G5LLEPhng3Q=
 github.com/fxamacker/cbor/v2 v2.9.3/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
-github.com/go-chi/chi/v5 v5.3.1 h1:3j4HZLGZQ3JpMCrPJF/Jl3mYJfWLKBfNJ6quurUGCf8=
-github.com/go-chi/chi/v5 v5.3.1/go.mod h1:R+tYY2hNuVUUjxoPtqUdgBqevM9s9njzkTLutVsOCto=
+github.com/go-chi/chi/v5 v5.3.2 h1:5YQkICvTCSZ25hoRsyJazN0scjzKGiu4VAUc7H1o1nY=
+github.com/go-chi/chi/v5 v5.3.2/go.mod h1:R+tYY2hNuVUUjxoPtqUdgBqevM9s9njzkTLutVsOCto=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
 github.com/go-logr/logr v1.4.4 h1:tG4xh9yMsRCAiodLVTxyrkzSZ9+o0L1Kg/+cPVcbP/8=
 github.com/go-logr/logr v1.4.4/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
