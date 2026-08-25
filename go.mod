@@ -6,11 +6,11 @@ require (
 	github.com/aerospike/aerospike-client-go/v8 v8.8.0
 	github.com/bsv-blockchain/go-bt/v2 v2.6.9
 	github.com/bsv-blockchain/go-sdk v1.3.4
-	github.com/bsv-blockchain/go-subtree v1.4.5
-	github.com/bsv-blockchain/go-teranode-p2p-client v0.2.8
+	github.com/bsv-blockchain/go-subtree v1.4.6
+	github.com/bsv-blockchain/go-teranode-p2p-client v0.2.9
 	github.com/bsv-blockchain/teranode v0.16.0-beta-9
 	github.com/cespare/xxhash/v2 v2.3.0
-	github.com/go-chi/chi/v5 v5.3.1
+	github.com/go-chi/chi/v5 v5.3.2
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/spf13/viper v1.21.0
@@ -67,14 +67,12 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bsv-blockchain/aerospike-client-go/v8 v8.7.1-bsv5 // indirect
 	github.com/bsv-blockchain/go-batcher/v2 v2.0.6 // indirect
-	github.com/bsv-blockchain/go-bc v1.1.8 // indirect
 	github.com/bsv-blockchain/go-chaincfg v1.6.2 // indirect
 	github.com/bsv-blockchain/go-lockfree-queue v1.2.0 // indirect
 	github.com/bsv-blockchain/go-p2p-message-bus v0.1.23 // indirect
 	github.com/bsv-blockchain/go-safe-conversion v1.2.0 // indirect
 	github.com/bsv-blockchain/go-tx-map v1.4.1 // indirect
 	github.com/bsv-blockchain/go-wire v1.2.11 // indirect
-	github.com/bsv-blockchain/testcontainers-aerospike-go v0.4.4 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
@@ -201,7 +199,6 @@ require (
 	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/onsi/gomega v1.42.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/ordishs/gocore v1.0.82 // indirect
@@ -235,7 +232,6 @@ require (
 	github.com/quic-go/quic-go v0.60.0 // indirect
 	github.com/quic-go/webtransport-go v0.11.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/rogpeppe/go-internal v1.15.0 // indirect
 	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
 	github.com/seiflotfy/cuckoofilter v0.0.0-20240715131351-a2f2c23f1771 // indirect
