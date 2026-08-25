@@ -217,7 +217,7 @@ func TestRegistrationStore_GetNonExistent(t *testing.T) {
 func TestSeenCounter_IncrementReturnsCorrectCount(t *testing.T) {
 	client := newAerospikeClient(t)
 	setName := uniqueSet(t, "seen_inc")
-	counter := store.NewSeenCounterStore(client, setName, 3, 3, 100, slog.Default())
+	counter := store.NewSeenCounterStore(client, setName, 3, 86400, 3, 100, slog.Default())
 
 	txid := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -236,7 +236,7 @@ func TestSeenCounter_ThresholdReachedFiresAtThreshold(t *testing.T) {
 	client := newAerospikeClient(t)
 	setName := uniqueSet(t, "seen_thresh")
 	threshold := 3
-	counter := store.NewSeenCounterStore(client, setName, threshold, 3, 100, slog.Default())
+	counter := store.NewSeenCounterStore(client, setName, threshold, 86400, 3, 100, slog.Default())
 
 	txid := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
@@ -262,7 +262,7 @@ func TestSeenCounter_AboveThresholdDoesNotReFire(t *testing.T) {
 	client := newAerospikeClient(t)
 	setName := uniqueSet(t, "seen_above")
 	threshold := 2
-	counter := store.NewSeenCounterStore(client, setName, threshold, 3, 100, slog.Default())
+	counter := store.NewSeenCounterStore(client, setName, threshold, 86400, 3, 100, slog.Default())
 
 	txid := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
@@ -285,7 +285,7 @@ func TestSeenCounter_AboveThresholdDoesNotReFire(t *testing.T) {
 func TestSeenCounter_Threshold(t *testing.T) {
 	client := newAerospikeClient(t)
 	setName := uniqueSet(t, "seen_tval")
-	counter := store.NewSeenCounterStore(client, setName, 7, 3, 100, slog.Default())
+	counter := store.NewSeenCounterStore(client, setName, 7, 86400, 3, 100, slog.Default())
 
 	if counter.Threshold() != 7 {
 		t.Fatalf("expected Threshold()=7, got %d", counter.Threshold())

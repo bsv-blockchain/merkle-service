@@ -446,7 +446,7 @@ func TestSeenMultipleNodes(t *testing.T) {
 	// 2. Create a seen counter store with threshold = 3.
 	seenSetName := uniqueSetName("seen")
 	threshold := 3
-	seenStore := store.NewSeenCounterStore(asClient, seenSetName, threshold, 3, 100, logger)
+	seenStore := store.NewSeenCounterStore(asClient, seenSetName, threshold, 86400, 3, 100, logger)
 
 	// 3. Simulate multiple subtree appearances: increment the seen counter
 	//    multiple times and track when threshold is reached.
