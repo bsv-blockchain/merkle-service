@@ -98,7 +98,7 @@ func runProductionScaleTest(t *testing.T, fixtureDir string, timeout time.Durati
 	expectedStumps := store.NewExpectedStumpStore(asClient, fmt.Sprintf("prod_expstump_%d", stamp), 600, 3, 100, logger)
 	// seenThreshold 3 = config.yaml default; with a single announcement per
 	// subtree no SEEN_MULTIPLE_NODES fires, matching one-node observation.
-	seenCounter := store.NewSeenCounterStore(asClient, fmt.Sprintf("prod_seen_%d", stamp), 3, 3, 100, logger)
+	seenCounter := store.NewSeenCounterStore(asClient, fmt.Sprintf("prod_seen_%d", stamp), 3, 86400, 3, 100, logger)
 
 	blobStore := store.NewMemoryBlobStore()
 	subtreeStore := store.NewSubtreeStore(blobStore, 100, logger)
