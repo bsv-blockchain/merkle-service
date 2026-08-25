@@ -1,7 +1,7 @@
 # Multi-stage Dockerfile for merkle-service binaries.
 # Build all service binaries from a single image, then copy into minimal runtime images.
 
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 ARG VERSION=dev
 
