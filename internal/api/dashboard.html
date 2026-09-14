@@ -705,8 +705,11 @@
             if (!stumpHasTxids(bump)) {
                 resultBox.style.display = '';
                 resultBox.style.background = '#1c0e0e'; resultBox.style.border = '1px solid #da3633'; resultBox.style.color = '#f85149';
-                resultBox.innerHTML = '<strong>Verification failed:</strong> No embedded txids (0x02 flags) found in ' + formatName + ' data. ' +
-                    'A valid BRC-0074 BUMP must include at least one txid entry at level 0.';
+                resultBox.textContent = '';
+                var missingTitle = document.createElement('strong');
+                missingTitle.textContent = 'Verification failed:';
+                resultBox.appendChild(missingTitle);
+                resultBox.appendChild(document.createTextNode(' No embedded txids (0x02 flags) found in ' + formatName + ' data. A valid BRC-0074 BUMP must include at least one txid entry at level 0.'));
                 return;
             }
 
@@ -715,7 +718,11 @@
                 if (!computedRoot) {
                     resultBox.style.display = '';
                     resultBox.style.background = '#1c0e0e'; resultBox.style.border = '1px solid #da3633'; resultBox.style.color = '#f85149';
-                    resultBox.innerHTML = '<strong>Verification failed:</strong> Could not compute merkle root from ' + formatName + ' data.';
+                    resultBox.textContent = '';
+                    var computeTitle = document.createElement('strong');
+                    computeTitle.textContent = 'Verification failed:';
+                    resultBox.appendChild(computeTitle);
+                    resultBox.appendChild(document.createTextNode(' Could not compute merkle root from ' + formatName + ' data.'));
                     return;
                 }
                 var inputLower = rootInput.toLowerCase();
@@ -724,9 +731,16 @@
                 resultBox.style.display = '';
                 if (match) {
                     resultBox.style.background = '#0d2818'; resultBox.style.border = '1px solid #238636'; resultBox.style.color = '#3fb950';
-                    resultBox.innerHTML = '<strong>&#10003; Valid ' + formatName + '</strong> &mdash; Computed merkle root matches.' +
-                        '<br>Computed root: ' + computedRoot +
-                        (inputLower === reversedRoot && inputLower !== computedRoot ? ' (matched in display byte order)' : '');
+                    resultBox.textContent = '';
+                    var validTitle = document.createElement('strong');
+                    validTitle.textContent = '\u2713 Valid ' + formatName;
+                    resultBox.appendChild(validTitle);
+                    resultBox.appendChild(document.createTextNode(' \u2014 Computed merkle root matches.'));
+                    resultBox.appendChild(document.createElement('br'));
+                    resultBox.appendChild(document.createTextNode('Computed root: ' + computedRoot));
+                    if (inputLower === reversedRoot && inputLower !== computedRoot) {
+                        resultBox.appendChild(document.createTextNode(' (matched in display byte order)'));
+                    }
                 } else {
                     resultBox.style.background = '#1c0e0e'; resultBox.style.border = '1px solid #da3633'; resultBox.style.color = '#f85149';
                     resultBox.textContent = '';
