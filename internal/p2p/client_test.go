@@ -539,8 +539,14 @@ func TestSignalFatal_PropagatesToRun(t *testing.T) {
 	client.SetStarted(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// Also wire a cancel function so signalFatal's cancel call is a no-op-safe.
-	client.cancel = cancel
+	// Wire client.cancel to a *child* of ctx, mirroring production where Start
+	// does `ctx, c.cancel = context.WithCancel(ctx)`. signalFatal cancels this
+	// internal context (not the ctx Run selects on), so its cancel call cannot
+	// race the fatal-error delivery in Run's select and non-deterministically
+	// return nil instead of ErrPublishExhausted.
+	_, internalCancel := context.WithCancel(ctx)
+	defer internalCancel()
+	client.cancel = internalCancel
 
 	go func() {
 		// Simulate a publish loop hitting exhaustion.
