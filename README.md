@@ -150,7 +150,7 @@ Built to interoperate with [Teranode](https://github.com/bsv-blockchain/teranode
 
 ## 📦 Installation
 
-**merkle-service** requires a [supported release of Go](https://golang.org/doc/devel/release.html#policy) (the version pinned in [go.mod](go.mod); currently **1.26**).
+**merkle-service** requires a [supported release of Go](https://golang.org/doc/devel/release.html#policy) (the version pinned in [go.mod](go.mod); currently **1.27**).
 
 <br>
 
