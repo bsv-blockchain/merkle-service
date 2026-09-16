@@ -5,8 +5,8 @@ go 1.27.0
 require (
 	github.com/aerospike/aerospike-client-go/v8 v8.8.0
 	github.com/bsv-blockchain/go-bt/v2 v2.7.1
-	github.com/bsv-blockchain/go-sdk v1.5.1
-	github.com/bsv-blockchain/go-subtree v1.5.0
+	github.com/bsv-blockchain/go-sdk v1.5.2
+	github.com/bsv-blockchain/go-subtree v1.5.1
 	github.com/bsv-blockchain/go-teranode-p2p-client v0.3.0
 	github.com/bsv-blockchain/teranode v0.16.0-beta-9
 	github.com/cespare/xxhash/v2 v2.3.0
@@ -16,10 +16,10 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
-	github.com/twmb/franz-go v1.21.6
+	github.com/twmb/franz-go v1.21.7
 	github.com/twmb/franz-go/pkg/kadm v1.18.0
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20260615024848-f17c00130060
-	github.com/twmb/franz-go/pkg/kmsg v1.13.1
+	github.com/twmb/franz-go/pkg/kmsg v1.14.0
 	go.opentelemetry.io/contrib/bridges/prometheus v0.71.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0
 	go.opentelemetry.io/otel v1.47.0-rc.1
@@ -34,22 +34,22 @@ require (
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/time v0.16.0
-	modernc.org/sqlite v1.58.0
+	modernc.org/sqlite v1.59.0
 )
 
 require (
 	dario.cat/mergo v1.0.2 // indirect
 	filippo.io/bigmod v0.1.1-0.20260103110540-f8a47775ebe5 // indirect
 	filippo.io/keygen v1.0.0 // indirect
-	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
+	github.com/Azure/go-ansiterm v0.0.0-20260914234754-15785f84ba1c // indirect
 	github.com/DATA-DOG/go-sqlmock v1.5.2 // indirect
 	github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.47.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.20 // indirect
-	github.com/aws/aws-sdk-go-v2/config v1.33.4 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.4 // indirect
+	github.com/aws/aws-sdk-go-v2/config v1.33.5 // indirect
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.5 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.0 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.5 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.7 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.3 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.3 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.3 // indirect
@@ -57,11 +57,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.3 // indirect
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.10.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.50.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.51.0 // indirect
 	github.com/aws/smithy-go v1.28.1 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -69,10 +69,11 @@ require (
 	github.com/bsv-blockchain/go-batcher/v2 v2.1.0 // indirect
 	github.com/bsv-blockchain/go-chaincfg v1.7.0 // indirect
 	github.com/bsv-blockchain/go-lockfree-queue v1.2.0 // indirect
-	github.com/bsv-blockchain/go-p2p-message-bus v0.1.24 // indirect
+	github.com/bsv-blockchain/go-p2p-message-bus v0.1.25 // indirect
 	github.com/bsv-blockchain/go-safe-conversion v1.2.0 // indirect
-	github.com/bsv-blockchain/go-tx-map v1.4.1 // indirect
-	github.com/bsv-blockchain/go-wire v1.2.13 // indirect
+	github.com/bsv-blockchain/go-tx-map v1.5.0 // indirect
+	github.com/bsv-blockchain/go-wire v1.3.0 // indirect
+	github.com/bsv-blockchain/testcontainers-aerospike-go v0.5.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
@@ -99,7 +100,7 @@ require (
 	github.com/filecoin-project/go-clock v0.1.0 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.3 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
@@ -129,7 +130,7 @@ require (
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
-	github.com/ipfs/boxo v0.42.2 // indirect
+	github.com/ipfs/boxo v0.43.0 // indirect
 	github.com/ipfs/go-cid v0.6.2 // indirect
 	github.com/ipfs/go-datastore v0.9.2 // indirect
 	github.com/ipfs/go-log/v2 v2.9.2 // indirect
@@ -187,7 +188,7 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/mr-tron/base58 v1.3.0 // indirect
-	github.com/mrz1836/go-whatsonchain v1.1.0 // indirect
+	github.com/mrz1836/go-whatsonchain v1.3.0 // indirect
 	github.com/multiformats/go-base32 v0.1.0 // indirect
 	github.com/multiformats/go-base36 v0.2.0 // indirect
 	github.com/multiformats/go-multiaddr v0.16.1 // indirect
@@ -202,26 +203,26 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
-	github.com/ordishs/gocore v1.0.82 // indirect
+	github.com/ordishs/gocore v1.1.0 // indirect
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
-	github.com/pierrec/lz4/v4 v4.1.29 // indirect
-	github.com/pion/datachannel v1.6.2 // indirect
-	github.com/pion/dtls/v3 v3.1.8 // indirect
-	github.com/pion/ice/v4 v4.4.2 // indirect
-	github.com/pion/interceptor v0.1.48 // indirect
+	github.com/pierrec/lz4/v4 v4.1.30 // indirect
+	github.com/pion/datachannel v1.6.3 // indirect
+	github.com/pion/dtls/v3 v3.1.9 // indirect
+	github.com/pion/ice/v4 v4.4.3 // indirect
+	github.com/pion/interceptor v0.1.49 // indirect
 	github.com/pion/logging v0.2.4 // indirect
-	github.com/pion/mdns/v2 v2.2.0 // indirect
+	github.com/pion/mdns/v2 v2.2.1 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/rtcp v1.2.17 // indirect
 	github.com/pion/rtp v1.10.5 // indirect
-	github.com/pion/sctp v1.11.1 // indirect
-	github.com/pion/sdp/v3 v3.0.19 // indirect
-	github.com/pion/srtp/v3 v3.0.15 // indirect
+	github.com/pion/sctp v1.11.2 // indirect
+	github.com/pion/sdp/v3 v3.0.20 // indirect
+	github.com/pion/srtp/v3 v3.0.16 // indirect
 	github.com/pion/stun/v3 v3.1.7 // indirect
-	github.com/pion/stun/v4 v4.0.0 // indirect
-	github.com/pion/transport/v4 v4.1.0 // indirect
-	github.com/pion/turn/v5 v5.1.1 // indirect
+	github.com/pion/stun/v4 v4.0.1 // indirect
+	github.com/pion/transport/v4 v4.1.1 // indirect
+	github.com/pion/turn/v5 v5.1.2 // indirect
 	github.com/pion/webrtc/v4 v4.2.20 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
@@ -274,13 +275,13 @@ require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
-	golang.org/x/telemetry v0.0.0-20260909141559-55ac43c52cc3 // indirect
+	golang.org/x/telemetry v0.0.0-20260910141331-15ceca2b0a1f // indirect
 	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/tools v0.50.0 // indirect
 	gonum.org/v1/gonum v0.17.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260908043556-f8649ddbbfe6 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260908043556-f8649ddbbfe6 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260911204522-f61a6ca850bd // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260911204522-f61a6ca850bd // indirect
 	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
@@ -290,15 +291,50 @@ require (
 	k8s.io/apimachinery v0.37.0 // indirect
 	k8s.io/client-go v0.37.0 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
-	k8s.io/kube-openapi v0.0.0-20260908163437-c4db2bdfbfe6 // indirect
+	k8s.io/kube-openapi v0.0.0-20260911184034-7970a1e230da // indirect
 	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
-	modernc.org/libc v1.75.7 // indirect
+	modernc.org/libc v1.76.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 	sigs.k8s.io/json v0.0.0-20260909141634-11ed52e25bc5 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
-	sigs.k8s.io/structured-merge-diff/v7 v7.0.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
+)
+
+// Pin transitive deps that Dependabot keeps bumping past what our direct
+// dependencies can build against. Replace directives (unlike require) are not
+// touched by Dependabot, so these survive weekly dependency bumps. These mirror
+// the pins in github.com/bsv-blockchain/go-teranode-p2p-client, since replace
+// directives do not propagate from dependencies.
+//
+// go-libp2p v0.49.0 uses webtransport.Dialer, removed in webtransport-go
+// v0.12.0+, and is built against quic-go v0.60.0.
+replace (
+	github.com/quic-go/quic-go => github.com/quic-go/quic-go v0.60.0
+	github.com/quic-go/webtransport-go => github.com/quic-go/webtransport-go v0.11.1
+)
+
+// k8s.io/{api,apimachinery,client-go} v0.37.0 use structured-merge-diff/v6 via
+// kube-openapi ...20260721; newer kube-openapi switched to smd/v7, which breaks
+// apimachinery's managedfields type converter (v6/v7 TypeDef mismatch).
+replace k8s.io/kube-openapi => k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad
+
+// pion/webrtc/v4 v4.2.20 (via go-libp2p) is built against pion/transport/v4,
+// but Dependabot bumped the rest of the pion stack to releases that switched to
+// pion/transport/v5. Mixing the two breaks webrtc/ice at compile time (v4 vs v5
+// Net/BufferFactory type mismatch). Pin every transport-touching pion package to
+// the transport/v4 versions webrtc v4.2.20 builds against, keeping the stack
+// internally consistent.
+replace (
+	github.com/pion/datachannel => github.com/pion/datachannel v1.6.2
+	github.com/pion/dtls/v3 => github.com/pion/dtls/v3 v3.1.8
+	github.com/pion/ice/v4 => github.com/pion/ice/v4 v4.4.2
+	github.com/pion/interceptor => github.com/pion/interceptor v0.1.48
+	github.com/pion/mdns/v2 => github.com/pion/mdns/v2 v2.2.0
+	github.com/pion/sctp => github.com/pion/sctp v1.11.1
+	github.com/pion/srtp/v3 => github.com/pion/srtp/v3 v3.0.13
+	github.com/pion/stun/v4 => github.com/pion/stun/v4 v4.0.0
+	github.com/pion/turn/v5 => github.com/pion/turn/v5 v5.1.0
 )
