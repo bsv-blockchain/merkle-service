@@ -64,8 +64,8 @@ github.com/bsv-blockchain/go-batcher/v2 v2.1.0 h1:hlg84xRA8W//iQk99A2cJ5yc1EH7vM
 github.com/bsv-blockchain/go-batcher/v2 v2.1.0/go.mod h1:GSV0XBMQC17T6EgPylmzi4pTtgQResomIemPe5Oi8DE=
 github.com/bsv-blockchain/go-bc v1.2.0 h1:6VDbUHyi4ZAQHzTi1Xzv562SHyvfTVnRYx4bVNTX1A8=
 github.com/bsv-blockchain/go-bc v1.2.0/go.mod h1:G8MZVVmGegvSogql+7N7DVwC7GvxJEk8PIjqPP5/mOE=
-github.com/bsv-blockchain/go-bt/v2 v2.7.1 h1:yiinRgtCryYFea4OVgUSi2qUd+ubfAJP7yKz4Z8AVAk=
-github.com/bsv-blockchain/go-bt/v2 v2.7.1/go.mod h1:v/HVFIBC2ZIt1bZ88F2TECfDuIG7XeeLYphy18NeQmM=
+github.com/bsv-blockchain/go-bt/v2 v2.7.2 h1:9nR3D6ZmRmx8CwI4SuWVS2d8botQdkCJ63AqMkH2g94=
+github.com/bsv-blockchain/go-bt/v2 v2.7.2/go.mod h1:6+EdHO2yz0InWrmFaOUK/vvHieMI+UCdn1VvRu0cURE=
 github.com/bsv-blockchain/go-chaincfg v1.7.0 h1:TRQk8l+iIQqy/ekIW7452K6RJaVAK+Svo56q7BXo+0k=
 github.com/bsv-blockchain/go-chaincfg v1.7.0/go.mod h1:zrvdOMUlrgnW6TdIyqPJrQF6okQ2CpGu+sbKGfFgt+k=
 github.com/bsv-blockchain/go-lockfree-queue v1.2.0 h1:VSD75MVVU63idFvcBDiL0BHcYZ5RgGwXHpeFIt9EzHo=
@@ -76,8 +76,8 @@ github.com/bsv-blockchain/go-safe-conversion v1.2.0 h1:HwLWaxqm2OyU5/2BRQ8kwdn25
 github.com/bsv-blockchain/go-safe-conversion v1.2.0/go.mod h1:62Eq2980j4BygfqJhd/ObGRHET8ubEy2rBdGi4k6nsw=
 github.com/bsv-blockchain/go-sdk v1.5.2 h1:CMRF9HcXQxvDgQK0n6wTy4/RyoGGL4HAjzHmCpqCgCs=
 github.com/bsv-blockchain/go-sdk v1.5.2/go.mod h1:clGHSZoOwrnqJrzEw4VHYZk3JQXbrr+mnybCXZCdrt4=
-github.com/bsv-blockchain/go-subtree v1.5.1 h1:l/Qui+HT+yQKXIoCW4zAyBlD2St9iLjC9ydvzcr9YSM=
-github.com/bsv-blockchain/go-subtree v1.5.1/go.mod h1:FgDmkR0YAAsIDn8hUM7hzsg4OeN+EiGtek5RhS7zzmI=
+github.com/bsv-blockchain/go-subtree v1.6.0 h1:gScveOJtPqGj3k9cK41BGizvy0XdNVsP9nwoBpdCU6A=
+github.com/bsv-blockchain/go-subtree v1.6.0/go.mod h1:FgDmkR0YAAsIDn8hUM7hzsg4OeN+EiGtek5RhS7zzmI=
 github.com/bsv-blockchain/go-teranode-p2p-client v0.3.0 h1:hT0xqASDX/dQZZjMpZSrNAgbxqIc63DqsDnCJCzdmQg=
 github.com/bsv-blockchain/go-teranode-p2p-client v0.3.0/go.mod h1:S+3KgOztBUu5XlgNh+nz/wgNXipLb4nGHkQ2DvU2+NI=
 github.com/bsv-blockchain/go-tx-map v1.5.0 h1:5wTbktWmQ+Kgus5Phh4s/Z3UmnLov4ih2QkM7pkMuz4=
@@ -541,10 +541,10 @@ github.com/tklauser/go-sysconf v0.4.0 h1:7H0uAN+7RkwWRaxhYXDLqa5V3LPrJeV8wmD9dRU
 github.com/tklauser/go-sysconf v0.4.0/go.mod h1:8mTNWyog7H+MpKijp4VmKJAd2bbYQ2zuUwkYRbUArPI=
 github.com/tklauser/numcpus v0.12.0 h1:NR85qdvHA9pFse3x3weVZ0r0ST8R6l5RHbZrlRaqob4=
 github.com/tklauser/numcpus v0.12.0/go.mod h1:ABHeXzJnr/qqwguhClkZKT1/8VABcYrsyUiUGobwWJg=
-github.com/twmb/franz-go v1.21.7 h1:/DkA/o8wQN55gZWtpj2QNb9SIdxwFR7M+NecQWMdmc0=
-github.com/twmb/franz-go v1.21.7/go.mod h1:89kLt1uhE1GkyossLHGdpAMFNK9mV8GYk1lfWu9FiNs=
-github.com/twmb/franz-go/pkg/kadm v1.18.0 h1:WRf/LZmDdcDXwX7WMbtDU++v+b3NzYh2bCGoPMmzirw=
-github.com/twmb/franz-go/pkg/kadm v1.18.0/go.mod h1:XeLhGoLXLFzK8/ryv5FfpxPxGwj4oFEGpPJMB/x6KDE=
+github.com/twmb/franz-go v1.22.0 h1:/CN0IfwJIlkO8ml78sR+1nfciyJ1qzf/ebp2lJeTnus=
+github.com/twmb/franz-go v1.22.0/go.mod h1:b2qISbZgMTJRcIsltVqPz4+Bb2Lw/9bN+/Gd0C07kYw=
+github.com/twmb/franz-go/pkg/kadm v1.19.0 h1:5Nx/WWFkpNUi8Z55Skxvn9x5HOCjw+BUntSNB1kLglk=
+github.com/twmb/franz-go/pkg/kadm v1.19.0/go.mod h1:emmsx5J7YPU9A7UHcSoz0fBMYVmCcJO2etylJeU0VHU=
 github.com/twmb/franz-go/pkg/kfake v0.0.0-20260615024848-f17c00130060 h1:dNDUbyYlL9nQuirEuq+kv7m2kR7ku1jpSaESh+aXyJw=
 github.com/twmb/franz-go/pkg/kfake v0.0.0-20260615024848-f17c00130060/go.mod h1:9j4VxU2ng6tHgD4lIkNJ5OJ3D6vgPhhIp3tBa7dJgLA=
 github.com/twmb/franz-go/pkg/kmsg v1.14.0 h1:gSxrBEKWl3qnsx3QKWol5OEVujuPmIoDkhMt3didFKM=

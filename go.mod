@@ -4,9 +4,9 @@ go 1.27.0
 
 require (
 	github.com/aerospike/aerospike-client-go/v8 v8.8.0
-	github.com/bsv-blockchain/go-bt/v2 v2.7.1
+	github.com/bsv-blockchain/go-bt/v2 v2.7.2
 	github.com/bsv-blockchain/go-sdk v1.5.2
-	github.com/bsv-blockchain/go-subtree v1.5.1
+	github.com/bsv-blockchain/go-subtree v1.6.0
 	github.com/bsv-blockchain/go-teranode-p2p-client v0.3.0
 	github.com/bsv-blockchain/teranode v0.16.0-beta-9
 	github.com/cespare/xxhash/v2 v2.3.0
@@ -16,8 +16,8 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
-	github.com/twmb/franz-go v1.21.7
-	github.com/twmb/franz-go/pkg/kadm v1.18.0
+	github.com/twmb/franz-go v1.22.0
+	github.com/twmb/franz-go/pkg/kadm v1.19.0
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20260615024848-f17c00130060
 	github.com/twmb/franz-go/pkg/kmsg v1.14.0
 	go.opentelemetry.io/contrib/bridges/prometheus v0.71.0
