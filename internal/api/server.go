@@ -350,7 +350,34 @@ func (s *Server) reprocessInflight(next http.Handler) http.Handler {
 	})
 }
 
-// middlewareLogger creates a chi middleware that logs requests using slog.
+// requestLogLevel maps a response status onto the level its access-log line is
+// emitted at: Debug under 400, Info for 4xx, Error for 5xx.
+//
+// Anything under 400 is the expected path, and its method, status, duration and
+// route are already carried by merkle_http_requests_total /
+// merkle_http_request_duration_seconds (see metrics.ChiMiddleware), which label
+// by bounded chi route pattern rather than raw path — so a success line
+// duplicates a metric instead of adding a queryable dimension, while costing one
+// log record per request. 4xx stays at Info because 404 (unmatched), 401
+// (authMiddleware) and 429 (reprocessLimit/reprocessInflight) are answered by
+// middleware that logs nothing else, making this line their only record.
+//
+// A status of 0 means the handler returned without writing a header or body,
+// which net/http turns into a 200 on the wire; treat it as success.
+func requestLogLevel(status int) slog.Level {
+	switch {
+	case status >= 500:
+		return slog.LevelError
+	case status >= 400:
+		return slog.LevelInfo
+	default:
+		return slog.LevelDebug
+	}
+}
+
+// middlewareLogger creates a chi middleware that logs requests using slog, at a
+// level derived from the response status (see requestLogLevel). Set
+// LOG_LEVEL=debug to get the full access log, successes included.
 func middlewareLogger(logger *slog.Logger) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -359,11 +386,13 @@ func middlewareLogger(logger *slog.Logger) func(next http.Handler) http.Handler 
 
 			next.ServeHTTP(ww, r)
 
-			// InfoContext (not Info) so a logger wrapped with
-			// logfields.NewTraceHandler (see service.NewLogger) stamps this
-			// line with trace_id/span_id from the request's OTEL span.
-			logger.InfoContext(
+			// Log (which takes a ctx), not the level-specific ctx-less methods,
+			// so a logger wrapped with logfields.NewTraceHandler (see
+			// service.NewLogger) stamps this line with trace_id/span_id from
+			// the request's OTEL span.
+			logger.Log(
 				r.Context(),
+				requestLogLevel(ww.Status()),
 				"request",
 				"method", r.Method,
 				"path", r.URL.Path,
