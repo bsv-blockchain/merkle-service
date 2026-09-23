@@ -195,6 +195,16 @@ renamed to match the canon.
 
 ### Key log lines
 
+- **HTTP access log** (`internal/api/server.go`): every request logs
+  `"request"` with `method`, `path`, `status`, `duration` and `request_id`, at
+  a level derived from the response status — `Debug` under 400, `Info` for
+  4xx, `Error` for 5xx. The success path is deliberately at `Debug`: method,
+  status, duration and a bounded route label are already carried by
+  `merkle_http_requests_total` / `merkle_http_request_duration_seconds`, so a
+  2xx line would duplicate a metric at one log record per request. 4xx stays
+  at `Info` because 404, 401 and 429 are answered by middleware that logs
+  nothing else. Set `LOG_LEVEL=debug` on api-server to get the full access log
+  back for local debugging.
 - **Registration accepted** (`internal/api/handlers.go`): `/watch` logs
   `"registration accepted"` with `txid` + `callback_url` at Info level.
 - **SEEN batch published** (`internal/subtree/processor.go`): once a

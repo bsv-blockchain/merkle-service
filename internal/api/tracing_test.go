@@ -138,7 +138,10 @@ func TestInboundTracing_LogCorrelation(t *testing.T) {
 	withTestTracing(t)
 
 	var logBuf bytes.Buffer
-	logger := slog.New(logfields.NewTraceHandler(slog.NewJSONHandler(&logBuf, nil)))
+	// Debug level: middlewareLogger emits the 200 access line at Debug (see
+	// requestLogLevel), and trace stamping must work there too.
+	logger := slog.New(logfields.NewTraceHandler(slog.NewJSONHandler(&logBuf,
+		&slog.HandlerOptions{Level: slog.LevelDebug})))
 	handler := newTracedTestServer(t, logger)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", nil)
