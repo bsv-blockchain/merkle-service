@@ -84,13 +84,22 @@ func (s *blobSubtreeStore) StoreSubtree(id string, data []byte, blockHeight uint
 }
 
 // StoreSubtreeFromReader stores subtree data from a reader with delete-at-height.
+// As in StoreSubtree, a blockHeight of 0 (unknown) stores the blob without a
+// DAH, so it is not pruned before block processing re-stores it.
 func (s *blobSubtreeStore) StoreSubtreeFromReader(id string, r io.Reader, size int64, blockHeight uint64) error {
-	dah := blockHeight + s.dahOffset
-	err := s.store.SetFromReader(id, r, size, WithDeleteAtHeight(dah))
+	var opts []BlobOption
+	if blockHeight > 0 {
+		opts = append(opts, WithDeleteAtHeight(blockHeight+s.dahOffset))
+	}
+	err := s.store.SetFromReader(id, r, size, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to store subtree %s from reader: %w", id, err)
 	}
-	s.logger.Debug("stored subtree from reader", "id", id, "dah", dah)
+	if blockHeight > 0 {
+		s.logger.Debug("stored subtree from reader", "id", id, "dah", blockHeight+s.dahOffset)
+	} else {
+		s.logger.Debug("stored subtree from reader", "id", id, "dah", "none")
+	}
 	return nil
 }
 
