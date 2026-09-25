@@ -1084,8 +1084,15 @@ func (b *bucketPreallocated) Init(maxBytes uint64, trimRatio int) error {
 		maxChunks = 1
 	}
 
+	// maxChunks*ChunkSize <= maxBytes, so only the int conversion can overflow
+	// (on 32-bit builds maxBucketSize exceeds math.MaxInt).
+	allocBytes := maxChunks * ChunkSize
+	if allocBytes > math.MaxInt {
+		return fmt.Errorf("failed converting bucket size %d: overflow", allocBytes)
+	}
+
 	// allocate memory for all chunks of the bucket
-	data, err := allocateNamedMmap(int(maxChunks * ChunkSize))
+	data, err := allocateNamedMmap(int(allocBytes))
 	if err != nil {
 		return err
 	}

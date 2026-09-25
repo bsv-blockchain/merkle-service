@@ -1,6 +1,10 @@
 package cache
 
-import "testing"
+import (
+	"math"
+	"strings"
+	"testing"
+)
 
 // A Preallocated cache whose per-bucket size is not a whole number of chunks
 // is floored to whole chunks instead of panicking while slicing the mmap
@@ -40,5 +44,19 @@ func TestBucketPreallocated_InitSubChunkSize(t *testing.T) {
 	}
 	if got := len(b.chunks); got != 1 {
 		t.Fatalf("expected 1 chunk, got %d", got)
+	}
+}
+
+// On 32-bit builds a bucket size that fits under maxBucketSize can still
+// exceed math.MaxInt; Init refuses it instead of passing a wrapped size to
+// mmap.
+func TestBucketPreallocated_InitSizeOverflowsInt(t *testing.T) {
+	if uint64(math.MaxInt) >= maxBucketSize {
+		t.Skip("every bucket size below maxBucketSize fits in an int on this platform")
+	}
+	var b bucketPreallocated
+	err := b.Init(uint64(math.MaxInt)+ChunkSize, defaultTrimRatio)
+	if err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("expected an overflow error before mmap, got %v", err)
 	}
 }
