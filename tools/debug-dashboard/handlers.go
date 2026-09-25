@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -16,6 +17,10 @@ import (
 )
 
 var txidRegex = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
+
+// maxCallbackBodyBytes caps a received callback body. It matches the 1 MiB
+// limit on the dashboard's form handlers.
+const maxCallbackBodyBytes = 1 << 20
 
 // Handlers holds dependencies for HTTP handlers.
 type Handlers struct {
@@ -211,8 +216,14 @@ func (h *Handlers) handleCallbacks(w http.ResponseWriter, r *http.Request) {
 
 // handleCallbackReceive receives callbacks from the merkle-service.
 func (h *Handlers) handleCallbackReceive(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxCallbackBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "callback body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}

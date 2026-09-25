@@ -225,3 +225,24 @@ func TestTxidValidation(t *testing.T) {
 		}
 	}
 }
+
+// An oversized callback body is rejected with 413 and not stored (#57).
+func TestHandleCallbackReceive_OversizedBody(t *testing.T) {
+	h := &Handlers{
+		callbackStore: NewCallbackStore(10),
+		logger:        testLogger(),
+	}
+
+	body := `{"status":"MINED","pad":"` + strings.Repeat("a", maxCallbackBodyBytes) + `"}`
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/callbacks/receive", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.handleCallbackReceive(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Code)
+	}
+	if got := h.callbackStore.Count(); got != 0 {
+		t.Fatalf("expected oversized callback not to be stored, got %d entries", got)
+	}
+}
