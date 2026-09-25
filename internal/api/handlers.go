@@ -29,6 +29,28 @@ var txidRegex = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 // store arbitrary blobs in our registration record.
 const maxCallbackTokenLen = 4096
 
+// maxRequestBodyBytes caps the JSON body of /watch and /reprocess. Their
+// largest legitimate request, a hash, a callback URL and a callbackToken of at
+// most maxCallbackTokenLen bytes, is a few KiB, far below this.
+const maxRequestBodyBytes = 64 << 10
+
+// decodeJSONBody decodes a size-capped JSON request body into v. On failure it
+// writes the error response itself, 413 when the body exceeds
+// maxRequestBodyBytes and 400 for anything else, and returns false.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, ErrorResponse{Error: "request body too large"})
+			return false
+		}
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return false
+	}
+	return true
+}
+
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(dashboardHTML)
@@ -65,8 +87,7 @@ type HealthResponse struct {
 
 func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	var req WatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -267,8 +288,7 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ReprocessRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
