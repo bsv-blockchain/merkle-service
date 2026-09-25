@@ -1076,8 +1076,16 @@ func (b *bucketPreallocated) Init(maxBytes uint64, trimRatio int) error {
 		return fmt.Errorf("too big maxBytes=%d; should be smaller than %d", maxBytes, maxBucketSize)
 	}
 
+	// Allocate whole chunks only: the loop below slices data[ChunkSize:], which
+	// panics on a remainder. Floored, with at least one chunk, as in
+	// bucketTrimmed.Init.
+	maxChunks := maxBytes / ChunkSize
+	if maxChunks == 0 {
+		maxChunks = 1
+	}
+
 	// allocate memory for all chunks of the bucket
-	data, err := allocateNamedMmap(int(maxBytes))
+	data, err := allocateNamedMmap(int(maxChunks * ChunkSize))
 	if err != nil {
 		return err
 	}
