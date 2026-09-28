@@ -993,8 +993,25 @@ func TestMigrations_Idempotent(t *testing.T) {
 // Several service instances starting at once against one SQLite file must not
 // apply the same migration twice (#43). Each *sql.DB stands in for a process.
 func TestMigrations_ConcurrentSQLiteStarts(t *testing.T) {
-	path := t.TempDir() + "/concurrent.db"
-	dsn := "file:" + path // the documented form: no busy_timeout of its own
+	for _, tc := range []struct {
+		name        string
+		query       string
+		wantTimeout int
+	}{
+		// No busy_timeout of its own: the harshest case, which failed with
+		// SQLITE_BUSY at once before this fix.
+		{name: "no busy_timeout", query: "", wantTimeout: 0},
+		// The form docs/sql-backend.md documents.
+		{name: "documented busy_timeout", query: "?_pragma=busy_timeout(5000)", wantTimeout: 5000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testConcurrentSQLiteStarts(t, "file:"+t.TempDir()+"/concurrent.db"+tc.query, tc.wantTimeout)
+		})
+	}
+}
+
+func testConcurrentSQLiteStarts(t *testing.T, dsn string, wantTimeout int) {
+	t.Helper()
 	migs, err := loadMigrations()
 	if err != nil {
 		t.Fatal(err)
@@ -1046,8 +1063,8 @@ func TestMigrations_ConcurrentSQLiteStarts(t *testing.T) {
 		if err := db.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&timeout); err != nil {
 			t.Fatal(err)
 		}
-		if timeout != 0 {
-			t.Errorf("start %d: busy_timeout left at %d, want the DSN's 0", i, timeout)
+		if timeout != wantTimeout {
+			t.Errorf("start %d: busy_timeout left at %d, want the DSN's %d", i, timeout, wantTimeout)
 		}
 		// No transaction was left open on the pooled connection.
 		if _, err := db.ExecContext(context.Background(), "BEGIN"); err != nil {

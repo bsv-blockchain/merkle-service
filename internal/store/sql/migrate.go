@@ -160,7 +160,10 @@ func applySQLiteMigration(ctx context.Context, conn *sql.Conn, d *dialect, m mig
 	recorded, err := queryAppliedVersions(ctx, conn)
 	if err == nil {
 		if _, ok := recorded[m.version]; ok {
-			return false, finish("COMMIT"), nil
+			if _, err = conn.ExecContext(context.Background(), "COMMIT"); err != nil {
+				return false, finish("ROLLBACK"), fmt.Errorf("commit after finding migration applied: %w", err)
+			}
+			return false, true, nil
 		}
 		err = applyStatements(ctx, conn, d, m)
 	}
