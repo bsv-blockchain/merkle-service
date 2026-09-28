@@ -89,7 +89,7 @@ func TestSQLiteMigration_RecheckInsideLock(t *testing.T) {
 func TestSQLiteMigration_RecheckAfterWaitingForLock(t *testing.T) {
 	for name, suffix := range map[string]string{
 		"rollback journal": "",
-		"WAL":              "?_pragma=journal_mode(WAL)",
+		"WAL":              "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)",
 	} {
 		t.Run(name, func(t *testing.T) {
 			dsn := "file:" + t.TempDir() + "/wait.db" + suffix
