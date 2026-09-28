@@ -28,10 +28,15 @@ When `store.backend: sql` the `aerospike:` block is ignored. When
 | Driver     | DSN example                                                       |
 |------------|-------------------------------------------------------------------|
 | `postgres` | `postgres://user:pass@host:5432/merkle?sslmode=disable`           |
-| `sqlite`   | `file:/var/lib/merkle.db` or `:memory:` for tests                 |
+| `sqlite`   | `file:/var/lib/merkle.db?_pragma=busy_timeout(5000)` or `:memory:` for tests |
 
 PostgreSQL is the production target. SQLite is primarily for tests and
 lightweight single-node deployments (no network exposure, no multi-writer).
+
+Keep `_pragma=busy_timeout(...)` in a SQLite DSN. Without it, a connection
+that finds the database locked fails at once with `SQLITE_BUSY` instead of
+waiting, which also applies to the startup ping when several instances share
+one file.
 
 ## Migrations
 
