@@ -310,7 +310,9 @@ func TestRegisterAll_GoroutinesIndependentOfInput(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{}, concurrency)
 
-	done := make(chan []result)
+	// Buffered so the goroutine can finish even if the test fails before
+	// receiving from done.
+	done := make(chan []result, 1)
 	go func() {
 		done <- registerAll(context.Background(), txids, concurrency, func(context.Context, string) error {
 			select {
