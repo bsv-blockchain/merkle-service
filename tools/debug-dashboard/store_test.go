@@ -113,3 +113,15 @@ func TestTxidTracker_Add_Deduplicate(t *testing.T) {
 		t.Errorf("expected 2 callback URLs after update, got %d", len(all[0].CallbackURLs))
 	}
 }
+
+// A nonpositive capacity stores nothing instead of panicking (#47).
+func TestCallbackStore_NonpositiveCapacity(t *testing.T) {
+	for _, size := range []int{0, -1} {
+		s := NewCallbackStore(size)
+		s.Add(CallbackEntry{Timestamp: time.Now(), RawJSON: `{"status":"MINED"}`})
+		s.Add(CallbackEntry{Timestamp: time.Now(), RawJSON: `{"status":"MINED"}`})
+		if got := s.Count(); got != 0 {
+			t.Fatalf("size %d: expected 0 stored entries, got %d", size, got)
+		}
+	}
+}

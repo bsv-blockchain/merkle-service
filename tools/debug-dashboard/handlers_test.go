@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHandleCallbackReceive_ValidPayload(t *testing.T) {
@@ -223,5 +224,79 @@ func TestTxidValidation(t *testing.T) {
 		if result != tt.valid {
 			t.Errorf("txidRegex(%q) = %v, want %v", tt.txid, result, tt.valid)
 		}
+	}
+}
+
+// An oversized callback body is rejected with 413 and not stored (#57).
+func TestHandleCallbackReceive_OversizedBody(t *testing.T) {
+	h := &Handlers{
+		callbackStore: NewCallbackStore(10),
+		logger:        testLogger(),
+	}
+
+	body := `{"status":"MINED","pad":"` + strings.Repeat("a", maxCallbackBodyBytes) + `"}`
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/callbacks/receive", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.handleCallbackReceive(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Code)
+	}
+	if got := h.callbackStore.Count(); got != 0 {
+		t.Fatalf("expected oversized callback not to be stored, got %d entries", got)
+	}
+}
+
+// A stalled merkle-service does not hang the registration handler (#46).
+func TestHandleRegister_UpstreamTimeout(t *testing.T) {
+	release := make(chan struct{})
+	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer mockAPI.Close()
+	defer close(release)
+
+	h := &Handlers{
+		callbackStore: NewCallbackStore(100),
+		txidTracker:   NewTxidTracker(),
+		templates:     testTemplates(),
+		merkleAPIURL:  mockAPI.URL,
+		callbackURL:   "http://localhost:9900/callbacks/receive",
+		logger:        testLogger(),
+		httpClient:    &http.Client{Timeout: 50 * time.Millisecond},
+	}
+
+	form := url.Values{}
+	form.Set("txid", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
+	form.Set("callbackUrl", "http://my-arcade:8080/callback")
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/register", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		h.handleRegister(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleRegister did not return while merkle-service was stalled")
+	}
+	if !strings.Contains(w.Body.String(), "Failed to reach merkle-service") {
+		t.Fatalf("expected an unreachable-service error, got %q", w.Body.String())
+	}
+	if got := len(h.txidTracker.GetAll()); got != 0 {
+		t.Fatalf("expected no tracked txid after a failed registration, got %d", got)
+	}
+}
+
+// With no client injected, registration uses one with a finite timeout (#46).
+func TestHandlers_DefaultHTTPClientHasTimeout(t *testing.T) {
+	h := &Handlers{}
+	if c := h.client(); c.Timeout <= 0 {
+		t.Fatalf("expected a finite default timeout, got %v", c.Timeout)
 	}
 }

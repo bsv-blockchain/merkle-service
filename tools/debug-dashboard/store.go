@@ -20,7 +20,11 @@ type CallbackStore struct {
 }
 
 // NewCallbackStore creates a new CallbackStore with the given capacity.
+// A capacity below one stores nothing.
 func NewCallbackStore(maxSize int) *CallbackStore {
+	if maxSize < 0 {
+		maxSize = 0
+	}
 	return &CallbackStore{
 		entries: make([]CallbackEntry, 0, maxSize),
 		maxSize: maxSize,
@@ -32,6 +36,9 @@ func (s *CallbackStore) Add(entry CallbackEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.maxSize == 0 {
+		return
+	}
 	if len(s.entries) >= s.maxSize {
 		s.entries = s.entries[1:]
 	}

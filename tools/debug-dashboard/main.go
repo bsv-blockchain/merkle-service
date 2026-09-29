@@ -26,6 +26,10 @@ func main() {
 	maxCallbacks := flag.Int("max-callbacks", 1000, "Maximum stored callbacks")
 	flag.Parse()
 
+	if *maxCallbacks < 1 {
+		log.Fatal("--max-callbacks must be at least 1")
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Load merkle-service config for Aerospike connection.

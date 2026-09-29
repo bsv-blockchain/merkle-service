@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -17,6 +18,15 @@ import (
 
 var txidRegex = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 
+const (
+	// maxCallbackBodyBytes caps a received callback body. It matches the
+	// 1 MiB limit on the dashboard's form handlers.
+	maxCallbackBodyBytes = 1 << 20
+
+	// merkleAPITimeout bounds a registration request to merkle-service.
+	merkleAPITimeout = 10 * time.Second
+)
+
 // Handlers holds dependencies for HTTP handlers.
 type Handlers struct {
 	callbackStore *CallbackStore
@@ -26,6 +36,18 @@ type Handlers struct {
 	merkleAPIURL  string
 	callbackURL   string
 	logger        *slog.Logger
+	// httpClient is used for requests to merkle-service; nil means a client
+	// with merkleAPITimeout.
+	httpClient *http.Client
+}
+
+var defaultHTTPClient = &http.Client{Timeout: merkleAPITimeout}
+
+func (h *Handlers) client() *http.Client {
+	if h.httpClient != nil {
+		return h.httpClient
+	}
+	return defaultHTTPClient
 }
 
 // pageData is the common data passed to templates.
@@ -111,7 +133,16 @@ func (h *Handlers) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := http.Post(h.merkleAPIURL+"/watch", "application/json", bytes.NewReader(body)) //nolint:noctx // debug tool, context not plumbed through form handler
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.merkleAPIURL+"/watch", bytes.NewReader(body))
+	if err != nil {
+		data := h.newHomeData()
+		data.FlashError = fmt.Sprintf("Failed to build request: %v", err)
+		h.render(w, "home.html", data)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := h.client().Do(req)
 	if err != nil {
 		data := h.newHomeData()
 		data.FlashError = fmt.Sprintf("Failed to reach merkle-service: %v", err)
@@ -211,8 +242,14 @@ func (h *Handlers) handleCallbacks(w http.ResponseWriter, r *http.Request) {
 
 // handleCallbackReceive receives callbacks from the merkle-service.
 func (h *Handlers) handleCallbackReceive(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxCallbackBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "callback body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
