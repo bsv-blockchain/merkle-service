@@ -128,3 +128,27 @@ func TestConcurrentBlobStore_DeduplicatesGets(t *testing.T) {
 		}
 	}
 }
+
+// A reader-stored subtree with an unknown block height (0) gets no
+// delete-at-height, exactly like StoreSubtree, so it is not pruned before
+// block processing re-stores it with a real height (#45).
+func TestSubtreeStore_FromReaderUnknownHeightNotPruned(t *testing.T) {
+	blob := NewMemoryBlobStore()
+	ss := NewSubtreeStore(blob, 5, slog.Default())
+
+	if err := ss.StoreSubtree("by-bytes", []byte("data"), 0); err != nil {
+		t.Fatalf("store failed: %v", err)
+	}
+	data := []byte("data")
+	if err := ss.StoreSubtreeFromReader("by-reader", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+		t.Fatalf("store from reader failed: %v", err)
+	}
+
+	ss.SetCurrentBlockHeight(5)
+
+	for _, id := range []string{"by-bytes", "by-reader"} {
+		if _, err := ss.GetSubtree(id); err != nil {
+			t.Fatalf("%s: unknown-height subtree was pruned: %v", id, err)
+		}
+	}
+}
