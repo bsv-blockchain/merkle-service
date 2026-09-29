@@ -990,6 +990,191 @@ func TestMigrations_Idempotent(t *testing.T) {
 	}
 }
 
+// Several service instances starting at once against one SQLite file must not
+// apply the same migration twice (#43). Each *sql.DB stands in for a process.
+func TestMigrations_ConcurrentSQLiteStarts(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		query       string
+		wantTimeout int
+	}{
+		// No busy_timeout of its own: the harshest case, which failed with
+		// SQLITE_BUSY at once before this fix.
+		{name: "no busy_timeout", query: "", wantTimeout: 0},
+		// The form docs/sql-backend.md documents.
+		{name: "documented busy_timeout", query: "?_pragma=busy_timeout(5000)", wantTimeout: 5000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testConcurrentSQLiteStarts(t, "file:"+t.TempDir()+"/concurrent.db"+tc.query, tc.wantTimeout)
+		})
+	}
+}
+
+func testConcurrentSQLiteStarts(t *testing.T, dsn string, wantTimeout int) {
+	t.Helper()
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const starts = 6
+	dbs := make([]*sql.DB, starts)
+	for i := range dbs {
+		db, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.SetMaxOpenConns(1) // one connection, so the busy_timeout check below sees it
+		t.Cleanup(func() { _ = db.Close() })
+		dbs[i] = db
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, starts)
+	begin := make(chan struct{})
+	for _, db := range dbs {
+		wg.Add(1)
+		go func(db *sql.DB) {
+			defer wg.Done()
+			<-begin
+			errs <- runMigrations(context.Background(), db, sqliteDialect(), nil)
+		}(db)
+	}
+	close(begin)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent start failed: %v", err)
+		}
+	}
+
+	var count int
+	if err := dbs[0].QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != len(migs) {
+		t.Fatalf("schema_migrations has %d rows, want %d", count, len(migs))
+	}
+
+	// The migration raised busy_timeout only for itself.
+	for i, db := range dbs {
+		var timeout int
+		if err := db.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&timeout); err != nil {
+			t.Fatal(err)
+		}
+		if timeout != wantTimeout {
+			t.Errorf("start %d: busy_timeout left at %d, want the DSN's %d", i, timeout, wantTimeout)
+		}
+		// No transaction was left open on the pooled connection.
+		if _, err := db.ExecContext(context.Background(), "BEGIN"); err != nil {
+			t.Errorf("start %d: connection left inside a transaction: %v", i, err)
+		} else if _, err := db.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A start that finds another writer holding the SQLite lock waits for it
+// instead of failing (#43).
+func TestMigrations_SQLiteWaitsForWriteLock(t *testing.T) {
+	path := t.TempDir() + "/locked.db"
+	holderDB, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holderDB.Close() })
+	holder, err := holderDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close() }()
+	if _, err = holder.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	done := make(chan error, 1)
+	go func() { done <- runMigrations(context.Background(), db, sqliteDialect(), nil) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("migration finished while another writer held the lock: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := holder.ExecContext(context.Background(), "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("migration after the lock was released: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("migration still waiting after the lock was released")
+	}
+}
+
+// A start cancelled while it waits for the lock returns an error and leaves
+// its pooled connection clean: no open transaction, busy_timeout restored.
+func TestMigrations_SQLiteCancelledWhileWaiting(t *testing.T) {
+	// SQLite's busy wait ignores ctx, so keep it short here.
+	prev := sqliteMigrationBusyTimeoutMs
+	sqliteMigrationBusyTimeoutMs = 500
+	t.Cleanup(func() { sqliteMigrationBusyTimeoutMs = prev })
+
+	path := t.TempDir() + "/cancel.db"
+	holderDB, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holderDB.Close() })
+	holder, err := holderDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close() }()
+	if _, err = holder.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := runMigrations(ctx, db, sqliteDialect(), nil); err == nil {
+		t.Fatal("migration succeeded while another writer held the lock")
+	}
+	if _, err := holder.ExecContext(context.Background(), "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+
+	var timeout int
+	if err := db.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		t.Fatal(err)
+	}
+	if timeout != 0 {
+		t.Errorf("busy_timeout left at %d, want 0", timeout)
+	}
+	if _, err := db.ExecContext(context.Background(), "BEGIN"); err != nil {
+		t.Errorf("connection left inside a transaction: %v", err)
+	} else if _, err := db.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	// And a later start completes normally.
+	if err := runMigrations(context.Background(), db, sqliteDialect(), nil); err != nil {
+		t.Fatalf("migration after cancellation: %v", err)
+	}
+}
+
 // TestSeenCounter_BatchIncrement verifies the batched path preserves the
 // per-txid Increment semantics: unique-subtree counting, exactly-once
 // threshold fire across successive batches, and idempotent re-runs.

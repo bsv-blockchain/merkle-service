@@ -69,7 +69,7 @@ store:
 
     # DSN (driver-specific connection string).
     # postgres example: postgres://user:pass@host:5432/merkle?sslmode=disable
-    # sqlite  example: file:/var/lib/merkle.db
+    # sqlite  example: file:/var/lib/merkle.db?_pragma=busy_timeout(5000)
     # Env: STORE_SQL_DSN
     dsn: ""
 
