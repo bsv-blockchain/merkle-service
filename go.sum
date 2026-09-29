@@ -14,8 +14,8 @@ github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAw
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
 github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29 h1:0kQAzHq8vLs7Pptv+7TxjdETLf/nIqJpIB4oC6Ba4vY=
 github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29/go.mod h1:ZWa7ssZJT30CCDGJ7fk/2SBTq9BIQrrVjrcss0UW2s0=
-github.com/aerospike/aerospike-client-go/v8 v8.8.0 h1:gWN5qR1C3Bbrs1R3nODk4fPnar6LH9klnD29yi8nu6w=
-github.com/aerospike/aerospike-client-go/v8 v8.8.0/go.mod h1:7ourdDr30DBIdL4X700rF4p3WyNa9yFB8wimhvW8N8U=
+github.com/aerospike/aerospike-client-go/v8 v8.9.0 h1:SKcGzskEaq1ewOB8dX233hDVp/n7UXnfGG1353iez70=
+github.com/aerospike/aerospike-client-go/v8 v8.9.0/go.mod h1:c/IWx9hALIo6sD4aXP/9C5zMp937vJdskNytuVWdqvc=
 github.com/aws/aws-sdk-go-v2 v1.47.0 h1:0jsHallhJCeaU0Ko48c/3FK1ctOQ7NpzggxriJOQ8MQ=
 github.com/aws/aws-sdk-go-v2 v1.47.0/go.mod h1:bttEH6JqnUL8LepvDVfdrds/fZ5bCIxzpe3abyUrhDU=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.20 h1:GPRlPwz40I2B2VrBEASOA3Bi77NyeqejNLkifosX0rs=
@@ -64,8 +64,8 @@ github.com/bsv-blockchain/go-batcher/v2 v2.1.0 h1:hlg84xRA8W//iQk99A2cJ5yc1EH7vM
 github.com/bsv-blockchain/go-batcher/v2 v2.1.0/go.mod h1:GSV0XBMQC17T6EgPylmzi4pTtgQResomIemPe5Oi8DE=
 github.com/bsv-blockchain/go-bc v1.2.0 h1:6VDbUHyi4ZAQHzTi1Xzv562SHyvfTVnRYx4bVNTX1A8=
 github.com/bsv-blockchain/go-bc v1.2.0/go.mod h1:G8MZVVmGegvSogql+7N7DVwC7GvxJEk8PIjqPP5/mOE=
-github.com/bsv-blockchain/go-bt/v2 v2.7.2 h1:9nR3D6ZmRmx8CwI4SuWVS2d8botQdkCJ63AqMkH2g94=
-github.com/bsv-blockchain/go-bt/v2 v2.7.2/go.mod h1:6+EdHO2yz0InWrmFaOUK/vvHieMI+UCdn1VvRu0cURE=
+github.com/bsv-blockchain/go-bt/v2 v2.7.3 h1:nTbbC3m1qup9YnCNiG677unG2RGppNhBfzdDl+e1xe4=
+github.com/bsv-blockchain/go-bt/v2 v2.7.3/go.mod h1:B4xn7g3m7YaPrXzWmvnCg5xiYdR56Beu/eOjFm78LCw=
 github.com/bsv-blockchain/go-chaincfg v1.7.0 h1:TRQk8l+iIQqy/ekIW7452K6RJaVAK+Svo56q7BXo+0k=
 github.com/bsv-blockchain/go-chaincfg v1.7.0/go.mod h1:zrvdOMUlrgnW6TdIyqPJrQF6okQ2CpGu+sbKGfFgt+k=
 github.com/bsv-blockchain/go-lockfree-queue v1.2.0 h1:VSD75MVVU63idFvcBDiL0BHcYZ5RgGwXHpeFIt9EzHo=
@@ -74,8 +74,8 @@ github.com/bsv-blockchain/go-p2p-message-bus v0.1.25 h1:nuEXHR73yNI6zVvdRtdKbFQb
 github.com/bsv-blockchain/go-p2p-message-bus v0.1.25/go.mod h1:2pvrS51mabnjjzvksuqucd4jQNeqEidg9/OD/iCyifc=
 github.com/bsv-blockchain/go-safe-conversion v1.2.0 h1:HwLWaxqm2OyU5/2BRQ8kwdn25QyX2HXr0JkfSyTG3DU=
 github.com/bsv-blockchain/go-safe-conversion v1.2.0/go.mod h1:62Eq2980j4BygfqJhd/ObGRHET8ubEy2rBdGi4k6nsw=
-github.com/bsv-blockchain/go-sdk v1.5.2 h1:CMRF9HcXQxvDgQK0n6wTy4/RyoGGL4HAjzHmCpqCgCs=
-github.com/bsv-blockchain/go-sdk v1.5.2/go.mod h1:clGHSZoOwrnqJrzEw4VHYZk3JQXbrr+mnybCXZCdrt4=
+github.com/bsv-blockchain/go-sdk v1.6.0 h1:VTi/ceJFdVndLNPvoUh53z2+Yf2RxMMuQj+dLc3C9jg=
+github.com/bsv-blockchain/go-sdk v1.6.0/go.mod h1:F7wz/PdFcLNIFlvkzKJ7dZexbZoRzwR0VzQYKUCaXqU=
 github.com/bsv-blockchain/go-subtree v1.6.0 h1:gScveOJtPqGj3k9cK41BGizvy0XdNVsP9nwoBpdCU6A=
 github.com/bsv-blockchain/go-subtree v1.6.0/go.mod h1:FgDmkR0YAAsIDn8hUM7hzsg4OeN+EiGtek5RhS7zzmI=
 github.com/bsv-blockchain/go-teranode-p2p-client v0.3.0 h1:hT0xqASDX/dQZZjMpZSrNAgbxqIc63DqsDnCJCzdmQg=

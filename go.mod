@@ -3,9 +3,9 @@ module github.com/bsv-blockchain/merkle-service
 go 1.27.0
 
 require (
-	github.com/aerospike/aerospike-client-go/v8 v8.8.0
-	github.com/bsv-blockchain/go-bt/v2 v2.7.2
-	github.com/bsv-blockchain/go-sdk v1.5.2
+	github.com/aerospike/aerospike-client-go/v8 v8.9.0
+	github.com/bsv-blockchain/go-bt/v2 v2.7.3
+	github.com/bsv-blockchain/go-sdk v1.6.0
 	github.com/bsv-blockchain/go-subtree v1.6.0
 	github.com/bsv-blockchain/go-teranode-p2p-client v0.3.0
 	github.com/bsv-blockchain/teranode v0.16.0-beta-9
