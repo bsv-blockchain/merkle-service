@@ -87,9 +87,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Validate --concurrency: must be >= 1. A zero value would create an
-	// unbuffered semaphore that never lets goroutines proceed (wg.Wait hangs);
-	// a negative value would panic inside make().
+	// Validate --concurrency: must be >= 1. With zero or negative values the
+	// bulk worker pool would start no workers and runBulk would hang.
 	if err := validateConcurrency(flagConcurrency); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		usage()
@@ -131,22 +130,9 @@ func runBulk(ctx context.Context, client *http.Client) {
 		return
 	}
 
-	sem := make(chan struct{}, flagConcurrency)
-	results := make([]result, len(txids))
-	var wg sync.WaitGroup
-
-	for i, txid := range txids {
-		wg.Add(1)
-		go func(i int, txid string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			err := registerOne(ctx, client, flagURL, txid, flagCallback)
-			results[i] = result{txid: txid, err: err}
-		}(i, txid)
-	}
-
-	wg.Wait()
+	results := registerAll(ctx, txids, flagConcurrency, func(ctx context.Context, txid string) error {
+		return registerOne(ctx, client, flagURL, txid, flagCallback)
+	})
 
 	// Print per-txid output and tally.
 	succeeded := 0
@@ -170,10 +156,37 @@ func runBulk(ctx context.Context, client *http.Client) {
 	}
 }
 
+// registerAll calls register for every txid using a fixed pool of at most
+// concurrency workers, so the number of goroutines does not grow with the
+// input size. Results are returned in input order.
+func registerAll(ctx context.Context, txids []string, concurrency int, register func(context.Context, string) error) []result {
+	results := make([]result, len(txids))
+	workers := min(concurrency, len(txids))
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				results[i] = result{txid: txids[i], err: register(ctx, txids[i])}
+			}
+		}()
+	}
+
+	for i := range txids {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	return results
+}
+
 // validateConcurrency returns an error if n is not a usable concurrency
-// value. The semaphore in runBulk is sized from this value; a zero value
-// produces an unbuffered channel that deadlocks wg.Wait, and a negative
-// value panics inside make().
+// value. The worker pool in registerAll is sized from this value; with
+// zero or negative values no worker starts and the job send blocks forever.
 func validateConcurrency(n int) error {
 	if n < 1 {
 		return fmt.Errorf("--concurrency must be >= 1")

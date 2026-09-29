@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // --- validateConcurrency ---
@@ -221,5 +227,137 @@ func TestRegisterOne_ServerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("error should mention status 500, got: %v", err)
+	}
+}
+
+// --- registerAll ---
+
+func testTxids(n int) []string {
+	txids := make([]string, n)
+	for i := range txids {
+		txids[i] = fmt.Sprintf("%064x", i)
+	}
+	return txids
+}
+
+func TestRegisterAll_ResultsInOrder(t *testing.T) {
+	txids := testTxids(50)
+	failing := map[string]bool{}
+	for i := 1; i < len(txids); i += 2 {
+		failing[txids[i]] = true
+	}
+	errFail := errors.New("fail")
+
+	results := registerAll(context.Background(), txids, 4, func(_ context.Context, txid string) error {
+		if failing[txid] {
+			return errFail
+		}
+		return nil
+	})
+
+	if len(results) != len(txids) {
+		t.Fatalf("got %d results, want %d", len(results), len(txids))
+	}
+	for i, r := range results {
+		if r.txid != txids[i] {
+			t.Errorf("results[%d].txid = %s, want %s", i, r.txid, txids[i])
+		}
+		wantErr := i%2 == 1
+		if (r.err != nil) != wantErr {
+			t.Errorf("results[%d].err = %v, want error: %v", i, r.err, wantErr)
+		}
+	}
+}
+
+func TestRegisterAll_BoundsConcurrency(t *testing.T) {
+	const concurrency = 3
+	txids := testTxids(200)
+
+	var inFlight, maxInFlight atomic.Int32
+	results := registerAll(context.Background(), txids, concurrency, func(context.Context, string) error {
+		n := inFlight.Add(1)
+		for {
+			m := maxInFlight.Load()
+			if n <= m || maxInFlight.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		runtime.Gosched()
+		inFlight.Add(-1)
+		return nil
+	})
+
+	if len(results) != len(txids) {
+		t.Fatalf("got %d results, want %d", len(results), len(txids))
+	}
+	if got := maxInFlight.Load(); got > concurrency {
+		t.Errorf("max in-flight registrations = %d, want <= %d", got, concurrency)
+	}
+}
+
+// TestRegisterAll_GoroutinesIndependentOfInput checks that a large input does
+// not start one goroutine per txid while registrations are in progress.
+func TestRegisterAll_GoroutinesIndependentOfInput(t *testing.T) {
+	const (
+		concurrency = 4
+		// Headroom for unrelated runtime goroutines; far below the one
+		// goroutine per txid this test guards against.
+		slack = 16
+	)
+	txids := testTxids(10000)
+
+	baseline := runtime.NumGoroutine()
+	release := make(chan struct{})
+	started := make(chan struct{}, concurrency)
+
+	// Buffered so the goroutine can finish even if the test fails before
+	// receiving from done.
+	done := make(chan []result, 1)
+	go func() {
+		done <- registerAll(context.Background(), txids, concurrency, func(context.Context, string) error {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			return nil
+		})
+	}()
+
+	for range concurrency {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			close(release)
+			t.Fatal("workers did not start")
+		}
+	}
+	// Keep sampling while registrations stay blocked: a per-txid loop is
+	// still starting goroutines at this point, so a single sample can miss it.
+	got, limit := 0, baseline+1+concurrency+slack
+	for deadline := time.Now().Add(100 * time.Millisecond); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		got = max(got, runtime.NumGoroutine())
+	}
+	close(release)
+	if got > limit {
+		t.Errorf("goroutines while blocked = %d, want <= %d", got, limit)
+	}
+
+	if results := <-done; len(results) != len(txids) {
+		t.Fatalf("got %d results, want %d", len(results), len(txids))
+	}
+}
+
+func TestRegisterAll_FewerTxidsThanConcurrency(t *testing.T) {
+	txids := testTxids(2)
+	var calls atomic.Int32
+
+	results := registerAll(context.Background(), txids, 10, func(context.Context, string) error {
+		calls.Add(1)
+		return nil
+	})
+
+	if len(results) != 2 || calls.Load() != 2 {
+		t.Errorf("got %d results and %d calls, want 2 and 2", len(results), calls.Load())
 	}
 }
