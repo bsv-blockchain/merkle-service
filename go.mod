@@ -298,19 +298,6 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-// Pin transitive deps that Dependabot keeps bumping past what our direct
-// dependencies can build against. Replace directives (unlike require) are not
-// touched by Dependabot, so these survive weekly dependency bumps. These mirror
-// the pins in github.com/bsv-blockchain/go-teranode-p2p-client, since replace
-// directives do not propagate from dependencies.
-//
-// go-libp2p v0.49.0 uses webtransport.Dialer, removed in webtransport-go
-// v0.12.0+, and is built against quic-go v0.60.0.
-replace (
-	github.com/quic-go/quic-go => github.com/quic-go/quic-go v0.60.0
-	github.com/quic-go/webtransport-go => github.com/quic-go/webtransport-go v0.11.1
-)
-
 // k8s.io/{api,apimachinery,client-go} v0.37.0 use structured-merge-diff/v6 via
 // kube-openapi ...20260721; newer kube-openapi switched to smd/v7, which breaks
 // apimachinery's managedfields type converter (v6/v7 TypeDef mismatch).
