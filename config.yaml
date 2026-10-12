@@ -318,16 +318,36 @@ kafka:
 # P2P — Teranode network connectivity via go-teranode-p2p-client
 # ---------------------------------------------------------------------------
 p2p:
-  # BSV network to connect to. The go-teranode-p2p-client library automatically
-  # configures topics, bootstrap peers, and protocol version based on this value.
-  # Valid values: main, test, stn, teratestnet
+  # Topic namespace for the Teranode gossipsub mesh. This is a string, not an
+  # enum. Blank defaults to "main". A few names are aliases that share a topic
+  # (main/mainnet, test/testnet, teratest/teratestnet); every other value,
+  # including "regtest", is used as-is. Peers only see each other when they
+  # resolve to the same topic name.
+  #
+  # Built-in Teranode bootstrap peers exist only for the raw values "main",
+  # "test", and "stn". regtest, teratestnet, and any private name need
+  # p2p.msgbus.bootstrapPeers set explicitly (camelCase — bootstrap_peers is
+  # ignored). See docs/private-network.md.
   # Env: P2P_NETWORK
   network: teratestnet
 
   # Directory for persisting the P2P identity key and peer cache.
   # The library manages key generation and peer persistence automatically.
+  # Give each local process its own directory.
   # Env: P2P_STORAGE_PATH
   storagePath: ~/.merkle-service/p2p
+
+  # Message-bus overrides. Omitted keys keep the built-in defaults:
+  #   dhtMode: off          (P2P_DHT_MODE) — no DHT; dial bootstrap peers only
+  #   port: 9905            (P2P_PORT)
+  #   bootstrapPeers: []    (P2P_BOOTSTRAP_PEERS) — comma-separated in the env var
+  #   announceAddrs: []     (P2P_ANNOUNCE_ADDRS)
+  #   enableNAT: false      (P2P_ENABLE_NAT)
+  #   enableMDNS: false     (P2P_ENABLE_MDNS)
+  #   maxConnections: 0     (P2P_MAX_CONNECTIONS) — 0 leaves the library default, 35
+  #   minConnections: 0     (P2P_MIN_CONNECTIONS) — 0 leaves the library default, 25
+  # An empty bootstrapPeers list uses Teranode's peers for main/test/stn and
+  # the public IPFS bootstrap peers for every other network name.
 
 # ---------------------------------------------------------------------------
 # Subtree Processor
