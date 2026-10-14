@@ -3,7 +3,7 @@
 
 # Pinned by multi-arch manifest-list (OCI image index) digest so the digest
 # resolves the correct per-platform manifest on every build OS/arch.
-FROM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
+FROM golang:1.27-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS builder
 
 ARG VERSION=dev
 
