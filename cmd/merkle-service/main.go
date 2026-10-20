@@ -42,6 +42,14 @@ func main() {
 	}
 	defer func() { _ = registry.Close() }()
 
+	// Blob-store age sweeper: the all-in-one process hosts the block-processor,
+	// so it owns the sweep exactly as cmd/block-processor does. Without it,
+	// subtree blobs whose delete-at-height never fires accumulate forever in
+	// one flat directory until ext4's htree index fills and every write fails
+	// with ENOSPC regardless of free space.
+	stopSweeper := store.StartAgeSweeperFromConfig(registry.Blob, cfg.BlobStore, logger)
+	defer stopSweeper()
+
 	subtreeProducer, err := kafka.NewProducer(cfg.Kafka.Brokers, cfg.Kafka.SubtreeTopic, cfg.Kafka.TopicPartitions(), cfg.Kafka.TopicRetention(), logger)
 	if err != nil {
 		log.Fatal("failed to create subtree producer: ", err)
