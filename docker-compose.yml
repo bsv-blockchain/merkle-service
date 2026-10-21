@@ -1,6 +1,6 @@
 services:
   aerospike:
-    image: docker.io/aerospike/aerospike-server:8.0
+    image: docker.io/aerospike/aerospike-server:8.2
     ports:
       - "3100:3100"
       - "3101:3101"
@@ -13,7 +13,7 @@ services:
       - merkle-net
 
   zookeeper:
-    image: docker.io/confluentinc/cp-zookeeper:7.6.0
+    image: docker.io/confluentinc/cp-zookeeper:7.9.1
     environment:
       ZOOKEEPER_CLIENT_PORT: "2181"
       ZOOKEEPER_TICK_TIME: "2000"
@@ -23,7 +23,7 @@ services:
       - merkle-net
 
   kafka:
-    image: docker.io/confluentinc/cp-kafka:7.6.0
+    image: docker.io/confluentinc/cp-kafka:8.3.2
     depends_on:
       - zookeeper
     ports:
