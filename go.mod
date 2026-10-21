@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/aerospike/aerospike-client-go/v8 v8.9.0
 	github.com/bsv-blockchain/go-bt/v2 v2.7.4
-	github.com/bsv-blockchain/go-sdk v1.7.2
+	github.com/bsv-blockchain/go-sdk v1.7.3
 	github.com/bsv-blockchain/go-subtree v1.6.3
 	github.com/bsv-blockchain/go-teranode-p2p-client v0.3.1
 	github.com/bsv-blockchain/teranode v0.16.0
@@ -268,7 +268,7 @@ require (
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
 	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260924152758-ed294f943157 // indirect
 	golang.org/x/term v0.47.0 // indirect
