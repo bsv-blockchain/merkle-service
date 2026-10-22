@@ -34,6 +34,12 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*storepk
 	if dsn == "" {
 		return nil, fmt.Errorf("store.sql.dsn is required when store.backend=sql")
 	}
+	if driverName == "sqlite" {
+		dsn, err = sqliteRuntimeDSN(dsn)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
