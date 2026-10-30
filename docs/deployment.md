@@ -124,23 +124,24 @@ Set via `MODE` env var or the `mode` YAML key.
 
 ### P2P
 
-Uses [go-p2p-message-bus](https://github.com/bsv-blockchain/go-p2p-message-bus) for Teranode-compatible P2P networking.
+The client uses [go-teranode-p2p-client](https://github.com/bsv-blockchain/go-teranode-p2p-client) v0.3.2, which embeds [go-p2p-message-bus](https://github.com/bsv-blockchain/go-p2p-message-bus) v0.2.0. `P2P_NETWORK` is a topic-namespace string. With no config file, the built-in default is `main`. A checkout of this repo loads [config.yaml](../config.yaml), which sets `network: teratestnet` and an explicit `p2p.msgbus.bootstrapPeers` entry. See [private-network.md](private-network.md) for a closed-network config.
 
-| Variable               | Default          | Description                                                    |
-|------------------------|------------------|----------------------------------------------------------------|
-| `P2P_NETWORK`          | `mainnet`        | Network: `mainnet`, `testnet`, or `teratestnet`. Controls topic prefix and protocol version. |
-| `P2P_NAME`             | `merkle-service` | Peer name identifier.                                         |
-| `P2P_PRIVATE_KEY`      | *(auto-generated)* | Ed25519 private key (hex-encoded). Auto-generated and persisted to PeerCacheDir if not set. |
-| `P2P_PEER_CACHE_DIR`   | *(empty)*        | Directory for peer cache file and auto-generated key.          |
-| `P2P_PORT`             | `9906`           | TCP port for libp2p connections.                               |
-| `P2P_ANNOUNCE_ADDRS`   | *(empty)*        | Comma-separated list of addresses to advertise to peers.       |
-| `P2P_BOOTSTRAP_PEERS`  | *(empty)*        | Comma-separated list of bootstrap peer multiaddrs.             |
-| `P2P_SUBTREE_TOPIC`    | `subtree`        | Topic suffix for subtrees (full topic: `{network}-subtree`).   |
-| `P2P_BLOCK_TOPIC`      | `block`          | Topic suffix for blocks (full topic: `{network}-block`).       |
-| `P2P_DHT_MODE`         | `off`            | DHT mode: `server`, `client`, or `off`. Use `off` for lightweight clients. |
-| `P2P_ENABLE_NAT`       | `false`          | Enable UPnP/NAT-PMP port mapping.                             |
-| `P2P_ENABLE_MDNS`      | `false`          | Enable multicast DNS discovery.                                |
-| `P2P_ALLOW_PRIVATE_IPS` | `false`         | Allow connections to private IP ranges.                        |
+When `bootstrapPeers` is empty, the library looks up a default map whose only keys are `main`, `test`, and `stn`. The `stn` value is `/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech`, which does not match the `stn` topic. That map entry is not a configuration to copy; set `bootstrapPeers` yourself. Any other empty list falls through to the public IPFS bootstrap peers.
+
+The peer name passed to the library is fixed (`merkle-service`). Topic names are chosen by go-teranode-p2p-client. There is no `P2P_ALLOW_PRIVATE_IPS`; the library allows private-IP dials only when `P2P_NETWORK` is exactly `regtest`. Hole punching is turned on by `P2P_ENABLE_NAT`, not by DHT mode.
+
+| Variable                | Default                    | Description                                                                 |
+|-------------------------|----------------------------|-----------------------------------------------------------------------------|
+| `P2P_NETWORK`           | `main`; `teratestnet` in the shipped config.yaml | Topic namespace. Blank becomes `main`. A repo run loads config.yaml. |
+| `P2P_STORAGE_PATH`      | `~/.merkle-service/p2p`    | Directory for the identity key and peer cache.                              |
+| `P2P_DHT_MODE`          | `off`                      | `off`, `client`, or `server`. `off` dials bootstrap peers only.             |
+| `P2P_PORT`              | `9905`                     | libp2p listen port.                                                         |
+| `P2P_ANNOUNCE_ADDRS`    | *(empty)*                  | Comma-separated multiaddrs to advertise.                                    |
+| `P2P_BOOTSTRAP_PEERS`   | *(empty)*; shipped config.yaml sets the teratestnet dnsaddr | Comma-separated bootstrap multiaddrs. Empty uses the library map when the network name is one of its keys (`main`, `test`, `stn`); every other name uses the public IPFS bootstrap peers. |
+| `P2P_MAX_CONNECTIONS`   | `0` (library uses 35)      | Connection high-water mark. `0` leaves the library default.                 |
+| `P2P_MIN_CONNECTIONS`   | `0` (library uses 25)      | Connection low-water mark. `0` leaves the library default.                  |
+| `P2P_ENABLE_NAT`        | `false`                    | Enable UPnP/NAT-PMP and libp2p hole punching.                               |
+| `P2P_ENABLE_MDNS`       | `false`                    | Enable multicast DNS discovery on the local network.                        |
 
 ### Subtree Processing
 

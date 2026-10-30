@@ -318,16 +318,45 @@ kafka:
 # P2P — Teranode network connectivity via go-teranode-p2p-client
 # ---------------------------------------------------------------------------
 p2p:
-  # BSV network to connect to. The go-teranode-p2p-client library automatically
-  # configures topics, bootstrap peers, and protocol version based on this value.
-  # Valid values: main, test, stn, teratestnet
+  # Topic namespace for the Teranode gossipsub mesh. This is a string, not an
+  # enum. Blank defaults to "main" when this file is absent. A few names are
+  # aliases that share a topic (main/mainnet, test/testnet,
+  # teratest/teratestnet); every other value, including "regtest", is used
+  # as-is. Peers only see each other when they resolve to the same topic name.
   # Env: P2P_NETWORK
   network: teratestnet
 
   # Directory for persisting the P2P identity key and peer cache.
   # The library manages key generation and peer persistence automatically.
+  # Give each local process its own directory.
   # Env: P2P_STORAGE_PATH
   storagePath: ~/.merkle-service/p2p
+
+  # These keys belong under msgbus. The same names directly under p2p are
+  # not mapped and are ignored. Underscores are also ignored (bootstrap_peers
+  # does not bind). See docs/private-network.md.
+  msgbus:
+    # "off" dials bootstrap peers only (no DHT). Env: P2P_DHT_MODE
+    dhtMode: off
+    # Env: P2P_PORT
+    port: 9905
+    # teratestnet is not a key in the library's default bootstrap map, so an
+    # empty list would fall through to the public IPFS bootstrap peers.
+    # Env: P2P_BOOTSTRAP_PEERS (comma-separated)
+    bootstrapPeers:
+      - "/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech"
+    # Multiaddrs to advertise when the reachable address differs from the
+    # listen address. Leave unset to advertise the listen address.
+    # Env: P2P_ANNOUNCE_ADDRS
+    # announceAddrs: []
+    # UPnP/NAT-PMP and libp2p hole punching. Leave false. Env: P2P_ENABLE_NAT
+    enableNAT: false
+    # LAN multicast discovery. Env: P2P_ENABLE_MDNS
+    enableMDNS: false
+    # 0 leaves the library defaults (35 and 25).
+    # Env: P2P_MAX_CONNECTIONS / P2P_MIN_CONNECTIONS
+    # maxConnections: 0
+    # minConnections: 0
 
 # ---------------------------------------------------------------------------
 # Subtree Processor
