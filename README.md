@@ -303,7 +303,7 @@ Configuration is loaded from (highest priority first):
 
 See [docs/deployment.md](docs/deployment.md) for the full env-var reference and [docs/sql-backend.md](docs/sql-backend.md) for running against PostgreSQL or SQLite instead of Aerospike.
 
-A closed network (regtest, local Arcade tests, any name other than `main`, `test`, or `stn`) needs explicit bootstrap peers. [docs/private-network.md](docs/private-network.md) has the recipe.
+A closed network (regtest, local Arcade tests, or any name without an explicit bootstrap list) needs `p2p.msgbus.bootstrapPeers`. The shipped [config.yaml](config.yaml) is `teratestnet` with that list set. [docs/private-network.md](docs/private-network.md) has the recipe.
 
 <br>
 

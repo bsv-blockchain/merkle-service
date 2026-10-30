@@ -319,15 +319,10 @@ kafka:
 # ---------------------------------------------------------------------------
 p2p:
   # Topic namespace for the Teranode gossipsub mesh. This is a string, not an
-  # enum. Blank defaults to "main". A few names are aliases that share a topic
-  # (main/mainnet, test/testnet, teratest/teratestnet); every other value,
-  # including "regtest", is used as-is. Peers only see each other when they
-  # resolve to the same topic name.
-  #
-  # Built-in Teranode bootstrap peers exist only for the raw values "main",
-  # "test", and "stn". regtest, teratestnet, and any private name need
-  # p2p.msgbus.bootstrapPeers set explicitly (camelCase — bootstrap_peers is
-  # ignored). See docs/private-network.md.
+  # enum. Blank defaults to "main" when this file is absent. A few names are
+  # aliases that share a topic (main/mainnet, test/testnet,
+  # teratest/teratestnet); every other value, including "regtest", is used
+  # as-is. Peers only see each other when they resolve to the same topic name.
   # Env: P2P_NETWORK
   network: teratestnet
 
@@ -337,17 +332,31 @@ p2p:
   # Env: P2P_STORAGE_PATH
   storagePath: ~/.merkle-service/p2p
 
-  # Message-bus overrides. Omitted keys keep the built-in defaults:
-  #   dhtMode: off          (P2P_DHT_MODE) — no DHT; dial bootstrap peers only
-  #   port: 9905            (P2P_PORT)
-  #   bootstrapPeers: []    (P2P_BOOTSTRAP_PEERS) — comma-separated in the env var
-  #   announceAddrs: []     (P2P_ANNOUNCE_ADDRS)
-  #   enableNAT: false      (P2P_ENABLE_NAT)
-  #   enableMDNS: false     (P2P_ENABLE_MDNS)
-  #   maxConnections: 0     (P2P_MAX_CONNECTIONS) — 0 leaves the library default, 35
-  #   minConnections: 0     (P2P_MIN_CONNECTIONS) — 0 leaves the library default, 25
-  # An empty bootstrapPeers list uses Teranode's peers for main/test/stn and
-  # the public IPFS bootstrap peers for every other network name.
+  # These keys belong under msgbus. The same names directly under p2p are
+  # not mapped and are ignored. Underscores are also ignored (bootstrap_peers
+  # does not bind). See docs/private-network.md.
+  msgbus:
+    # "off" dials bootstrap peers only (no DHT). Env: P2P_DHT_MODE
+    dhtMode: off
+    # Env: P2P_PORT
+    port: 9905
+    # teratestnet is not a key in the library's default bootstrap map, so an
+    # empty list would fall through to the public IPFS bootstrap peers.
+    # Env: P2P_BOOTSTRAP_PEERS (comma-separated)
+    bootstrapPeers:
+      - "/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech"
+    # Multiaddrs to advertise when the reachable address differs from the
+    # listen address. Leave unset to advertise the listen address.
+    # Env: P2P_ANNOUNCE_ADDRS
+    # announceAddrs: []
+    # UPnP/NAT-PMP and libp2p hole punching. Leave false. Env: P2P_ENABLE_NAT
+    enableNAT: false
+    # LAN multicast discovery. Env: P2P_ENABLE_MDNS
+    enableMDNS: false
+    # 0 leaves the library defaults (35 and 25).
+    # Env: P2P_MAX_CONNECTIONS / P2P_MIN_CONNECTIONS
+    # maxConnections: 0
+    # minConnections: 0
 
 # ---------------------------------------------------------------------------
 # Subtree Processor

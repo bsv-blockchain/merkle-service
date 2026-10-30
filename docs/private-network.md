@@ -1,15 +1,16 @@
 # Private and regtest networks
 
 merkle-service can join a closed network — regtest, a local Arcade
-end-to-end test, or any private deployment. The checked-in
-[config.yaml](../config.yaml) and the public-network examples only show
-`main`, `test`, `stn`, and `teratestnet`. A non-public name works, but it
-does not come with bootstrap peers.
+end-to-end test, or any private deployment. The shipped
+[config.yaml](../config.yaml) is a `teratestnet` sample with an explicit
+bootstrap peer under `p2p.msgbus`. Any other `p2p.network` string is
+accepted. It does not come with bootstrap peers.
 
-The keys below are the ones `internal/config` actually loads. YAML names are
-camelCase (`bootstrapPeers`, `dhtMode`, `enableMDNS`, `enableNAT`).
-Snake_case names such as `bootstrap_peers` are ignored, and the built-in
-default is left in place.
+The keys below are the ones `internal/config` actually loads, and they must
+sit under `p2p.msgbus`. Viper lowercases keys and does not strip underscores,
+so `dhtMode`, `DhtMode`, and `dhtmode` all bind. `dht_mode` and
+`bootstrap_peers` do not, and the built-in default is left in place. The
+same names placed directly under `p2p` (no `msgbus` parent) are also ignored.
 
 ## The network name is a topic namespace
 
@@ -18,7 +19,7 @@ defaults to `main` (the viper default, and again in `internal/p2p/client.go`
 before the client starts). Any other string is passed through.
 
 [go-teranode-p2p-client](https://github.com/bsv-blockchain/go-teranode-p2p-client)
-v0.3.1 rewrites a few aliases when it builds gossipsub topic names, and
+v0.3.2 rewrites a few aliases when it builds gossipsub topic names, and
 uses every other string unchanged. Topics look like
 `teranode/bitcoin/1.0.0/{name}-block` (and `-subtree`, `-rejected-tx`,
 `-node_status`).
@@ -37,20 +38,29 @@ name. `main` and `mainnet` do. `regtest` and a custom name do not.
 
 ## Bootstrap peers, with DHT off
 
-Built-in Teranode bootstrap peers exist only for the raw values `main`,
-`test`, and `stn` (`getDefaultBootstrapPeers` in go-teranode-p2p-client
-v0.3.1). `regtest`, `teratestnet`, `mainnet`, `testnet`, and any private
-name get an empty list. The alias table above does not apply here: `main`
-and `mainnet` share the `mainnet` topic, but only the raw value `main`
-(and `test`, `stn`) selects a built-in bootstrap list.
+When `bootstrapPeers` is empty, go-teranode-p2p-client v0.3.2 looks up
+`getDefaultBootstrapPeers`. That map has three keys: `main`, `test`, and
+`stn`. The `stn` value is `/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech`,
+which does not match the `stn` topic. `teratestnet` is not a key, so an
+empty list on that network is not a Teranode bootstrap list. The topic
+aliases above do not apply here either: `main` and `mainnet` share the
+`mainnet` topic, but only the raw value `main` selects the mainnet bootstrap
+host. Do not treat the `stn` map entry as the way to join teratestnet. The
+shipped config sets the teratestnet dnsaddr explicitly. Changing the
+upstream map is a separate fix.
 
 `p2p.msgbus.dhtMode` defaults to `off`. In that mode
 [go-p2p-message-bus](https://github.com/bsv-blockchain/go-p2p-message-bus)
-v0.1.28 does not join the DHT. The node dials its bootstrap peers, learns
-other topic peers through the GossipSub mesh and the peer-address exchange,
-and has no DHT hole punching. A peer with no public address stays on a relay
-circuit through a bootstrap peer. On a local regtest where each process can
-dial the others directly, list those peers and leave DHT off.
+v0.2.0 does not create a DHT. The node dials its bootstrap peers and learns
+other topic peers through the GossipSub mesh and the peer-address exchange.
+A peer with no public address stays on a relay circuit through a bootstrap
+peer. On a local regtest where each process can dial the others directly,
+list those peers and leave DHT off.
+
+Hole punching is not a DHT setting. `EnableHolePunching` is added only when
+`enableNAT` is true, together with UPnP/NAT-PMP. The library also notes that
+DHT-based hole punching is unavailable while DHT mode is `off`; turning DHT
+on does not by itself enable hole punching.
 
 If `bootstrapPeers` is empty, the message bus falls back to the public IPFS
 bootstrap peers. `DisableDefaultBootstrapPeers` would stop that fallback,
@@ -77,8 +87,8 @@ network wants:
 
 - `enableMDNS` turns on LAN multicast discovery. It does not replace
   bootstrap peers. Leave it false unless the hosts share an isolated LAN.
-- `enableNAT` turns on UPnP/NAT-PMP and scans the local gateway. Leave it
-  false.
+- `enableNAT` turns on UPnP/NAT-PMP, NAT service, and libp2p hole punching,
+  and scans the local gateway. Leave it false.
 
 ## Private IP addresses
 
@@ -119,7 +129,7 @@ p2p:
     dhtMode: off
     port: 9905
     bootstrapPeers:
-      - "/dns4/bootstrap.example/tcp/9905/p2p/12D3KooW..."
+      - "/dns4/bootstrap.example/tcp/9906/p2p/12D3KooW..."
     enableMDNS: false
     enableNAT: false
 
@@ -136,7 +146,7 @@ P2P_NETWORK=regtest
 P2P_STORAGE_PATH=~/.merkle-service/p2p-regtest
 P2P_DHT_MODE=off
 P2P_PORT=9905
-P2P_BOOTSTRAP_PEERS=/ip4/127.0.0.1/tcp/9906/p2p/12D3KooW...
+P2P_BOOTSTRAP_PEERS=/dns4/bootstrap.example/tcp/9906/p2p/12D3KooW...
 P2P_ENABLE_MDNS=false
 P2P_ENABLE_NAT=false
 DATAHUB_ALLOW_PRIVATE_IPS=true
@@ -152,9 +162,9 @@ merkle-service forwards only these `p2p.msgbus` fields to the library:
 
 Everything else — `StaticPeers`, `DisableDefaultBootstrapPeers`,
 `AllowPrivateIPs`, `AllowedPublisherIDs`, peer cache, scoring — lives on
-`Config` in go-p2p-message-bus v0.1.28:
+`Config` in go-p2p-message-bus v0.2.0:
 
-<https://github.com/bsv-blockchain/go-p2p-message-bus/blob/v0.1.28/config.go>
+<https://github.com/bsv-blockchain/go-p2p-message-bus/blob/v0.2.0/config.go>
 
 Those fields are not read from merkle-service config. `announceAddrs`
 (`P2P_ANNOUNCE_ADDRS`) is the list of multiaddrs this node advertises when
