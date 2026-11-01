@@ -38,6 +38,13 @@ func newRegistrationStore(db *sql.DB, d *dialect, maxCallbacksPerTxID int) *regi
 // On SQLite the database serializes writers globally (BEGIN IMMEDIATE in the
 // driver), so the count-then-insert pair is already atomic without an
 // explicit lock.
+//
+// Re-adding a txid also re-arms its registration: expires_at is cleared, so
+// a post-mine TTL set by the subtree processor (BatchUpdateTTL) no longer
+// applies and the tx is watched again until its next mine. This matches the
+// Aerospike store, whose Put rewrites the record's expiry, and is what lets
+// a client keep watching a tx whose block was orphaned — the re-mine can land
+// well after the post-mine TTL (mainnet 973522, 2026-10-31).
 func (s *registrationStore) Add(txid, callbackURL, callbackToken string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -48,8 +55,8 @@ func (s *registrationStore) Add(txid, callbackURL, callbackToken string) error {
 	defer func() { _ = tx.Rollback() }()
 
 	insertReg := fmt.Sprintf( //nolint:gosec // SQL built from internal placeholder functions, no user input
-		"INSERT INTO registrations (txid) VALUES (%s)%s",
-		s.d.placeholder(1), s.d.onConflictDoNothing,
+		"INSERT INTO registrations (txid) VALUES (%s) ON CONFLICT (txid) DO UPDATE SET expires_at = NULL",
+		s.d.placeholder(1),
 	)
 	if _, err := tx.ExecContext(ctx, insertReg, txid); err != nil {
 		return fmt.Errorf("insert registration: %w", err)
