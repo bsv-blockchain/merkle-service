@@ -7,8 +7,8 @@ require (
 	github.com/bsv-blockchain/go-bt/v2 v2.7.4
 	github.com/bsv-blockchain/go-sdk v1.7.3
 	github.com/bsv-blockchain/go-subtree v1.6.3
-	github.com/bsv-blockchain/go-teranode-p2p-client v0.3.2
-	github.com/bsv-blockchain/teranode v0.16.1-beta-4
+	github.com/bsv-blockchain/go-teranode-p2p-client v0.3.3
+	github.com/bsv-blockchain/teranode v0.16.1-beta-txmeta-2
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/jackc/pgx/v5 v5.11.0
@@ -34,7 +34,7 @@ require (
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/time v0.16.0
-	modernc.org/sqlite v1.61.0
+	modernc.org/sqlite v1.61.1
 )
 
 require (
@@ -117,7 +117,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/google/gnostic-models v0.7.1 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
-	github.com/google/pprof v0.0.0-20261026192309-dbd0ed30aa88 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus v1.1.1 // indirect
