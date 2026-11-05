@@ -132,12 +132,12 @@ The peer name passed to the library is fixed (`merkle-service`). Topic names are
 
 | Variable                | Default                    | Description                                                                 |
 |-------------------------|----------------------------|-----------------------------------------------------------------------------|
-| `P2P_NETWORK`           | `main`; `teratestnet` in the shipped config.yaml | Topic namespace. Blank becomes `main`. A repo run loads config.yaml. |
+| `P2P_NETWORK`           | `teratestnet`              | Topic namespace loaded from the shipped config.yaml. With no config file the built-in value is `main`; a blank value also becomes `main`. |
 | `P2P_STORAGE_PATH`      | `~/.merkle-service/p2p`    | Directory for the identity key and peer cache.                              |
 | `P2P_DHT_MODE`          | `off`                      | `off`, `client`, or `server`. `off` dials bootstrap peers only.             |
 | `P2P_PORT`              | `9905`                     | libp2p listen port.                                                         |
 | `P2P_ANNOUNCE_ADDRS`    | *(empty)*                  | Comma-separated multiaddrs to advertise.                                    |
-| `P2P_BOOTSTRAP_PEERS`   | *(empty)*; shipped config.yaml sets the teratestnet dnsaddr | Comma-separated bootstrap multiaddrs. Empty uses the library map when the network name is one of its keys (`main`, `test`, `stn`); every other name uses the public IPFS bootstrap peers. |
+| `P2P_BOOTSTRAP_PEERS`   | `/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech` | Comma-separated bootstrap multiaddrs loaded from the shipped config.yaml. A repo run dials this host. An empty list uses the library map for `main`, `test`, and `stn`; every other name uses the public IPFS bootstrap peers. |
 | `P2P_MAX_CONNECTIONS`   | `0` (library uses 35)      | Connection high-water mark. `0` leaves the library default.                 |
 | `P2P_MIN_CONNECTIONS`   | `0` (library uses 25)      | Connection low-water mark. `0` leaves the library default.                  |
 | `P2P_ENABLE_NAT`        | `false`                    | Enable UPnP/NAT-PMP and libp2p hole punching.                               |

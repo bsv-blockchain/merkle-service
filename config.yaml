@@ -1,8 +1,9 @@
 # Merkle Service Configuration
 #
-# This file configures all components of the merkle-service. Every value shown
-# below is the built-in default. Override any setting here or via the
-# corresponding environment variable (listed in comments).
+# This file configures all components of the merkle-service. Override any
+# setting here or via the corresponding environment variable (listed in
+# comments). A shown value is the built-in default unless the comment on
+# that key says otherwise.
 #
 # Priority order: environment variables > this file > built-in defaults.
 #
@@ -319,8 +320,11 @@ kafka:
 # ---------------------------------------------------------------------------
 p2p:
   # Topic namespace for the Teranode gossipsub mesh. This is a string, not an
-  # enum. Blank defaults to "main" when this file is absent. A few names are
-  # aliases that share a topic (main/mainnet, test/testnet,
+  # enum. With no config file the built-in value is "main". This file is the
+  # teratestnet sample. That name is not a key in the library bootstrap map,
+  # so the msgbus.bootstrapPeers list below is set to the Teranode teratestnet
+  # dnsaddr. An empty list would dial the public IPFS bootstrap peers instead.
+  # A few names are aliases that share a topic (main/mainnet, test/testnet,
   # teratest/teratestnet); every other value, including "regtest", is used
   # as-is. Peers only see each other when they resolve to the same topic name.
   # Env: P2P_NETWORK
@@ -340,8 +344,9 @@ p2p:
     dhtMode: off
     # Env: P2P_PORT
     port: 9905
-    # teratestnet is not a key in the library's default bootstrap map, so an
-    # empty list would fall through to the public IPFS bootstrap peers.
+    # Required for network: teratestnet (see above). This is the Teranode
+    # teratestnet bootstrap. An empty list is not a Teranode list for this
+    # name; it falls through to the public IPFS bootstrap peers.
     # Env: P2P_BOOTSTRAP_PEERS (comma-separated)
     bootstrapPeers:
       - "/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech"
