@@ -38,16 +38,16 @@ name. `main` and `mainnet` do. `regtest` and a custom name do not.
 
 ## Bootstrap peers, with DHT off
 
-When `bootstrapPeers` is empty, go-teranode-p2p-client v0.3.2 looks up
-`getDefaultBootstrapPeers`. That map has three keys: `main`, `test`, and
-`stn`. The `stn` value is `/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech`,
-which does not match the `stn` topic. `teratestnet` is not a key, so an
-empty list on that network is not a Teranode bootstrap list. The topic
-aliases above do not apply here either: `main` and `mainnet` share the
-`mainnet` topic, but only the raw value `main` selects the mainnet bootstrap
-host. Do not treat the `stn` map entry as the way to join teratestnet. The
-shipped config sets the teratestnet dnsaddr explicitly. Changing the
-upstream map is a separate fix.
+When `bootstrapPeers` is empty, go-teranode-p2p-client looks up
+`getDefaultBootstrapPeers`. In v0.3.1 and in v0.3.2 the keys are `main`,
+`test`, and `stn`. The `stn` value is
+`/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech`, which does not match
+the `stn` topic, and `teratestnet` is not a key. That is an upstream typo.
+Fix it in go-teranode-p2p-client. Do not set `p2p.network` to `stn` to
+borrow the address. The topic aliases above do not apply here either:
+`main` and `mainnet` share the `mainnet` topic, but only the raw value
+`main` selects the mainnet bootstrap host. The shipped config sets the
+teratestnet dnsaddr on `p2p.msgbus.bootstrapPeers` directly.
 
 `p2p.msgbus.dhtMode` defaults to `off`. In that mode
 [go-p2p-message-bus](https://github.com/bsv-blockchain/go-p2p-message-bus)

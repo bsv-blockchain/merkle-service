@@ -345,8 +345,9 @@ p2p:
     # Env: P2P_PORT
     port: 9905
     # Required for network: teratestnet (see above). This is the Teranode
-    # teratestnet bootstrap. An empty list is not a Teranode list for this
-    # name; it falls through to the public IPFS bootstrap peers.
+    # teratestnet bootstrap. The library map files this multiaddr under "stn",
+    # which is an upstream typo — do not set network to stn to pick it up.
+    # An empty list falls through to the public IPFS bootstrap peers.
     # Env: P2P_BOOTSTRAP_PEERS (comma-separated)
     bootstrapPeers:
       - "/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech"
