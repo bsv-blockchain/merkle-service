@@ -299,8 +299,11 @@ Configuration is loaded from (highest priority first):
 | `aerospike.host`            | Aerospike connection target                                              | Required when `store.backend=aerospike`                |
 | `blobStore.url`             | Subtree blob backing store                                               | File or remote URL                                     |
 | `block.workerPoolSize`      | Worker concurrency for subtree fan-out                                   | Tune for block-processor throughput                    |
+| `p2p.network`               | P2P topic namespace                                                      | Any string the peers agree on; see below              |
 
 See [docs/deployment.md](docs/deployment.md) for the full env-var reference and [docs/sql-backend.md](docs/sql-backend.md) for running against PostgreSQL or SQLite instead of Aerospike.
+
+A closed network (regtest, local Arcade tests, or any name without an explicit bootstrap list) needs `p2p.msgbus.bootstrapPeers`. The shipped [config.yaml](config.yaml) is `teratestnet` with that list set. [docs/private-network.md](docs/private-network.md) has the recipe.
 
 <br>
 
@@ -347,7 +350,7 @@ internal/
   stump/              STUMP construction and parsing
   subtree/            subtree fetcher and worker logic
 deploy/k8s/           Kubernetes manifests
-docs/                 design / api / deployment / sql-backend docs
+docs/                 design / api / deployment / private-network / sql-backend docs
 test/scale/           large-input scale-test fixtures and runners
 tools/debug-dashboard local web UI for inspecting state
 ```
@@ -359,6 +362,7 @@ tools/debug-dashboard local web UI for inspecting state
 - [docs/design.md](docs/design.md) — Arcade integration design and transaction lifecycle (RECEIVED → SEEN → MINED → IMMUTABLE), including the per-subtree STUMP and compound-BUMP design rationale.
 - [docs/api.md](docs/api.md) — HTTP API reference.
 - [docs/deployment.md](docs/deployment.md) — full configuration and env-var reference.
+- [docs/private-network.md](docs/private-network.md) — regtest and other closed P2P networks.
 - [docs/sql-backend.md](docs/sql-backend.md) — running against PostgreSQL / SQLite.
 - [deploy/k8s/README.md](deploy/k8s/README.md) — Kubernetes topology and scaling.
 - [requirements.md](requirements.md) — original requirements and design intent.
