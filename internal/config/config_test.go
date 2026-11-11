@@ -513,6 +513,31 @@ func TestLoad_P2PMsgBusDefaults(t *testing.T) {
 	}
 }
 
+// TestLoad_ShippedConfigJoinsTeratestnet locks the repo sample: network
+// teratestnet has no entry in the library bootstrap map, so config.yaml must
+// set p2p.msgbus.bootstrapPeers or a checkout dials the public IPFS peers.
+func TestLoad_ShippedConfigJoinsTeratestnet(t *testing.T) {
+	clearConfigEnv(t)
+	path := filepath.Join("..", "..", "config.yaml")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("shipped config.yaml: %v", err)
+	}
+	t.Setenv("CONFIG_FILE", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(shipped config.yaml): %v", err)
+	}
+	if cfg.P2P.Network != "teratestnet" {
+		t.Errorf("P2P.Network: expected %q, got %q", "teratestnet", cfg.P2P.Network)
+	}
+	const teratestnetBootstrap = "/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech"
+	peers := cfg.P2P.MsgBus.BootstrapPeers
+	if len(peers) != 1 || peers[0] != teratestnetBootstrap {
+		t.Errorf("P2P.MsgBus.BootstrapPeers: expected [%q], got %#v", teratestnetBootstrap, peers)
+	}
+}
+
 func TestLoad_P2PDHTModeEnvOverride(t *testing.T) {
 	clearConfigEnv(t)
 	isolateFromRepoConfig(t)

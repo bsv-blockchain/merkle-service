@@ -8,7 +8,7 @@
 
 <a href="https://github.com/bsv-blockchain/merkle-service/releases"><img src="https://img.shields.io/github/release-pre/bsv-blockchain/merkle-service?include_prereleases&style=flat-square&logo=github&color=black" alt="Release"></a>
 <a href="https://golang.org/"><img src="https://img.shields.io/github/go-mod/go-version/bsv-blockchain/merkle-service?style=flat-square&logo=go&color=00ADD8" alt="Go Version"></a>
-<a href="https://github.com/bsv-blockchain/merkle-service/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-OpenBSV-blue?style=flat-square" alt="License"></a>
+<a href="https://github.com/bsv-blockchain/merkle-service/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
 
 <br/>
 
@@ -299,8 +299,11 @@ Configuration is loaded from (highest priority first):
 | `aerospike.host`            | Aerospike connection target                                              | Required when `store.backend=aerospike`                |
 | `blobStore.url`             | Subtree blob backing store                                               | File or remote URL                                     |
 | `block.workerPoolSize`      | Worker concurrency for subtree fan-out                                   | Tune for block-processor throughput                    |
+| `p2p.network`               | P2P topic namespace                                                      | Any string the peers agree on; see below              |
 
 See [docs/deployment.md](docs/deployment.md) for the full env-var reference and [docs/sql-backend.md](docs/sql-backend.md) for running against PostgreSQL or SQLite instead of Aerospike.
+
+A closed network (regtest, local Arcade tests, or any name without an explicit bootstrap list) needs `p2p.msgbus.bootstrapPeers`. The shipped [config.yaml](config.yaml) is `teratestnet` with that list set. [docs/private-network.md](docs/private-network.md) has the recipe.
 
 <br>
 
@@ -347,7 +350,7 @@ internal/
   stump/              STUMP construction and parsing
   subtree/            subtree fetcher and worker logic
 deploy/k8s/           Kubernetes manifests
-docs/                 design / api / deployment / sql-backend docs
+docs/                 design / api / deployment / private-network / sql-backend docs
 test/scale/           large-input scale-test fixtures and runners
 tools/debug-dashboard local web UI for inspecting state
 ```
@@ -359,6 +362,7 @@ tools/debug-dashboard local web UI for inspecting state
 - [docs/design.md](docs/design.md) — Arcade integration design and transaction lifecycle (RECEIVED → SEEN → MINED → IMMUTABLE), including the per-subtree STUMP and compound-BUMP design rationale.
 - [docs/api.md](docs/api.md) — HTTP API reference.
 - [docs/deployment.md](docs/deployment.md) — full configuration and env-var reference.
+- [docs/private-network.md](docs/private-network.md) — regtest and other closed P2P networks.
 - [docs/sql-backend.md](docs/sql-backend.md) — running against PostgreSQL / SQLite.
 - [deploy/k8s/README.md](deploy/k8s/README.md) — Kubernetes topology and scaling.
 - [requirements.md](requirements.md) — original requirements and design intent.
@@ -509,4 +513,4 @@ The most basic way to show your support is to star :star2: the project, or to ra
 
 ## 📝 License
 
-[![License](https://img.shields.io/badge/license-OpenBSV-blue?style=flat&logo=springsecurity&logoColor=white)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat&logo=springsecurity&logoColor=white)](LICENSE)
