@@ -4,8 +4,8 @@ go 1.27.3
 
 require (
 	github.com/aerospike/aerospike-client-go/v8 v8.9.0
-	github.com/bsv-blockchain/go-bt/v2 v2.7.4
-	github.com/bsv-blockchain/go-sdk v1.7.4
+	github.com/bsv-blockchain/go-bt/v2 v2.7.6
+	github.com/bsv-blockchain/go-sdk v1.7.5
 	github.com/bsv-blockchain/go-subtree v1.7.0
 	github.com/bsv-blockchain/go-teranode-p2p-client v0.3.3
 	github.com/bsv-blockchain/teranode v0.16.1-beta-txmeta-2
@@ -14,12 +14,12 @@ require (
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/spf13/viper v1.21.0
-	github.com/testcontainers/testcontainers-go v0.44.0
-	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
-	github.com/twmb/franz-go v1.22.2
-	github.com/twmb/franz-go/pkg/kadm v1.19.0
+	github.com/testcontainers/testcontainers-go v0.45.0
+	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0
+	github.com/twmb/franz-go v1.22.3
+	github.com/twmb/franz-go/pkg/kadm v1.20.0
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261022190701-123ec885bc97
-	github.com/twmb/franz-go/pkg/kmsg v1.15.0
+	github.com/twmb/franz-go/pkg/kmsg v1.15.1
 	go.opentelemetry.io/contrib/bridges/prometheus v0.72.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/otel v1.47.0
@@ -34,7 +34,7 @@ require (
 	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/time v0.16.0
-	modernc.org/sqlite v1.61.1
+	modernc.org/sqlite v1.62.0
 )
 
 require (
@@ -290,7 +290,7 @@ require (
 	k8s.io/kube-openapi v0.0.0-20260911184034-7970a1e230da // indirect
 	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
-	modernc.org/libc v1.79.1 // indirect
+	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 	sigs.k8s.io/json v0.0.0-20260909141634-11ed52e25bc5 // indirect
