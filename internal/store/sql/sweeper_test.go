@@ -146,3 +146,43 @@ func mustJSON(items []string) string {
 	b = append(b, ']')
 	return string(b)
 }
+
+// TestRegistrationStore_ReAddClearsPostMineTTL: a /watch for a txid that is
+// already registered must re-arm the registration — clear the post-mine
+// TTL the subtree processor set when it first saw the tx mined — exactly
+// as the Aerospike store does (its Put rewrites the record's expiry).
+//
+// Without it a client cannot keep watching a tx across a reorg: on mainnet
+// 973522 (2026-10-31) arcade-v2-us-1 saw its block orphaned 9 minutes after
+// the mine, but the txs were only re-mined in 973524 31 minutes after it.
+// The registrations had already expired, no STUMPs were emitted, and ~8,750
+// txs stayed MINED against the orphan. A re-/watch issued at orphan time was
+// an ON CONFLICT DO NOTHING here, so it could not have saved them.
+func TestRegistrationStore_ReAddClearsPostMineTTL(t *testing.T) {
+	db, d := newTestDB(t)
+	r := newRegistrationStore(db, d, 0)
+
+	if err := r.Add("tx-reorged", "http://cb", "tok"); err != nil {
+		t.Fatal(err)
+	}
+	// Mined: the subtree processor starts the post-mine TTL. Model the
+	// window having run out by the time the sweeper looks.
+	if err := r.BatchUpdateTTL([]string{"tx-reorged"}, -1*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	// The block is orphaned; the client re-registers to keep watching.
+	if err := r.Add("tx-reorged", "http://cb", "tok"); err != nil {
+		t.Fatal(err)
+	}
+
+	sw := newSweeper(db, d, time.Hour, time.Hour, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
+	sw.sweepOnce(context.Background())
+
+	got, err := r.Get("tx-reorged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].URL != "http://cb" || got[0].Token != "tok" {
+		t.Fatalf("a re-registered tx must still be watched after the sweep, got %v", got)
+	}
+}
