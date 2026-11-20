@@ -33,10 +33,24 @@ When `store.backend: sql` the `aerospike:` block is ignored. When
 PostgreSQL is the production target. SQLite is primarily for tests and
 lightweight single-node deployments (no network exposure, no multi-writer).
 
-Keep `_pragma=busy_timeout(...)` in a SQLite DSN. Without it, a connection
-that finds the database locked fails at once with `SQLITE_BUSY` instead of
-waiting, which also applies to the startup ping when several instances share
-one file.
+The SQL backend supplies `_pragma=busy_timeout(5000)` and `_txlock=immediate`
+for SQLite when those settings are omitted. They apply to every pooled
+connection, including connections opened after startup. Explicit DSN settings
+are preserved; PostgreSQL settings are unchanged.
+
+The timeout lets a connection wait for another writer instead of failing at
+once with `SQLITE_BUSY`. Immediate transactions acquire the write lock before
+reading, avoiding a read-to-write lock upgrade during TTL cleanup. A timeout
+alone (or enabling WAL alone) does not prevent that upgrade failure. This does
+not enable WAL, change pool sizing, or make SQLite a multi-writer database.
+Writes remain serialized, and waiting can increase request latency. Keep the
+timeout within the service's request budget when overriding it.
+
+For releases without these defaults, set the options explicitly:
+
+```text
+STORE_SQL_DSN=file:/var/lib/merkle.db?_pragma=busy_timeout(5000)&_txlock=immediate
+```
 
 ## Migrations
 
