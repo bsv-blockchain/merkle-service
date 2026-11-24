@@ -8,7 +8,7 @@ require (
 	github.com/bsv-blockchain/go-sdk v1.7.5
 	github.com/bsv-blockchain/go-subtree v1.7.0
 	github.com/bsv-blockchain/go-teranode-p2p-client v0.3.3
-	github.com/bsv-blockchain/teranode v0.16.1-beta-txmeta-2
+	github.com/bsv-blockchain/teranode v0.16.1
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/jackc/pgx/v5 v5.12.0
